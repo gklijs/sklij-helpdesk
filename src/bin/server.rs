@@ -2,10 +2,26 @@
 //! --bin server`. Not a test: boots an actual `axum` process serving
 //! both REST and GraphQL, prints every credential `alerter`/`scheduler`
 //! need as ready-to-export env vars, then serves until killed. Modelled
-//! closely on `skilj-demo/src/bin/server.rs` - trimmed of the
-//! OpenTelemetry wiring (a reference example for that isn't this
-//! crate's own concern; see that file's own doc comment if a real
-//! deployment needs it).
+//! closely on `skilj-demo/src/bin/server.rs`, including its telemetry
+//! wiring now (`skilj_helpdesk::telemetry::init` - this crate's own copy
+//! of that file's `init_telemetry`; see the module's own doc comment)
+//! rather than the earlier pass's decision to trim it out.
+//!
+//! **Optional fake traffic**: `SEED_DEMO_TRAFFIC=1` signs up a small
+//! cast of fake companies once (`sign_up_demo_companies` below), then
+//! spawns `SEED_DEMO_CONCURRENCY` (default `1`) independent workers
+//! (`run_demo_seed_loop`, driven by the pure decisions in
+//! `skilj_helpdesk::demo_seed`), each creating/assigning/resolving fake
+//! tickets against this server's own REST surface every
+//! `SEED_DEMO_INTERVAL_MS` (default `4000`) - so a dashboard pointed at
+//! this process's telemetry has something moving without a person
+//! driving curl by hand. `SEED_DEMO_CONCURRENCY` is the load dial: turn
+//! it up (or shrink the interval) for a heavier, more dashboard-visible
+//! load - each worker paces itself independently and staggers its first
+//! tick, so `concurrency` workers is roughly `concurrency`x one
+//! worker's own request rate, spread smoothly rather than bursting in
+//! lockstep. Unset (the default), nothing about this file's behaviour
+//! changes.
 //!
 //! Needs `DATABASE_URL` pointing at a real Postgres (`PORT` optionally
 //! overrides the default `8080`). Every run is safe to repeat against
@@ -46,8 +62,10 @@ use skilj_core::bootstrap::ContextCreator;
 use skilj_core::db;
 use skilj_core::event_store::{BoundedContext, BoundedContextStatus};
 use skilj_core::shared::{generate_token_id, generate_token_secret};
+use skilj_helpdesk::demo_seed::{self, Rng, SeedAction, SeedState, DEMO_COMPANIES};
 use skilj_helpdesk::helpdesk::BOUNDED_CONTEXT;
 use std::collections::HashMap;
+use std::time::Duration;
 
 // --- local JWKS/IdP shortcut - see this file's own doc comment above ---
 //
@@ -201,6 +219,13 @@ async fn shutdown_signal() {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Must be the very first thing this binary does - see
+    // skilj_helpdesk::telemetry's own doc comment on why every
+    // skilj-core/skilj-rest counter/histogram (LazyLock, first touched
+    // the first time a command/event/request actually happens) needs
+    // the global MeterProvider set before that first touch.
+    let telemetry = skilj_helpdesk::telemetry::init("skilj-helpdesk-server");
+
     let database_url = std::env::var("DATABASE_URL")
         .map_err(|_| "DATABASE_URL must be set (a real Postgres, not embedded)")?;
     let port: u16 = std::env::var("PORT")
@@ -421,9 +446,220 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         command_tokens["SignUpCompany"],
     );
 
+    // Optional fake traffic - see this file's own module doc comment.
+    // Reuses the exact CommandTokens just minted/printed above, so this
+    // is a real client of this same process's own REST surface, not a
+    // shortcut around it.
+    if std::env::var("SEED_DEMO_TRAFFIC")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+    {
+        let interval_ms: u64 = std::env::var("SEED_DEMO_INTERVAL_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(4000);
+        // The load dial: each worker paces itself at `interval_ms`, so
+        // `SEED_DEMO_CONCURRENCY` workers running at once is roughly
+        // `concurrency` times the request rate one alone would produce -
+        // turn this up (or shrink SEED_DEMO_INTERVAL_MS) to put real
+        // load through the REST surface for a dashboard to show moving.
+        let concurrency: usize = std::env::var("SEED_DEMO_CONCURRENCY")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(1);
+        println!(
+            "\nSEED_DEMO_TRAFFIC=1: starting {concurrency} fake-traffic worker(s), each every \
+             {interval_ms}ms, against http://localhost:{port} (see src/demo_seed.rs)"
+        );
+        let seed_base_url = format!("http://localhost:{port}");
+        let seed_tokens = command_tokens.clone();
+        tokio::spawn(async move {
+            sign_up_demo_companies(&seed_base_url, &seed_tokens).await;
+            for worker_index in 0..concurrency {
+                let base_url = seed_base_url.clone();
+                let tokens = seed_tokens.clone();
+                // Staggers each worker's first tick evenly across one
+                // interval, rather than every worker firing in lockstep
+                // every `interval_ms` - a smoother, more realistic load
+                // shape (one steady stream) than `concurrency` synchronised
+                // bursts would be.
+                let stagger = Duration::from_millis(interval_ms * worker_index as u64 / concurrency as u64);
+                tokio::spawn(async move {
+                    tokio::time::sleep(stagger).await;
+                    run_demo_seed_loop(worker_index, base_url, tokens, Duration::from_millis(interval_ms)).await;
+                });
+            }
+        });
+    }
+
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await?;
 
+    if let Some(telemetry) = telemetry {
+        telemetry.shutdown();
+    }
+
     Ok(())
+}
+
+// --- optional fake traffic (SEED_DEMO_TRAFFIC=1) - see this file's own
+// module doc comment; the actual decisions are src/demo_seed.rs's own
+// pure `next_action`/`apply_outcome`, this is just the I/O loop around
+// them ---
+
+/// Signs up `demo_seed::DEMO_COMPANIES` once - tolerating
+/// `already_signed_up` (the same idempotent treatment this file's own
+/// demo-Role seeding above already gets), which now matters twice over:
+/// a repeat run of `server` itself, and every `SEED_DEMO_CONCURRENCY`
+/// worker beyond the first racing to sign up the same three companies
+/// concurrently the moment this loop starts (harmless, since it's just
+/// this - see `run_demo_seed_loop`'s own doc comment for why per-worker
+/// *ticket* state doesn't get the same "just let it collide" treatment).
+async fn sign_up_demo_companies(base_url: &str, command_tokens: &HashMap<&'static str, String>) {
+    let client = reqwest::Client::new();
+    for company_id in DEMO_COMPANIES {
+        let payload = serde_json::json!({
+            "company_id": company_id,
+            "name": company_display_name(company_id),
+            "contact_email": format!("hello@{company_id}.example"),
+        });
+        match trigger_command(&client, base_url, &command_tokens["SignUpCompany"], payload).await {
+            Ok(_) => tracing::info!(company_id = %company_id, "demo-seed: signed up fake company"),
+            Err(e) => {
+                tracing::warn!(error = %e, company_id = %company_id, "demo-seed: failed to sign up fake company")
+            }
+        }
+    }
+}
+
+/// One `SEED_DEMO_CONCURRENCY` worker: fires one fake command every
+/// `interval` forever, against its own independent `demo_seed::SeedState`
+/// (`worker_index` becomes that state's own ticket_id prefix - see
+/// `SeedState::new`'s own doc comment for why two workers must never
+/// share one). Never returns; `tokio::spawn` just leaks it for the
+/// process's lifetime, the same "runs until killed" treatment
+/// `alerter`/`scheduler` already get as whole separate processes.
+async fn run_demo_seed_loop(
+    worker_index: usize,
+    base_url: String,
+    command_tokens: HashMap<&'static str, String>,
+    interval: Duration,
+) {
+    let client = reqwest::Client::new();
+    let mut state = SeedState::new(
+        DEMO_COMPANIES.iter().map(|s| s.to_string()).collect(),
+        format!("seed-ticket-w{worker_index}"),
+    );
+    let mut rng = Rng::from_clock_and_worker(worker_index);
+
+    loop {
+        tokio::time::sleep(interval).await;
+        let action = demo_seed::next_action(&state, &mut rng);
+        let (command_type_name, payload) = command_and_payload(&action);
+        match trigger_command(&client, &base_url, &command_tokens[command_type_name], payload)
+            .await
+        {
+            Ok(accepted) => {
+                demo_seed::apply_outcome(&mut state, &action, accepted);
+                tracing::info!(?action, accepted, "demo-seed: fired fake command");
+            }
+            Err(e) => tracing::warn!(error = %e, ?action, "demo-seed: request failed"),
+        }
+    }
+}
+
+/// The REST `CommandType` name (a key into `command_tokens`) and JSON
+/// payload for one `SeedAction`.
+fn command_and_payload(action: &SeedAction) -> (&'static str, serde_json::Value) {
+    match action {
+        SeedAction::CreateTicket {
+            ticket_id,
+            company_id,
+            requester_id,
+            title,
+            description,
+            priority,
+        } => (
+            "CreateTicket",
+            serde_json::json!({
+                "ticket_id": ticket_id,
+                "company_id": company_id,
+                "requester_id": requester_id,
+                "logged_by_staff_id": null,
+                "title": title,
+                "description": description,
+                "priority": priority,
+            }),
+        ),
+        SeedAction::AssignTicket { ticket_id, staff_id } => (
+            "AssignTicket",
+            serde_json::json!({ "ticket_id": ticket_id, "staff_id": staff_id }),
+        ),
+        SeedAction::ResolveTicket { ticket_id } => (
+            "ResolveTicket",
+            serde_json::json!({ "ticket_id": ticket_id }),
+        ),
+        SeedAction::RequestInfo {
+            ticket_id,
+            staff_id,
+            message,
+        } => (
+            "RequestInfoFromCustomer",
+            serde_json::json!({ "ticket_id": ticket_id, "staff_id": staff_id, "message": message }),
+        ),
+        SeedAction::CustomerResponds {
+            ticket_id,
+            requester_id,
+            message,
+        } => (
+            "CustomerRespondsToTicket",
+            serde_json::json!({ "ticket_id": ticket_id, "requester_id": requester_id, "message": message }),
+        ),
+        SeedAction::ReopenTicket { ticket_id } => (
+            "ReopenTicket",
+            serde_json::json!({ "ticket_id": ticket_id }),
+        ),
+    }
+}
+
+/// POSTs one command, the same shape every other REST client of this
+/// crate uses (`{"payload": ...}`, a `CommandToken` bearer credential) -
+/// returns `CommandTriggerResponse.accepted` (`tests/support/mod.rs`'s
+/// own `accepted()` reads the identical field). A rejected command is
+/// still a normal 200 (business rejections render as 200 - see
+/// `skilj-rest`'s own REQUEST_DURATION doc comment); `error_for_status`
+/// below only ever fires on a genuine transport/auth-level failure.
+async fn trigger_command(
+    client: &reqwest::Client,
+    base_url: &str,
+    credential: &str,
+    payload: serde_json::Value,
+) -> Result<bool, reqwest::Error> {
+    let response = client
+        .post(format!("{base_url}/v1/commands/trigger"))
+        .header("authorization", format!("Bearer {credential}"))
+        .json(&serde_json::json!({ "payload": payload }))
+        .send()
+        .await?
+        .error_for_status()?;
+    let body: serde_json::Value = response.json().await?;
+    Ok(body["accepted"].as_bool().unwrap_or(false))
+}
+
+/// `"wonka-industries"` -> `"Wonka Industries"` - purely cosmetic, for
+/// the fake `SignUpCompany.name` this loop mints once at startup.
+fn company_display_name(company_id: &str) -> String {
+    company_id
+        .split('-')
+        .map(|word| {
+            let mut chars = word.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }

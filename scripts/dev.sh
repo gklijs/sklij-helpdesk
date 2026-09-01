@@ -9,6 +9,21 @@
 # command - not a replacement for understanding them, a shortcut once
 # you do. Doesn't start `frontend/` (trunk serve) - that's a separate
 # terminal, `cd frontend && trunk serve`, same as the README says.
+#
+# Two more opt-in pieces, both env-var gated (see README.md's own
+# "Telemetry & dashboards" section for the full picture) - neither
+# changes anything about the above when unset:
+#   OTEL=1               also brings up observability/docker-compose.yml
+#                         (an OTel Collector + Prometheus + Tempo + Loki
+#                         + Grafana) and points the server at it via
+#                         OTEL_EXPORTER_OTLP_ENDPOINT; torn down in this
+#                         script's own cleanup() alongside Postgres/Dex.
+#   SEED_DEMO_TRAFFIC=1   passed straight through to `cargo run --bin
+#                         server` (it already reads this env var itself -
+#                         nothing for this script to do beyond not
+#                         stripping it) - a background loop that keeps
+#                         creating/advancing fake tickets so a dashboard
+#                         has something to show.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -16,6 +31,7 @@ cd "$ROOT"
 
 PIDS=()
 PG_DATA_DIR=""
+OTEL_COMPOSE_STARTED=0
 
 cleanup() {
     echo
@@ -35,8 +51,23 @@ cleanup() {
     if [ -n "$PG_DATA_DIR" ] && command -v pg_ctl >/dev/null 2>&1; then
         pg_ctl -D "$PG_DATA_DIR" stop -m fast >/dev/null 2>&1 || true
     fi
+    if [ "$OTEL_COMPOSE_STARTED" = "1" ]; then
+        echo "dev.sh: stopping the observability stack (OTEL=1)..."
+        docker compose -f "$ROOT/observability/docker-compose.yml" down >/dev/null 2>&1 || true
+    fi
 }
 trap cleanup EXIT INT TERM
+
+# --- observability stack: only if OTEL=1 - see this file's own header
+#     comment; docker-compose.yml's own header comment has the full
+#     rundown of what this brings up ---
+if [ "${OTEL:-}" = "1" ]; then
+    echo "dev.sh: OTEL=1 - starting the observability stack (observability/docker-compose.yml)..."
+    docker compose -f "$ROOT/observability/docker-compose.yml" up -d
+    OTEL_COMPOSE_STARTED=1
+    export OTEL_EXPORTER_OTLP_ENDPOINT="http://localhost:4318"
+    echo "dev.sh: Grafana at http://localhost:3000 once the stack finishes starting"
+fi
 
 # --- Postgres: use DATABASE_URL if you've already set one, otherwise
 #     start a throwaway instance for this run only ---

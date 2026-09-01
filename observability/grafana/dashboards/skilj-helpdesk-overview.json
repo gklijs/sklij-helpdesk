@@ -1,0 +1,196 @@
+{
+  "uid": "skilj-helpdesk-overview",
+  "title": "skilj-helpdesk overview",
+  "description": "Auto-provisioned - see observability/README.md. PromQL against the OTel Collector's Prometheus exporter; metric names are skilj-core/skilj-rest/skilj's own OTel instruments (skilj.commands.processed, skilj.events.appended, http.server.request.duration, skilj.background_task.*), normalised dots-to-underscores by that exporter.",
+  "tags": ["skilj-helpdesk"],
+  "timezone": "browser",
+  "editable": true,
+  "refresh": "5s",
+  "time": { "from": "now-15m", "to": "now" },
+  "schemaVersion": 39,
+  "version": 1,
+  "panels": [
+    { "id": 1, "type": "row", "title": "Overview", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 } },
+    {
+      "id": 2, "type": "stat", "title": "Commands / min",
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "skilj-prometheus" },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "skilj-prometheus" },
+          "expr": "sum(rate(skilj_commands_processed_total[1m])) * 60", "refId": "A" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short", "decimals": 1 }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "graphMode": "area" }
+    },
+    {
+      "id": 3, "type": "stat", "title": "Command rejection rate",
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "skilj-prometheus" },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "skilj-prometheus" },
+          "expr": "100 * sum(rate(skilj_commands_processed_total{outcome=\"rejected\"}[5m])) / clamp_min(sum(rate(skilj_commands_processed_total[5m])), 1e-9)",
+          "refId": "A" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent", "decimals": 1, "min": 0, "max": 100,
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "green", "value": null },
+            { "color": "yellow", "value": 15 },
+            { "color": "red", "value": 40 }
+          ]}
+        }, "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "graphMode": "area" }
+    },
+    {
+      "id": 4, "type": "stat", "title": "REST requests / min",
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "skilj-prometheus" },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "skilj-prometheus" },
+          "expr": "sum(rate(http_server_request_duration_seconds_count[1m])) * 60", "refId": "A" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short", "decimals": 1 }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "graphMode": "area" }
+    },
+    {
+      "id": 5, "type": "stat", "title": "REST p95 latency",
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 1 },
+      "datasource": { "type": "prometheus", "uid": "skilj-prometheus" },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "skilj-prometheus" },
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(http_server_request_duration_seconds_bucket[5m])))",
+          "refId": "A" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s", "decimals": 3,
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "green", "value": null },
+            { "color": "yellow", "value": 0.2 },
+            { "color": "red", "value": 1 }
+          ]}
+        }, "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "graphMode": "area" }
+    },
+
+    { "id": 10, "type": "row", "title": "Commands (skilj.commands.processed)", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 5 } },
+    {
+      "id": 11, "type": "timeseries", "title": "Command throughput by outcome",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
+      "datasource": { "type": "prometheus", "uid": "skilj-prometheus" },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "skilj-prometheus" },
+          "expr": "sum by (outcome) (rate(skilj_commands_processed_total[1m]))",
+          "legendFormat": "{{outcome}}", "refId": "A" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "fillOpacity": 20, "stacking": { "mode": "normal" } } }, "overrides": [
+        { "matcher": { "id": "byName", "options": "rejected" }, "properties": [ { "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } } ] },
+        { "matcher": { "id": "byName", "options": "accepted" }, "properties": [ { "id": "color", "value": { "mode": "fixed", "fixedColor": "green" } } ] }
+      ] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
+    },
+    {
+      "id": 12, "type": "bargauge", "title": "Top command types (5m rate)",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
+      "datasource": { "type": "prometheus", "uid": "skilj-prometheus" },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "skilj-prometheus" },
+          "expr": "topk(8, sum by (command_type) (rate(skilj_commands_processed_total[5m])))",
+          "legendFormat": "{{command_type}}", "instant": true, "refId": "A" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "reqps", "min": 0 }, "overrides": [] },
+      "options": { "orientation": "horizontal", "displayMode": "gradient", "showUnfilled": true, "reduceOptions": { "calcs": ["lastNotNull"] } }
+    },
+
+    { "id": 20, "type": "row", "title": "Events (skilj.events.appended)", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 14 } },
+    {
+      "id": 21, "type": "timeseries", "title": "Events appended by type",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 15 },
+      "datasource": { "type": "prometheus", "uid": "skilj-prometheus" },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "skilj-prometheus" },
+          "expr": "sum by (event_type) (rate(skilj_events_appended_total[1m]))",
+          "legendFormat": "{{event_type}}", "refId": "A" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "fillOpacity": 15, "stacking": { "mode": "normal" } } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
+    },
+
+    { "id": 30, "type": "row", "title": "REST API (http.server.request.duration)", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 23 } },
+    {
+      "id": 31, "type": "timeseries", "title": "Request rate by route",
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 24 },
+      "datasource": { "type": "prometheus", "uid": "skilj-prometheus" },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "skilj-prometheus" },
+          "expr": "sum by (http_route) (rate(http_server_request_duration_seconds_count[1m]))",
+          "legendFormat": "{{http_route}}", "refId": "A" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
+    },
+    {
+      "id": 32, "type": "timeseries", "title": "Latency percentiles",
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 24 },
+      "datasource": { "type": "prometheus", "uid": "skilj-prometheus" },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "skilj-prometheus" },
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(http_server_request_duration_seconds_bucket[5m])))",
+          "legendFormat": "p50", "refId": "A" },
+        { "datasource": { "type": "prometheus", "uid": "skilj-prometheus" },
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(http_server_request_duration_seconds_bucket[5m])))",
+          "legendFormat": "p95", "refId": "B" },
+        { "datasource": { "type": "prometheus", "uid": "skilj-prometheus" },
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(http_server_request_duration_seconds_bucket[5m])))",
+          "legendFormat": "p99", "refId": "C" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
+    },
+    {
+      "id": 33, "type": "timeseries", "title": "5xx rate",
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 24 },
+      "datasource": { "type": "prometheus", "uid": "skilj-prometheus" },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "skilj-prometheus" },
+          "expr": "sum(rate(http_server_request_duration_seconds_count{http_response_status_code=~\"5..\"}[5m]))",
+          "legendFormat": "5xx", "refId": "A" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "reqps", "custom": { "fillOpacity": 15 },
+        "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 0.01 } ] },
+        "color": { "mode": "thresholds" } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
+    },
+
+    { "id": 40, "type": "row", "title": "skilj background tasks (reconciliation, scheduling)", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 32 } },
+    {
+      "id": 41, "type": "timeseries", "title": "Tick duration (p95)",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 33 },
+      "datasource": { "type": "prometheus", "uid": "skilj-prometheus" },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "skilj-prometheus" },
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(skilj_background_task_tick_duration_seconds_bucket[5m])))",
+          "legendFormat": "p95", "refId": "A" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
+    },
+    {
+      "id": 42, "type": "timeseries", "title": "Background task errors",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 33 },
+      "datasource": { "type": "prometheus", "uid": "skilj-prometheus" },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "skilj-prometheus" },
+          "expr": "sum(rate(skilj_background_task_errors_total[5m]))",
+          "legendFormat": "errors/s", "refId": "A" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short",
+        "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 0.01 } ] },
+        "color": { "mode": "thresholds" } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
+    }
+  ]
+}

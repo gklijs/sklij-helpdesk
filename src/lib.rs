@@ -4,8 +4,10 @@
 //! implementation covers versus defers.
 
 pub mod alerting;
+pub mod demo_seed;
 pub mod helpdesk;
 pub mod scheduling;
+pub mod telemetry;
 
 /// Registers the helpdesk bounded context - see `skilj-demo`'s own
 /// `register()` (it has the same one-liner shape) for why this needs no

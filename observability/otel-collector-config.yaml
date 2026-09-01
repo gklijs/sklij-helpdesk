@@ -1,0 +1,54 @@
+# Receives all three OTel signals over OTLP from whichever of
+# skilj-helpdesk's three binaries have OTEL_EXPORTER_OTLP_ENDPOINT set
+# (skilj_helpdesk::telemetry::init - see that module's own doc comment),
+# and fans each signal out to its own backend: traces to Tempo, logs to
+# Loki (both over OTLP again - Tempo/Loki are native OTLP receivers as
+# of the versions pinned in docker-compose.yml), metrics via this
+# collector's own Prometheus exporter (scraped by prometheus.yml, not
+# remote-written - simpler for a local stack with exactly one consumer).
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch: {}
+
+exporters:
+  otlp/tempo:
+    endpoint: tempo:4317
+    tls:
+      insecure: true
+
+  otlphttp/loki:
+    endpoint: http://loki:3100/otlp
+
+  prometheus:
+    endpoint: 0.0.0.0:8889
+    # skilj-core/skilj-rest/skilj's own instrument names already read as
+    # OTel semantic-convention dotted names (skilj.commands.processed,
+    # http.server.request.duration, ...) - this is the exporter's
+    # standard dots-to-underscores + _total/_seconds suffixing, which is
+    # what the dashboard's own PromQL queries assume (see
+    # grafana/dashboards/skilj-helpdesk-overview.json's own comment).
+    resource_to_telemetry_conversion:
+      enabled: true
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlp/tempo]
+    logs:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlphttp/loki]
+    metrics:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [prometheus]

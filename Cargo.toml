@@ -67,9 +67,13 @@ chrono = { version = "0.4", features = ["serde"] }
 schemars = { version = "0.8", features = ["chrono", "uuid1"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# src/bin/alerter.rs only - the separately-deployable alerting
-# consumer's own HTTP client, talking to a running skilj server's REST
-# surface. Nothing else in this crate needs it.
+# src/bin/alerter.rs's own HTTP client, talking to a running skilj
+# server's REST surface - and, second use, src/bin/server.rs's own
+# optional demo-seed loop (SEED_DEMO_TRAFFIC=1), which is deliberately
+# a real REST client of its own process rather than an in-process
+# shortcut, so the fake traffic it generates shows up in the exact same
+# HTTP-level telemetry (skilj-rest's REQUEST_DURATION, trace spans)
+# real traffic would.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 # src/bin/server.rs only - its own local JWKS/JWT shortcut, same
 # reasoning as skilj-demo/src/bin/server.rs's own copy (its doc comment
@@ -83,6 +87,22 @@ jsonwebtoken = "9"
 # Found the hard way: a real browser (frontend/, a different origin
 # from the server) blocks the response outright without this.
 tower-http = { version = "0.6", features = ["cors"] }
+# Telemetry (src/telemetry.rs, used by all three binaries) - versions
+# pinned to match ../skilj/Cargo.toml exactly. skilj-core/skilj-rest/
+# skilj only ever call opentelemetry::global::meter()/global tracer -
+# they never install a subscriber or MeterProvider themselves (see
+# docs/architecture.md's tracing section) - init_telemetry below is
+# this crate's own copy of skilj-demo/src/bin/server.rs's reference
+# wiring that actually does. A version mismatch against skilj-core's
+# own opentelemetry dependency would make global::meter() resolve to a
+# different, incompatible API, so these can't float independently.
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+opentelemetry = "0.32"
+opentelemetry_sdk = "0.32"
+opentelemetry-otlp = { version = "0.32", default-features = false, features = ["http-proto", "reqwest-blocking-client", "trace", "logs", "metrics"] }
+tracing-opentelemetry = "0.33"
+opentelemetry-appender-tracing = "0.32"
 
 [dev-dependencies]
 postgresql_embedded = "0.21.0"

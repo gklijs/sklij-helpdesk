@@ -44,6 +44,10 @@
 //! vars; this pass keeps the plain-env-var style `alerter.rs` already
 //! established rather than introducing a second configuration
 //! convention for one binary.
+//!
+//! Telemetry: `skilj_helpdesk::telemetry::init` as service
+//! `"skilj-helpdesk-scheduler"` - see `alerter.rs`'s own doc comment for
+//! why `_telemetry` below is just held, not explicitly shut down.
 
 use chrono::{DateTime, Utc};
 use skilj_helpdesk::scheduling::{mock_charge_succeeds, should_auto_close, trial_period_has_ended};
@@ -109,6 +113,8 @@ struct State {
 
 #[tokio::main]
 async fn main() {
+    let _telemetry = skilj_helpdesk::telemetry::init("skilj-helpdesk-scheduler");
+
     let config = Config::from_env();
     let client = reqwest::Client::new();
     let mut state = State::default();
@@ -117,6 +123,7 @@ async fn main() {
     loop {
         if let Err(e) = tick(&client, &config, &mut state).await {
             eprintln!("scheduler: tick failed, will retry: {e}");
+            tracing::warn!(error = %e, "scheduler: tick failed, will retry");
         }
         tokio::time::sleep(POLL_INTERVAL).await;
     }
@@ -186,9 +193,13 @@ async fn tick(
         match submit_command(client, &config.base_url, token, serde_json::json!({ "company_id": company_id })).await {
             Ok(()) => {
                 println!("scheduler: {event_type} for company {company_id}");
+                tracing::info!(company_id = %company_id, %event_type, "scheduler: submitted command");
                 state.trialing_companies.remove(&company_id);
             }
-            Err(e) => eprintln!("scheduler: {event_type} for company {company_id} failed: {e}"),
+            Err(e) => {
+                eprintln!("scheduler: {event_type} for company {company_id} failed: {e}");
+                tracing::warn!(error = %e, company_id = %company_id, %event_type, "scheduler: command rejected/failed");
+            }
         }
     }
 
@@ -210,9 +221,13 @@ async fn tick(
         {
             Ok(()) => {
                 println!("scheduler: CloseTicket for ticket {ticket_id}");
+                tracing::info!(ticket_id = %ticket_id, "scheduler: submitted CloseTicket");
                 state.resolved_tickets.remove(&ticket_id);
             }
-            Err(e) => eprintln!("scheduler: CloseTicket for ticket {ticket_id} failed: {e}"),
+            Err(e) => {
+                eprintln!("scheduler: CloseTicket for ticket {ticket_id} failed: {e}");
+                tracing::warn!(error = %e, ticket_id = %ticket_id, "scheduler: CloseTicket rejected/failed");
+            }
         }
     }
 

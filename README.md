@@ -38,12 +38,15 @@ simplifications (see "What's not built" below).
 | `specs/skilj-helpdesk.allium` | The domain spec |
 | `src/helpdesk.rs` | Every `EventType`/`CommandType`/`Projection` — the actual domain logic |
 | `src/alerting.rs`, `src/scheduling.rs` | Pure decision logic the two background binaries drive |
+| `src/telemetry.rs` | Shared OTel wiring all three binaries call into (see "Telemetry & dashboards" below) |
+| `src/demo_seed.rs` | Pure decision logic behind the optional fake-traffic loop (`SEED_DEMO_TRAFFIC=1`) |
 | `src/bin/server.rs` | The runnable server (REST + GraphQL) |
 | `src/bin/alerter.rs` | Consumes the event feed, pages a lead on urgent/overdue tickets |
 | `src/bin/scheduler.rs` | Consumes the event feed, converts/expires trials and auto-closes tickets |
 | `tests/` | Integration tests (real HTTP, real Postgres) — split into several files by concern; see `tests/company.rs`'s own doc comment for why |
 | `dex/config.yaml` | The real OIDC provider's config (two demo logins) |
 | `frontend/` | The Leptos (WASM) web app |
+| `observability/` | Local Grafana/Prometheus/Tempo/Loki stack + provisioned dashboard (see below) |
 
 ## Running it
 
@@ -105,6 +108,83 @@ Postgres; DB-dependent ones skip cleanly if neither is reachable.
 `cd frontend && cargo test --target wasm32-unknown-unknown` isn't a
 thing (no frontend unit tests this pass) — it's verified by actually
 running it (see below).
+
+## Telemetry & dashboards
+
+`skilj-core`/`skilj-rest`/`skilj` already emit real `tracing` spans and
+OTel metrics throughout (command outcomes, event throughput, REST
+request latency, background-task health) — all three of this project's
+binaries now wire that up for real (`src/telemetry.rs`, the same
+reference pattern `skilj-demo/src/bin/server.rs` establishes), and
+`observability/` is a local Grafana stack to actually look at it, plus
+an optional fake-traffic generator so there's something moving.
+
+**1. Bring up the stack** (an OTel Collector + Prometheus + Tempo + Loki
++ Grafana, entirely separate from the Postgres/Dex steps above — see
+`observability/docker-compose.yml`'s own doc comment):
+
+```sh
+docker compose -f observability/docker-compose.yml up -d
+```
+
+**2. Point the binaries at it** — `OTEL_EXPORTER_OTLP_ENDPOINT` unset
+(the default) still works exactly as before, console-only:
+
+```sh
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318
+cargo run --bin server      # and, in their own terminals, alerter/scheduler
+```
+
+**3. Open Grafana** at <http://localhost:3000> (no login needed locally
+— anonymous admin, see the compose file) — the "skilj-helpdesk overview"
+dashboard is already there, auto-provisioned, refreshing every 5s.
+Traces and logs are in Grafana's own Explore view against the Tempo/Loki
+datasources (also auto-provisioned, cross-linked from a trace to its own
+logs).
+
+**4. Optionally, generate fake traffic** so the dashboard actually has
+something to show without driving curl by hand — `SEED_DEMO_TRAFFIC=1`
+on `server` spawns a background loop (`src/demo_seed.rs`) that signs up
+a small cast of fake companies (`wonka-industries`, `stark-labs`,
+`hooli` — distinct from this README's own `acme` walkthrough company)
+and keeps creating/assigning/resolving fake tickets against this same
+server's own REST surface, occasionally urgent (so `alerter` has
+something to page on) and occasionally a deliberately invalid
+transition (so the dashboard's rejection-rate panel isn't always zero):
+
+```sh
+SEED_DEMO_TRAFFIC=1 cargo run --bin server
+# SEED_DEMO_INTERVAL_MS=... to change the pace (default 4000)
+```
+
+**Want more load?** `SEED_DEMO_CONCURRENCY=N` runs `N` independent
+fake-traffic workers instead of one, each pacing itself at
+`SEED_DEMO_INTERVAL_MS` — roughly `N`× the request rate, spread smoothly
+rather than bursting in lockstep (each worker staggers its own first
+tick). Turn this up when you actually want the dashboard's rate/latency
+panels moving hard, e.g.:
+
+```sh
+SEED_DEMO_TRAFFIC=1 SEED_DEMO_CONCURRENCY=10 SEED_DEMO_INTERVAL_MS=200 cargo run --bin server
+```
+
+Run `scheduler` alongside it with short deadlines
+(`TRIAL_DURATION_DAYS=0 AUTO_CLOSE_AFTER_DAYS=0 cargo run --bin
+scheduler` — both already-supported env vars, just unused until now) to
+see trial-conversion and auto-close traffic immediately too, instead of
+after real days.
+
+**All in one command**: `scripts/dev.sh` does steps 1-2 for you when
+`OTEL=1` is set, and passes `SEED_DEMO_TRAFFIC` straight through:
+
+```sh
+OTEL=1 SEED_DEMO_TRAFFIC=1 scripts/dev.sh
+```
+
+Tear the observability stack down with
+`docker compose -f observability/docker-compose.yml down -v` (or just
+Ctrl+C `dev.sh`, if that's what started it) — nothing in it persists on
+purpose.
 
 ## What's not built
 

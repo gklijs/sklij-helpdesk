@@ -1,0 +1,32 @@
+# Auto-provisioned on Grafana startup - no manual "Add data source"
+# step. Fixed `uid`s so grafana/dashboards/skilj-helpdesk-overview.json
+# can reference them directly.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    uid: skilj-prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+
+  - name: Tempo
+    type: tempo
+    uid: skilj-tempo
+    access: proxy
+    url: http://tempo:3200
+    jsonData:
+      tracesToLogsV2:
+        datasourceUid: skilj-loki
+        spanStartTimeShift: "-1m"
+        spanEndTimeShift: "1m"
+        filterByTraceID: true
+      serviceMap:
+        datasourceUid: skilj-prometheus
+
+  - name: Loki
+    type: loki
+    uid: skilj-loki
+    access: proxy
+    url: http://loki:3100

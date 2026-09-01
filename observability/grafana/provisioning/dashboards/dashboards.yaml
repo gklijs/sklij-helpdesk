@@ -1,0 +1,14 @@
+# Auto-loads every dashboard JSON in ../../dashboards (mounted at
+# /var/lib/grafana/dashboards in the grafana container - see
+# docker-compose.yml) - no manual import step.
+apiVersion: 1
+
+providers:
+  - name: skilj-helpdesk
+    orgId: 1
+    folder: "skilj-helpdesk"
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    options:
+      path: /var/lib/grafana/dashboards

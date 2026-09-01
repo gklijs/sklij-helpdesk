@@ -32,6 +32,13 @@
 //! "the alerting service's concern, not this spec's". Swap
 //! `send_alert` below for a real integration; nothing else in this
 //! file needs to change.
+//!
+//! Telemetry: `skilj_helpdesk::telemetry::init` (see that module's own
+//! doc comment) as service `"skilj-helpdesk-alerter"` - same OTLP
+//! opt-in as `server.rs`. This binary already loops forever with no
+//! graceful-shutdown path, so `_telemetry` below is just kept alive for
+//! `main`'s own lifetime rather than explicitly torn down; the OTLP
+//! batch exporters still flush periodically on their own.
 
 use skilj_helpdesk::alerting::evaluate_ticket_created;
 use skilj_helpdesk::helpdesk::TicketCreatedPayload;
@@ -41,6 +48,8 @@ const POLL_INTERVAL: Duration = Duration::from_secs(5);
 
 #[tokio::main]
 async fn main() {
+    let _telemetry = skilj_helpdesk::telemetry::init("skilj-helpdesk-alerter");
+
     let base_url =
         std::env::var("SKILJ_BASE_URL").unwrap_or_else(|_| "http://localhost:3000".to_string());
     let token = std::env::var("TICKET_CREATED_TOKEN").unwrap_or_else(|_| {
@@ -54,6 +63,7 @@ async fn main() {
     loop {
         if let Err(e) = poll_once(&client, &base_url, &token).await {
             eprintln!("alerter: poll failed, will retry: {e}");
+            tracing::warn!(error = %e, "alerter: poll failed, will retry");
         }
         tokio::time::sleep(POLL_INTERVAL).await;
     }
@@ -97,6 +107,12 @@ fn send_alert(alert: &skilj_helpdesk::alerting::Alert) {
     println!(
         "ALERT [{:?}]: ticket {} (company {}) needs a lead's attention",
         alert.reason, alert.ticket_id, alert.company_id
+    );
+    tracing::info!(
+        reason = ?alert.reason,
+        ticket_id = %alert.ticket_id,
+        company_id = %alert.company_id,
+        "alerter: paged a lead"
     );
 }
 
