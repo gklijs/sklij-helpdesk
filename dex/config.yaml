@@ -1,0 +1,63 @@
+# Real, self-hosted OIDC provider for skilj-helpdesk - see
+# src/bin/server.rs's own doc comment for why this replaced the local
+# JWKS/JWT shortcut every other skilj server (including this one, until
+# now) uses for `cargo run`. Not part of the Rust workspace - Dex is a
+# separate Go binary, built once from source (this sandbox had no
+# prebuilt release binary and no Docker - see the project notes if
+# rebuilding: `go build -o dex ./cmd/dex` against a `git clone --depth 1
+# --branch v2.45.1 https://github.com/dexidp/dex.git` checkout).
+#
+# Run it with: dex serve dex/config.yaml
+#
+# In-memory storage - nothing here persists across restarts, which is
+# the right default for a showcase (every server.rs run already mints
+# its own fresh Role/tokens the same way).
+
+issuer: http://127.0.0.1:5556/dex
+
+storage:
+  type: memory
+
+web:
+  http: 127.0.0.1:5556
+  # The frontend's own PKCE token exchange (frontend/src/pages/callback.rs)
+  # is a real cross-origin browser fetch - trunk's dev server (127.0.0.1:8081)
+  # calling Dex (127.0.0.1:5556) directly, no backend proxy. Found the
+  # hard way, over a real headless-browser run: without this, Dex's
+  # /token response carries no Access-Control-Allow-Origin header and
+  # the browser blocks it outright (verified via curl already having
+  # worked fine - curl doesn't enforce CORS at all, only browsers do).
+  allowedOrigins:
+    - "http://127.0.0.1:8081"
+
+# The Leptos frontend (trunk's own dev server, default port 8081 - see
+# frontend/Trunk.toml) as a public client: no secret, since a WASM SPA
+# can't keep one - Authorization Code + PKCE only.
+staticClients:
+  - id: skilj-helpdesk-frontend
+    redirectURIs:
+      - "http://127.0.0.1:8081/callback"
+    name: "SkilJ Helpdesk"
+    public: true
+
+# Real login, real password hashes (bcrypt, cost 10) - not a shortcut.
+# Two demo identities, one per side of the app: `userID` becomes the
+# OIDC `sub` claim, and is exactly what server.rs registers as this
+# session's skilj `Role.external_subject` (see that file's own
+# `DEMO_IDENTITIES`-adjacent notes) - so logging in as one of these two
+# accounts is what makes the frontend show the customer view vs. the
+# staff view.
+enablePasswordDB: true
+staticPasswords:
+  - email: "customer@acme.example"
+    username: "customer-demo"
+    userID: "customer-demo"
+    name: "Demo Customer"
+    # bcrypt hash of "customer-demo-pw"
+    hash: "$2a$10$y0iYuoff5tgINDYpr8xi/OMIGdEYXmOnjAERcY85P.J5ZNfJcUmyS"
+  - email: "lead@acme.example"
+    username: "staff-lead-demo"
+    userID: "staff-lead-demo"
+    name: "Demo Support Lead"
+    # bcrypt hash of "staff-demo-pw"
+    hash: "$2a$10$IidJt9AMe.JmJGEjsbTK7uOArm5kcW7xJDsCzUhXvFrAuQ8LGkoAy"

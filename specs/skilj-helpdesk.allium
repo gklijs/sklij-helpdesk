@@ -1,0 +1,420 @@
+-- allium: 3
+-- skilj-helpdesk.allium
+
+-- Scope: SkilJ Helpdesk, a showcase SaaS application built on the SkilJ
+--   library (see skilj.allium in the skilj repo for the platform this
+--   sits on top of). A company signs up for a one-month free trial, then
+--   must start paying to keep using the product. Once onboarded, the
+--   company's staff can raise, prioritise, and work through support
+--   tickets, with the full event history visible in a web UI, and staff
+--   holding a given role get alerted about tickets that aren't being
+--   handled.
+-- Includes:
+--   - Company signup and the free-trial-to-paid lifecycle
+--   - Provisioning a company as its own SkilJ tenant (bounded context),
+--     via SkilJ's existing template/tenant mechanism
+--   - Ticket creation, priority, and the states a ticket moves through
+--     on the way to being handled
+--   - Alerting staff with a given role about tickets that need attention
+--   - Full ticket/event history, browsable in a UI, via SkilJ's own
+--     GraphQL surface (SkilJ already specifies that surface; this spec
+--     only says what history must be visible, not the wire contract)
+-- Excludes:
+--   - Real payment processing: mocked, since this is a showcase, not a
+--     real billing product. Modelled as a black box (see
+--     PaymentGateway.charge in TrialPeriodEnds/CompanySubscribes below);
+--     the actual charge outcome is not this spec's concern beyond
+--     "succeeded" or "failed"
+--   - UI visual design, branding, layout: presentation-level, not domain
+--     behaviour
+--   - SkilJ's own library guarantees (bounded-context templating,
+--     RoleAccessMapping, event subscriptions/REST tokens, encryption):
+--     assumed as given, not re-specified here. See Dependencies.
+--   - The specific channel a person is alerted through (email, Slack,
+--     etc.): the alerting service's concern, not this spec's
+--   - Ongoing/recurring billing cycles beyond the single trial-to-paid
+--     transition: once a company is active, this showcase doesn't model
+--     further charge attempts or subscription lapses from non-payment -
+--     a deliberate simplification, not an oversight (see Company.status)
+-- Dependencies: This spec builds on concepts defined in skilj.allium -
+--   BoundedContext (a company is provisioned as a tenant of a
+--   "helpdesk" template context), Role / RoleAccessMapping (staff
+--   identity and per-company access), and the REST event-read surface
+--   (EventReadToken, GET /v1/events/consume) that a separately
+--   deployable alerting service consumes rather than being part of
+--   SkilJ core itself - see the design note below.
+
+-- Design note (resolved, not an open question): whether alerting needs
+-- new SkilJ platform functionality, or can be built as a plain consumer
+-- of what SkilJ already exposes.
+--   Checked against skilj.allium and docs/architecture.md 7.4: SkilJ
+--   already offers a server-tracked, auto-advancing REST event feed
+--   (GET /v1/events/consume?mode=auto, backed by a per-token EventReadToken)
+--   explicitly meant for "a stateless worker ... simplest to use,
+--   occasional missed events on crash is acceptable" - exactly the
+--   alerting service's shape. No change to SkilJ itself is needed: the
+--   alerting service is an ordinary separately-deployable unit that
+--   holds an EventReadToken scoped to the ticket bounded context's
+--   event types and reacts to the events it reads.
+--   One real gap this surfaces: SkilJ's own Role deliberately carries no
+--   contact information (id and external_subject only, kept free of
+--   PII by design) - so "alert everyone with role X" needs a
+--   helpdesk-domain concept of who holds that role and how to reach
+--   them; SkilJ's Role/RoleAccessMapping only answers "may this JWT
+--   subject act here," not "where do we send a message." That's
+--   StaffMember below, not a SkilJ concept.
+
+config {
+    trial_duration: Duration = 1.month
+
+    -- A ticket nobody has picked up in this long is overdue - see
+    -- TicketBecomesOverdue. Common industry default (e.g. Zendesk,
+    -- HelpDesk.com priority-tier guidance); tune per priority level in
+    -- a later pass if a single flat threshold proves too coarse.
+    unhandled_alert_after: Duration = 4.hours
+
+    -- A resolved ticket nobody reopened auto-closes after this long -
+    -- standard helpdesk convention (Zendesk, Freshdesk).
+    auto_close_after: Duration = 7.days
+}
+
+-- Cross-spec import, resolved: skilj.allium lives in a sibling repo
+-- checked out alongside this one (../skilj relative to this project's
+-- root). Local relative-path `use` per the language reference, not a
+-- pinned remote coordinate - skilj isn't published anywhere with a
+-- stable git-SHA coordinate, and it's developed in lockstep with this
+-- app rather than versioned independently, so that's the right choice
+-- here, not a placeholder. Because of it, checking this spec needs both
+-- files in the check set:
+--   allium check specs/skilj-helpdesk.allium ../skilj/specs/skilj.allium
+use "../../skilj/specs/skilj.allium" as skilj
+
+entity Company {
+    name: String
+    contact_email: String
+    status: trialing | active | expired
+    trial_started_at: Timestamp
+
+    -- Provisioned the moment the company signs up (resolved below) -
+    -- one tenant per company, for the lifetime of the company.
+    tenant: skilj/BoundedContext
+
+    tickets: Ticket with company = this
+
+    -- Resolved: expiry is a soft, reversible restriction, not a
+    -- cutoff. Creating new tickets is the only thing disallowed while
+    -- expired (enforced as a requires-guard on Ticket's creation rules
+    -- below) - everything else, including working existing tickets to
+    -- resolution, stays available. Existing data stays visible and
+    -- browsable regardless of status either way; a UI banner
+    -- prompting re-subscription is a presentation concern, out of
+    -- scope here. A company can return and pay at any later time to
+    -- become active again - there is no point of no return.
+    transitions status {
+        trialing -> active
+        trialing -> expired
+        expired -> active
+        terminal: active   -- this showcase doesn't model ongoing/recurring
+                            -- billing beyond the initial trial-to-paid
+                            -- transition - see Excludes
+    }
+}
+
+-- Resolved: signup is fully automatic. The helpdesk's own backend holds
+-- superadmin-level credentials and provisions the tenant itself the
+-- moment the form is submitted - no manual/admin approval step.
+rule CompanySignsUp {
+    when: SignUpCompany(name, contact_email)
+    let tenant = skilj/CreateBoundedContextFromTemplate(template: "helpdesk")
+        -- Black box, same register as PaymentGateway.charge below: this
+        -- app's own backend calls skilj's own rule of that name, with
+        -- superadmin authority, per the resolved design above. What that
+        -- rule itself requires/guarantees is skilj.allium's concern, not
+        -- re-specified here.
+    ensures: Company.created(
+        name: name,
+        contact_email: contact_email,
+        status: trialing,
+        trial_started_at: now,
+        tenant: tenant
+    )
+}
+
+rule TrialPeriodEnds {
+    when: company: Company.trial_started_at + config.trial_duration <= now
+    requires: company.status = trialing
+    let charged = PaymentGateway.charge(company)   -- mocked: this is a showcase,
+                                                    -- not a real billing integration
+    ensures:
+        if charged.succeeded:
+            company.status = active
+        else:
+            company.status = expired
+}
+
+-- Resolved: a company that lapsed (or never converted) can subscribe at
+-- any later point and regain full access immediately - no re-approval,
+-- symmetric with signup itself being self-service.
+rule CompanySubscribes {
+    when: Subscribe(company)
+    requires: company.status = expired
+    let charged = PaymentGateway.charge(company)
+    ensures:
+        if charged.succeeded:
+            company.status = active
+}
+
+-- Ticket system. Shaped after standard helpdesk convention (Zendesk,
+-- Freshdesk, HelpDesk.com) rather than asked field-by-field: an
+-- Open/In Progress/Pending/Resolved/Closed lifecycle and a four-tier
+-- Low/Medium/High/Urgent priority scale are close to industry-universal,
+-- so this is a draft to react to, not a series of further questions.
+
+-- Every logged-in identity here is a skilj Role scoped to this specific
+-- company's tenant (via RoleAccessMapping) - see the Dependencies note
+-- above. Customer and StaffMember are kept as separate entities rather
+-- than one "Person with a role" because they sit on opposite sides of
+-- the surface boundary (customer portal vs. agent dashboard) and only
+-- StaffMember carries a role relevant to alerting.
+
+entity Customer {
+    company: Company
+    external_subject: String       -- the IdP subject this identity is bound to (see skilj.allium's Role)
+    contact_email: String
+}
+
+entity StaffMember {
+    company: Company
+    external_subject: String
+    contact_email: String
+
+    -- "A certain role" resolved as a fixed two-tier split: not every
+    -- agent gets paged for an overdue/urgent ticket, only a lead/on-call
+    -- does (see TicketBecomesOverdue). A per-company configurable role
+    -- set is more flexible but adds real modelling weight (who defines
+    -- the set, per company or globally) for a showcase - deferred, not
+    -- forgotten, if it turns out two tiers is too rigid.
+    role: agent | lead
+}
+
+entity Ticket {
+    company: Company
+    title: String
+    description: String
+    priority: low | medium | high | urgent
+    status: open | in_progress | waiting_on_customer | resolved | closed
+    requester: Customer
+    logged_by: StaffMember?         -- absent when the customer filed it themselves;
+                                     -- present when staff logged it on their behalf
+    assigned_to: StaffMember? when status = in_progress | waiting_on_customer | resolved | closed
+    created_at: Timestamp
+    resolved_at: Timestamp? when status = resolved | closed
+
+    -- What "keeps track of what's not handled" means concretely: any
+    -- ticket short of resolved or closed. This is what a dashboard
+    -- would count, and what overdue-alerting keys off below.
+    unhandled: status not in {resolved, closed}
+
+    transitions status {
+        open -> in_progress
+        in_progress -> waiting_on_customer
+        waiting_on_customer -> in_progress
+        in_progress -> resolved
+        resolved -> in_progress
+        resolved -> closed
+        terminal: closed
+    }
+}
+
+rule CustomerCreatesTicket {
+    when: CreateTicket(company, requester, title, description, priority)
+    requires: company.status != expired
+    ensures: Ticket.created(
+        company: company, title: title, description: description,
+        priority: priority, status: open, requester: requester, created_at: now
+    )
+}
+
+rule StaffLogsTicketOnBehalf {
+    when: LogTicketOnBehalf(company, staff, requester, title, description, priority)
+    requires: company.status != expired
+    ensures: Ticket.created(
+        company: company, title: title, description: description,
+        priority: priority, status: open, requester: requester,
+        logged_by: staff, created_at: now
+    )
+}
+
+rule StaffPicksUpTicket {
+    when: AssignTicket(ticket, staff)
+    requires: ticket.status = open
+    ensures: ticket.status = in_progress
+    ensures: ticket.assigned_to = staff
+}
+
+rule StaffRequestsInfo {
+    when: RequestInfoFromCustomer(ticket, staff)
+    requires: ticket.status = in_progress
+    ensures: ticket.status = waiting_on_customer
+}
+
+rule CustomerReplies {
+    when: CustomerRespondsToTicket(ticket, requester)
+    requires: ticket.status = waiting_on_customer
+    ensures: ticket.status = in_progress
+}
+
+rule StaffResolvesTicket {
+    when: ResolveTicket(ticket, staff)
+    requires: ticket.status = in_progress
+    ensures: ticket.status = resolved
+    ensures: ticket.resolved_at = now
+}
+
+rule TicketReopened {
+    when: ReopenTicket(ticket)
+    requires: ticket.status = resolved
+    ensures: ticket.status = in_progress
+}
+
+rule TicketAutoCloses {
+    when: ticket: Ticket.resolved_at + config.auto_close_after <= now
+    requires: ticket.status = resolved
+    ensures: ticket.status = closed
+    @guidance
+        -- allium analyse flags this against TicketReopened: both can
+        -- apply while resolved, setting status to conflicting values.
+        -- Resolved: reopening wins - it's a human signal that the
+        -- issue isn't actually settled, which should override a
+        -- housekeeping timer. In practice this falls out of ordinary
+        -- sequential event processing (whichever happens first is what
+        -- the ticket's state reflects), noted here so it's not silently
+        -- unspecified.
+}
+
+-- Alerting. Resolved design note above: this only decides *when* a
+-- ticket is alert-worthy: the trigger emission below is what a
+-- separately-deployable service (reading it off skilj's REST event
+-- feed, per the design note above) turns into an actual email/Slack/etc
+-- message - that fan-out is deliberately not this spec's concern.
+rule TicketBecomesOverdue {
+    when: ticket: Ticket.created_at + config.unhandled_alert_after <= now
+    requires: ticket.unhandled
+    for lead in StaffMembers where company = ticket.company and role = lead:
+        ensures: TicketNeedsAttention(ticket, lead)
+}
+
+rule UrgentTicketNeedsImmediateAttention {
+    when: ticket: Ticket.created
+    requires: ticket.priority = urgent
+    for lead in StaffMembers where company = ticket.company and role = lead:
+        ensures: TicketNeedsAttention(ticket, lead)
+}
+
+-- Surfaces. Wires up every trigger above to an actual entry point -
+-- resolves all of `allium analyse`'s unreachable-trigger findings from
+-- the previous pass. Split into a public boundary (nobody has an
+-- identity yet), and one portal each for Customer and StaffMember,
+-- each split into a list/create surface and a single-ticket surface
+-- (a surface's context binds one entity at a time - see
+-- StaffTicketView/CustomerTicketView).
+
+surface CompanySignup {
+    provides:
+        SignUpCompany(name, contact_email)
+}
+
+surface CompanyResubscription {
+    facing staff: StaffMember
+
+    provides:
+        Subscribe(staff.company)
+            when staff.company.status = expired
+}
+
+surface CustomerPortal {
+    facing customer: Customer
+
+    exposes:
+        for ticket in customer.company.tickets where requester = customer:
+            ticket.title
+            ticket.status
+            ticket.priority
+            ticket.created_at
+
+    provides:
+        CreateTicket(customer.company, customer, title, description, priority)
+}
+
+surface CustomerTicketView {
+    facing customer: Customer
+    context ticket: Ticket where requester = customer
+
+    exposes:
+        ticket.title
+        ticket.description
+        ticket.status
+        ticket.priority
+        ticket.assigned_to
+        ticket.created_at
+        ticket.resolved_at
+
+    provides:
+        CustomerRespondsToTicket(ticket, customer)
+            when ticket.status = waiting_on_customer
+        ReopenTicket(ticket)
+            when ticket.status = resolved
+
+    timeout:
+        TicketAutoCloses
+}
+
+surface StaffTicketQueue {
+    facing staff: StaffMember
+
+    exposes:
+        for ticket in staff.company.tickets:
+            ticket.title
+            ticket.status
+            ticket.priority
+            ticket.requester
+            ticket.assigned_to
+            ticket.unhandled
+            ticket.created_at
+
+    provides:
+        LogTicketOnBehalf(staff.company, staff, requester, title, description, priority)
+}
+
+surface StaffTicketView {
+    facing staff: StaffMember
+    context ticket: Ticket where company = staff.company
+
+    exposes:
+        ticket.title
+        ticket.description
+        ticket.status
+        ticket.priority
+        ticket.requester
+        ticket.assigned_to
+        ticket.logged_by
+        ticket.created_at
+        ticket.resolved_at
+
+    provides:
+        AssignTicket(ticket, staff)
+            when ticket.status = open
+        RequestInfoFromCustomer(ticket, staff)
+            when ticket.status = in_progress
+        ResolveTicket(ticket, staff)
+            when ticket.status = in_progress
+        ReopenTicket(ticket)
+            when ticket.status = resolved
+
+    timeout:
+        TicketAutoCloses
+}
+
+-- Open questions: none currently. Every question raised during
+-- elicitation so far has been resolved (see the "Resolved" comments
+-- throughout) rather than left pending.

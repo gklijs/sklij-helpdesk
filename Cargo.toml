@@ -1,0 +1,90 @@
+[package]
+name = "skilj-helpdesk"
+version = "0.0.1"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+description = """
+Showcase SaaS helpdesk built on skilj. specs/skilj-helpdesk.allium is the
+domain spec this crate implements - see that file first, then
+helpdesk.rs. Every rule in the spec now has a real skilj
+CommandType/EventType/Projection implementation: company signup and its
+full trial/active/expired lifecycle, the full ticket lifecycle
+(create/assign/resolve/reopen/waiting-on-customer/close), and both
+alerting rules - plus two real separately-deployable binaries
+(src/bin/alerter.rs, src/bin/scheduler.rs) that are what actually submit
+the alerting and deadline-driven commands, consuming skilj's own REST
+event feed rather than anything built into skilj itself. Real integration-test suite (tests/company.rs,
+tests/ticket_create_assign_resolve.rs, tests/ticket_waiting_and_closing.rs,
+tests/alerting_feed.rs - split by concern rather than one file, same
+reason skilj-demo splits banking/courses/graphql_auth/snapshot: each
+tests/*.rs is its own binary with its own embedded-Postgres instance,
+and enough accumulated per-test Skilj/pool instances sharing one
+instance eventually exhausts it - see tests/company.rs's own doc
+comment) plus pure unit tests for the decision logic each binary drives
+(src/alerting.rs, src/scheduling.rs). tests/graphql.rs proves the
+GraphQL surface end to end too - real JWT auth against a local JWKS
+server (adapted from skilj-demo's own tests/graphql_auth.rs),
+submitCommand, and querying a Projection back (helpdesk_TicketSummary) -
+all with zero GraphQL-specific code written in this crate; skilj-graphql
+auto-builds it from whatever's registered. All 28 tests verified against
+a real (not just embedded-then-skipped) Postgres in this environment,
+which is also how two real bugs got caught and fixed: CreateTicket's
+guard originally blocked ticket creation during the entire free trial
+(a spec bug), and every EventType here needed an explicit
+event_read_allowed() = true override skilj defaults to false on -
+without it, src/bin/alerter.rs's and src/bin/scheduler.rs's own
+EventReadTokens would 403 in real use, not just in a test.
+src/bin/server.rs is a real, runnable server (`cargo run --bin server`,
+modelled on skilj-demo's own) - prints every credential alerter/
+scheduler need as ready-to-export env vars, so `cargo run --bin server`
+then the two printed commands brings up the whole system. Verified for
+real: signed up a company and created a ticket over REST, queried it
+back over GraphQL, and had a real alerter process pick up the resulting
+event and print an alert - all against a real (not embedded) local
+Postgres. Deliberately not built this pass: the web UI itself - a
+frontend to actually call this surface.
+"""
+
+[[bin]]
+name = "server"
+path = "src/bin/server.rs"
+
+[[bin]]
+name = "alerter"
+path = "src/bin/alerter.rs"
+
+[[bin]]
+name = "scheduler"
+path = "src/bin/scheduler.rs"
+
+[dependencies]
+skilj = { path = "../skilj/skilj" }
+skilj-core = { path = "../skilj/skilj-core" }
+tokio = { version = "1", features = ["full"] }
+axum = "0.8"
+chrono = { version = "0.4", features = ["serde"] }
+schemars = { version = "0.8", features = ["chrono", "uuid1"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# src/bin/alerter.rs only - the separately-deployable alerting
+# consumer's own HTTP client, talking to a running skilj server's REST
+# surface. Nothing else in this crate needs it.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+# src/bin/server.rs only - its own local JWKS/JWT shortcut, same
+# reasoning as skilj-demo/src/bin/server.rs's own copy (its doc comment
+# explains why). A real dependency, not a dev one: this ships in the
+# `server` binary, not just tests.
+jsonwebtoken = "9"
+# src/bin/server.rs only - CORS is a per-deployment policy decision
+# (which origins to allow), not something skilj's own rest_router()/
+# graphql_router() should bake in a global answer for - it's the
+# consuming application's call, made where the two routers are merged.
+# Found the hard way: a real browser (frontend/, a different origin
+# from the server) blocks the response outright without this.
+tower-http = { version = "0.6", features = ["cors"] }
+
+[dev-dependencies]
+postgresql_embedded = "0.21.0"
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"

@@ -1,0 +1,1268 @@
+//! The "helpdesk" bounded context: company signup and the core ticket
+//! lifecycle. Implements a slice of `specs/skilj-helpdesk.allium` - see
+//! that file for the full domain spec, and this crate's `Cargo.toml`
+//! doc comment for exactly what this pass covers vs. defers.
+//!
+//! One bounded context, not the two the spec's Dependencies section
+//! implies (a shared "billing" context for Company, a per-company
+//! tenant "helpdesk" context for Ticket, stamped via skilj's own
+//! `CreateBoundedContextFromTemplate`): real multi-tenant provisioning
+//! is deferred along with the temporal/alerting pieces (see
+//! `Cargo.toml`), so this pass keeps Company and Ticket events side by
+//! side in one context, tagged apart by "company"/"ticket" - enough to
+//! prove the real `decide()` logic, not the tenancy mechanism around it.
+//!
+//! Every id (`company_id`, `ticket_id`) is caller-supplied, same
+//! convention as `skilj-demo`'s own `account_id`/`course_id` - never
+//! generated inside `decide()`, which stays pure and I/O-free by
+//! contract (`CommandType::decide`'s own doc comment).
+
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+use skilj::{auto_register, CommandType, EventType, Projection};
+use skilj_core::event_store::Event;
+use skilj_core::plugin::BoundedContextEvent;
+use skilj_core::shared::{CommandDecision, EventSpec, TagMapping};
+
+pub const BOUNDED_CONTEXT: &str = "helpdesk";
+
+fn company_tag() -> Vec<TagMapping> {
+    vec![TagMapping {
+        key: "company".into(),
+        field: "company_id".into(),
+    }]
+}
+
+fn ticket_tag() -> Vec<TagMapping> {
+    vec![TagMapping {
+        key: "ticket".into(),
+        field: "ticket_id".into(),
+    }]
+}
+
+// --- events ---
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct CompanySignedUpPayload {
+    pub company_id: String,
+    pub name: String,
+    pub contact_email: String,
+}
+
+pub struct CompanySignedUp;
+
+#[auto_register(BOUNDED_CONTEXT)]
+impl EventType for CompanySignedUp {
+    type Payload = CompanySignedUpPayload;
+    const NAME: &'static str = "CompanySignedUp";
+    fn tag_mappings() -> Vec<TagMapping> {
+        company_tag()
+    }
+    /// `src/bin/scheduler.rs` reads this via an `EventReadToken` to
+    /// discover companies and their trial-start time - `EventType`'s
+    /// own default (`false`) would 403 that read (docs/architecture.md
+    /// §7.5): a type must opt in explicitly. Found the hard way, over a
+    /// real REST request, once a real embedded Postgres was available
+    /// in this sandbox to run against - see `tests/alerting_feed.rs`.
+    fn event_read_allowed() -> bool {
+        true
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct CompanyActivatedPayload {
+    pub company_id: String,
+}
+
+pub struct CompanyActivated;
+
+/// One event for both `specs/skilj-helpdesk.allium`'s `rule
+/// TrialPeriodEnds`'s success branch (`trialing -> active`) and `rule
+/// CompanySubscribes`'s success branch (`expired -> active`) - the spec
+/// keeps them as two rules because they're two different triggers (a
+/// scheduler tick vs. a company choosing to pay), but the resulting
+/// domain fact is identical ("this company is now active"), so one
+/// event type covers both here, the same simplification `CreateTicket`
+/// already makes for its own two triggering rules.
+#[auto_register(BOUNDED_CONTEXT)]
+impl EventType for CompanyActivated {
+    type Payload = CompanyActivatedPayload;
+    const NAME: &'static str = "CompanyActivated";
+    fn tag_mappings() -> Vec<TagMapping> {
+        company_tag()
+    }
+    /// See `CompanySignedUp::event_read_allowed`'s own doc comment -
+    /// `src/bin/scheduler.rs` reads this too, to stop tracking a
+    /// company once it's converted.
+    fn event_read_allowed() -> bool {
+        true
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct CompanyExpiredPayload {
+    pub company_id: String,
+}
+
+pub struct CompanyExpired;
+
+/// `specs/skilj-helpdesk.allium`'s `rule TrialPeriodEnds`'s failure
+/// branch: `trialing -> expired`.
+#[auto_register(BOUNDED_CONTEXT)]
+impl EventType for CompanyExpired {
+    type Payload = CompanyExpiredPayload;
+    const NAME: &'static str = "CompanyExpired";
+    fn tag_mappings() -> Vec<TagMapping> {
+        company_tag()
+    }
+    /// See `CompanySignedUp::event_read_allowed`'s own doc comment -
+    /// `src/bin/scheduler.rs` reads this too, to stop tracking a
+    /// company once it's expired.
+    fn event_read_allowed() -> bool {
+        true
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TicketPriority {
+    Low,
+    Medium,
+    High,
+    Urgent,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct TicketCreatedPayload {
+    pub ticket_id: String,
+    pub company_id: String,
+    pub requester_id: String,
+    pub logged_by_staff_id: Option<String>,
+    pub title: String,
+    pub description: String,
+    pub priority: TicketPriority,
+}
+
+pub struct TicketCreated;
+
+#[auto_register(BOUNDED_CONTEXT)]
+impl EventType for TicketCreated {
+    type Payload = TicketCreatedPayload;
+    const NAME: &'static str = "TicketCreated";
+    /// Tagged on both, same technique as `skilj-demo`'s own
+    /// `StudentEnrolled` (`courses.rs`): `AssignTicket`/`ResolveTicket`/
+    /// `ReopenTicket` only ever need the "ticket" tag, but `CreateTicket`
+    /// itself needs to see this company's own signup history too, so
+    /// the creating event carries both tags up front.
+    fn tag_mappings() -> Vec<TagMapping> {
+        vec![
+            TagMapping {
+                key: "ticket".into(),
+                field: "ticket_id".into(),
+            },
+            TagMapping {
+                key: "company".into(),
+                field: "company_id".into(),
+            },
+        ]
+    }
+    /// `src/bin/alerter.rs` reads this - see
+    /// `CompanySignedUp::event_read_allowed`'s own doc comment for why
+    /// this default needs an explicit override.
+    fn event_read_allowed() -> bool {
+        true
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct TicketAssignedPayload {
+    pub ticket_id: String,
+    pub company_id: String,
+    pub staff_id: String,
+}
+
+pub struct TicketAssigned;
+
+#[auto_register(BOUNDED_CONTEXT)]
+impl EventType for TicketAssigned {
+    type Payload = TicketAssignedPayload;
+    const NAME: &'static str = "TicketAssigned";
+    fn tag_mappings() -> Vec<TagMapping> {
+        ticket_tag()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct TicketResolvedPayload {
+    pub ticket_id: String,
+    pub company_id: String,
+}
+
+pub struct TicketResolved;
+
+#[auto_register(BOUNDED_CONTEXT)]
+impl EventType for TicketResolved {
+    type Payload = TicketResolvedPayload;
+    const NAME: &'static str = "TicketResolved";
+    fn tag_mappings() -> Vec<TagMapping> {
+        ticket_tag()
+    }
+    /// `src/bin/scheduler.rs` reads this to start tracking a ticket for
+    /// auto-close - see `CompanySignedUp::event_read_allowed`'s own doc
+    /// comment.
+    fn event_read_allowed() -> bool {
+        true
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct TicketReopenedPayload {
+    pub ticket_id: String,
+    pub company_id: String,
+}
+
+pub struct TicketReopened;
+
+#[auto_register(BOUNDED_CONTEXT)]
+impl EventType for TicketReopened {
+    type Payload = TicketReopenedPayload;
+    const NAME: &'static str = "TicketReopened";
+    fn tag_mappings() -> Vec<TagMapping> {
+        ticket_tag()
+    }
+    /// `src/bin/scheduler.rs` reads this to stop tracking a ticket for
+    /// auto-close once it's reopened - see
+    /// `CompanySignedUp::event_read_allowed`'s own doc comment.
+    fn event_read_allowed() -> bool {
+        true
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct TicketInfoRequestedPayload {
+    pub ticket_id: String,
+    pub company_id: String,
+    pub staff_id: String,
+    pub message: String,
+}
+
+pub struct TicketInfoRequested;
+
+/// `specs/skilj-helpdesk.allium`'s `rule StaffRequestsInfo`'s own
+/// outcome: `in_progress -> waiting_on_customer`.
+#[auto_register(BOUNDED_CONTEXT)]
+impl EventType for TicketInfoRequested {
+    type Payload = TicketInfoRequestedPayload;
+    const NAME: &'static str = "TicketInfoRequested";
+    fn tag_mappings() -> Vec<TagMapping> {
+        ticket_tag()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct TicketCustomerRespondedPayload {
+    pub ticket_id: String,
+    pub company_id: String,
+    pub requester_id: String,
+    pub message: String,
+}
+
+pub struct TicketCustomerResponded;
+
+/// `specs/skilj-helpdesk.allium`'s `rule CustomerReplies`'s own outcome:
+/// `waiting_on_customer -> in_progress`.
+#[auto_register(BOUNDED_CONTEXT)]
+impl EventType for TicketCustomerResponded {
+    type Payload = TicketCustomerRespondedPayload;
+    const NAME: &'static str = "TicketCustomerResponded";
+    fn tag_mappings() -> Vec<TagMapping> {
+        ticket_tag()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct TicketClosedPayload {
+    pub ticket_id: String,
+    pub company_id: String,
+}
+
+pub struct TicketClosed;
+
+/// `specs/skilj-helpdesk.allium`'s `rule TicketAutoCloses`: `resolved ->
+/// closed`. "Auto" in the spec's own name refers to *who* decides
+/// (nobody - a sweep, not a person), not to *how* the resulting state
+/// change reaches skilj: `CloseTicket` below is an ordinary command, the
+/// same as every other mutation in this file, submitted by
+/// `src/bin/scheduler.rs` rather than a customer or staff member. See
+/// that file's own doc comment for why.
+#[auto_register(BOUNDED_CONTEXT)]
+impl EventType for TicketClosed {
+    type Payload = TicketClosedPayload;
+    const NAME: &'static str = "TicketClosed";
+    fn tag_mappings() -> Vec<TagMapping> {
+        ticket_tag()
+    }
+    /// `src/bin/scheduler.rs` reads this defensively (stop tracking a
+    /// ticket that's already closed) - see
+    /// `CompanySignedUp::event_read_allowed`'s own doc comment.
+    fn event_read_allowed() -> bool {
+        true
+    }
+}
+
+/// This bounded context's own hand-written event enum - docs/
+/// architecture.md §1.4/§1.6, same technique as skilj-demo's
+/// `BankingEvent`/`CoursesEvent`.
+pub enum HelpdeskEvent {
+    CompanySignedUp(CompanySignedUpPayload),
+    CompanyActivated(CompanyActivatedPayload),
+    CompanyExpired(CompanyExpiredPayload),
+    TicketCreated(TicketCreatedPayload),
+    TicketAssigned(TicketAssignedPayload),
+    TicketResolved(TicketResolvedPayload),
+    TicketReopened(TicketReopenedPayload),
+    TicketInfoRequested(TicketInfoRequestedPayload),
+    TicketCustomerResponded(TicketCustomerRespondedPayload),
+    TicketClosed(TicketClosedPayload),
+}
+
+impl BoundedContextEvent for HelpdeskEvent {
+    fn try_from_event(event: &Event) -> Option<Result<Self, serde_json::Error>> {
+        match event.event_type.name.as_str() {
+            "CompanySignedUp" => {
+                Some(serde_json::from_str(&event.payload).map(HelpdeskEvent::CompanySignedUp))
+            }
+            "CompanyActivated" => {
+                Some(serde_json::from_str(&event.payload).map(HelpdeskEvent::CompanyActivated))
+            }
+            "CompanyExpired" => {
+                Some(serde_json::from_str(&event.payload).map(HelpdeskEvent::CompanyExpired))
+            }
+            "TicketCreated" => {
+                Some(serde_json::from_str(&event.payload).map(HelpdeskEvent::TicketCreated))
+            }
+            "TicketAssigned" => {
+                Some(serde_json::from_str(&event.payload).map(HelpdeskEvent::TicketAssigned))
+            }
+            "TicketResolved" => {
+                Some(serde_json::from_str(&event.payload).map(HelpdeskEvent::TicketResolved))
+            }
+            "TicketReopened" => {
+                Some(serde_json::from_str(&event.payload).map(HelpdeskEvent::TicketReopened))
+            }
+            "TicketInfoRequested" => Some(
+                serde_json::from_str(&event.payload).map(HelpdeskEvent::TicketInfoRequested),
+            ),
+            "TicketCustomerResponded" => Some(
+                serde_json::from_str(&event.payload).map(HelpdeskEvent::TicketCustomerResponded),
+            ),
+            "TicketClosed" => {
+                Some(serde_json::from_str(&event.payload).map(HelpdeskEvent::TicketClosed))
+            }
+            _ => None,
+        }
+    }
+}
+
+/// `specs/skilj-helpdesk.allium`'s `Ticket.status`, in full.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TicketStatus {
+    Open,
+    InProgress,
+    WaitingOnCustomer,
+    Resolved,
+    Closed,
+}
+
+/// Folds this ticket's own status from its slice of `matching_events` -
+/// same technique as `banking.rs`'s `balance_of`/`courses.rs`'s roster
+/// folds. `None` means the ticket doesn't exist (no `TicketCreated`
+/// found).
+fn ticket_status(matching_events: &[HelpdeskEvent], ticket_id: &str) -> Option<TicketStatus> {
+    let mut status = None;
+    for event in matching_events {
+        match event {
+            HelpdeskEvent::TicketCreated(p) if p.ticket_id == ticket_id => {
+                status = Some(TicketStatus::Open);
+            }
+            HelpdeskEvent::TicketAssigned(p) if p.ticket_id == ticket_id => {
+                status = Some(TicketStatus::InProgress);
+            }
+            HelpdeskEvent::TicketResolved(p) if p.ticket_id == ticket_id => {
+                status = Some(TicketStatus::Resolved);
+            }
+            HelpdeskEvent::TicketReopened(p) if p.ticket_id == ticket_id => {
+                status = Some(TicketStatus::InProgress);
+            }
+            HelpdeskEvent::TicketInfoRequested(p) if p.ticket_id == ticket_id => {
+                status = Some(TicketStatus::WaitingOnCustomer);
+            }
+            HelpdeskEvent::TicketCustomerResponded(p) if p.ticket_id == ticket_id => {
+                status = Some(TicketStatus::InProgress);
+            }
+            HelpdeskEvent::TicketClosed(p) if p.ticket_id == ticket_id => {
+                status = Some(TicketStatus::Closed);
+            }
+            _ => {}
+        }
+    }
+    status
+}
+
+/// `specs/skilj-helpdesk.allium`'s `Company.status`, in full.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompanyStatus {
+    Trialing,
+    Active,
+    Expired,
+}
+
+/// Folds this company's own status - same technique as `ticket_status`
+/// above. `None` means the company doesn't exist (no `CompanySignedUp`
+/// found).
+fn company_status(matching_events: &[HelpdeskEvent], company_id: &str) -> Option<CompanyStatus> {
+    let mut status = None;
+    for event in matching_events {
+        match event {
+            HelpdeskEvent::CompanySignedUp(p) if p.company_id == company_id => {
+                status = Some(CompanyStatus::Trialing);
+            }
+            HelpdeskEvent::CompanyActivated(p) if p.company_id == company_id => {
+                status = Some(CompanyStatus::Active);
+            }
+            HelpdeskEvent::CompanyExpired(p) if p.company_id == company_id => {
+                status = Some(CompanyStatus::Expired);
+            }
+            _ => {}
+        }
+    }
+    status
+}
+
+/// The company a ticket belongs to, read off its own `TicketCreated`
+/// (always present in `matching_events` for any ticket-tagged command:
+/// `TicketCreated` carries both the "ticket" and "company" tags - see
+/// its own `tag_mappings` doc comment). Every ticket-lifecycle command
+/// past creation itself uses this to stamp `company_id` onto the event
+/// it emits, which is what lets `CompanyTicketList` below fold every
+/// ticket event for one ticket into the correct per-company projection
+/// instance - `AssignTicket`/`ResolveTicket`/etc.'s own payloads never
+/// carried `company_id` as caller input (there's no reason to trust a
+/// caller-supplied one when the real answer is already in the ticket's
+/// own history).
+fn company_id_for_ticket(matching_events: &[HelpdeskEvent], ticket_id: &str) -> Option<String> {
+    matching_events.iter().find_map(|event| match event {
+        HelpdeskEvent::TicketCreated(p) if p.ticket_id == ticket_id => Some(p.company_id.clone()),
+        _ => None,
+    })
+}
+
+// --- commands ---
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct SignUpCompanyPayload {
+    pub company_id: String,
+    pub name: String,
+    pub contact_email: String,
+}
+
+pub struct SignUpCompany;
+
+/// `specs/skilj-helpdesk.allium`'s `rule CompanySignsUp`. What the spec
+/// also does here - provisioning the company's own skilj tenant via
+/// `CreateBoundedContextFromTemplate` - is exactly the piece this pass
+/// defers (see `Cargo.toml`); a real implementation would call that as
+/// a side effect alongside this command, not from inside `decide()`
+/// (pure and I/O-free by contract).
+#[auto_register(BOUNDED_CONTEXT)]
+impl CommandType for SignUpCompany {
+    type Payload = SignUpCompanyPayload;
+    type Event = HelpdeskEvent;
+    const NAME: &'static str = "SignUpCompany";
+    fn tag_mappings() -> Vec<TagMapping> {
+        company_tag()
+    }
+    fn rest_trigger_allowed() -> bool {
+        true
+    }
+    fn decide(payload: &Self::Payload, matching_events: &[Self::Event]) -> CommandDecision {
+        if company_status(matching_events, &payload.company_id).is_some() {
+            return CommandDecision::Rejected {
+                reason: format!("company {} has already signed up", payload.company_id),
+                kind: "already_signed_up".into(),
+            };
+        }
+        CommandDecision::Accepted {
+            events: vec![EventSpec {
+                event_type: "CompanySignedUp".into(),
+                payload: serde_json::json!({
+                    "company_id": payload.company_id,
+                    "name": payload.name,
+                    "contact_email": payload.contact_email,
+                }),
+            }],
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ConvertCompanyTrialPayload {
+    pub company_id: String,
+}
+
+pub struct ConvertCompanyTrial;
+
+/// `specs/skilj-helpdesk.allium`'s `rule TrialPeriodEnds`'s success
+/// branch: `trialing -> active`. Submitted by `src/bin/scheduler.rs`,
+/// not a person - see that file's own doc comment for why this pass
+/// implements the *state change* as an ordinary command rather than
+/// skilj's `system_triggered` scheduling (a global-cron mechanism, not
+/// suited to a per-company deadline like this one) plus a mocked
+/// `PaymentGateway.charge` outcome the scheduler decides before
+/// submitting either this or `ExpireCompanyTrial`.
+#[auto_register(BOUNDED_CONTEXT)]
+impl CommandType for ConvertCompanyTrial {
+    type Payload = ConvertCompanyTrialPayload;
+    type Event = HelpdeskEvent;
+    const NAME: &'static str = "ConvertCompanyTrial";
+    fn tag_mappings() -> Vec<TagMapping> {
+        company_tag()
+    }
+    fn rest_trigger_allowed() -> bool {
+        true
+    }
+    fn decide(payload: &Self::Payload, matching_events: &[Self::Event]) -> CommandDecision {
+        match company_status(matching_events, &payload.company_id) {
+            Some(CompanyStatus::Trialing) => CommandDecision::Accepted {
+                events: vec![EventSpec {
+                    event_type: "CompanyActivated".into(),
+                    payload: serde_json::json!({ "company_id": payload.company_id }),
+                }],
+            },
+            None => CommandDecision::Rejected {
+                reason: format!("company {} does not exist", payload.company_id),
+                kind: "company_not_found".into(),
+            },
+            Some(other) => CommandDecision::Rejected {
+                reason: format!(
+                    "company {} is {other:?}, not trialing - nothing to convert",
+                    payload.company_id
+                ),
+                kind: "company_not_trialing".into(),
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ExpireCompanyTrialPayload {
+    pub company_id: String,
+}
+
+pub struct ExpireCompanyTrial;
+
+/// `specs/skilj-helpdesk.allium`'s `rule TrialPeriodEnds`'s failure
+/// branch: `trialing -> expired`. Same submitter and reasoning as
+/// `ConvertCompanyTrial` above - the scheduler picks one or the other
+/// per company, based on its own mocked charge outcome.
+#[auto_register(BOUNDED_CONTEXT)]
+impl CommandType for ExpireCompanyTrial {
+    type Payload = ExpireCompanyTrialPayload;
+    type Event = HelpdeskEvent;
+    const NAME: &'static str = "ExpireCompanyTrial";
+    fn tag_mappings() -> Vec<TagMapping> {
+        company_tag()
+    }
+    fn rest_trigger_allowed() -> bool {
+        true
+    }
+    fn decide(payload: &Self::Payload, matching_events: &[Self::Event]) -> CommandDecision {
+        match company_status(matching_events, &payload.company_id) {
+            Some(CompanyStatus::Trialing) => CommandDecision::Accepted {
+                events: vec![EventSpec {
+                    event_type: "CompanyExpired".into(),
+                    payload: serde_json::json!({ "company_id": payload.company_id }),
+                }],
+            },
+            None => CommandDecision::Rejected {
+                reason: format!("company {} does not exist", payload.company_id),
+                kind: "company_not_found".into(),
+            },
+            Some(other) => CommandDecision::Rejected {
+                reason: format!(
+                    "company {} is {other:?}, not trialing - nothing to expire",
+                    payload.company_id
+                ),
+                kind: "company_not_trialing".into(),
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ReactivateCompanyPayload {
+    pub company_id: String,
+}
+
+pub struct ReactivateCompany;
+
+/// `specs/skilj-helpdesk.allium`'s `rule CompanySubscribes`: `expired ->
+/// active`. Unlike `ConvertCompanyTrial`/`ExpireCompanyTrial`, this one
+/// really is person-submitted (an expired company choosing to pay) -
+/// still a mocked `PaymentGateway.charge`, but the caller is a real
+/// customer-facing surface, not the scheduler. Kept unconditionally
+/// successful here (no `charged.succeeded` branch) since a real payment
+/// retry-on-failure UX is presentation-level, out of this pass's scope.
+#[auto_register(BOUNDED_CONTEXT)]
+impl CommandType for ReactivateCompany {
+    type Payload = ReactivateCompanyPayload;
+    type Event = HelpdeskEvent;
+    const NAME: &'static str = "ReactivateCompany";
+    fn tag_mappings() -> Vec<TagMapping> {
+        company_tag()
+    }
+    fn rest_trigger_allowed() -> bool {
+        true
+    }
+    fn decide(payload: &Self::Payload, matching_events: &[Self::Event]) -> CommandDecision {
+        match company_status(matching_events, &payload.company_id) {
+            Some(CompanyStatus::Expired) => CommandDecision::Accepted {
+                events: vec![EventSpec {
+                    event_type: "CompanyActivated".into(),
+                    payload: serde_json::json!({ "company_id": payload.company_id }),
+                }],
+            },
+            None => CommandDecision::Rejected {
+                reason: format!("company {} does not exist", payload.company_id),
+                kind: "company_not_found".into(),
+            },
+            Some(other) => CommandDecision::Rejected {
+                reason: format!(
+                    "company {} is {other:?}, not expired - nothing to reactivate",
+                    payload.company_id
+                ),
+                kind: "company_not_expired".into(),
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct CreateTicketPayload {
+    pub ticket_id: String,
+    pub company_id: String,
+    pub requester_id: String,
+    pub logged_by_staff_id: Option<String>,
+    pub title: String,
+    pub description: String,
+    pub priority: TicketPriority,
+}
+
+pub struct CreateTicket;
+
+/// `specs/skilj-helpdesk.allium`'s `rule CustomerCreatesTicket`/
+/// `StaffLogsTicketOnBehalf`, merged into one command
+/// (`logged_by_staff_id` tells the two cases apart) - the spec keeps
+/// them as two triggers because they're two different surfaces
+/// (`CustomerPortal` vs. `StaffTicketQueue`); at the `decide()` level
+/// they're the same decision, so one `CommandType` covers both, the
+/// same way the spec's own `logged_by: StaffMember?` already unifies
+/// them on the `Ticket` entity.
+///
+/// `requires: company.status != expired` - implemented in full now that
+/// `company_status` tracks the real lifecycle (this was originally
+/// written against `specs/skilj-helpdesk.allium`'s own
+/// `requires: company.status = active`, which turned out to be a bug in
+/// the spec itself, caught while wiring this up for real: it would have
+/// blocked ticket creation during the free trial entirely, which
+/// contradicts the whole point of a trial - fixed in the spec alongside
+/// this code, not worked around here).
+#[auto_register(BOUNDED_CONTEXT)]
+impl CommandType for CreateTicket {
+    type Payload = CreateTicketPayload;
+    type Event = HelpdeskEvent;
+    const NAME: &'static str = "CreateTicket";
+    fn tag_mappings() -> Vec<TagMapping> {
+        company_tag()
+    }
+    fn rest_trigger_allowed() -> bool {
+        true
+    }
+    fn decide(payload: &Self::Payload, matching_events: &[Self::Event]) -> CommandDecision {
+        match company_status(matching_events, &payload.company_id) {
+            None => {
+                return CommandDecision::Rejected {
+                    reason: format!("company {} has not signed up", payload.company_id),
+                    kind: "company_not_found".into(),
+                };
+            }
+            Some(CompanyStatus::Expired) => {
+                return CommandDecision::Rejected {
+                    reason: format!(
+                        "company {} is expired - subscribe to keep creating tickets",
+                        payload.company_id
+                    ),
+                    kind: "company_expired".into(),
+                };
+            }
+            Some(CompanyStatus::Trialing | CompanyStatus::Active) => {}
+        }
+        if ticket_status(matching_events, &payload.ticket_id).is_some() {
+            return CommandDecision::Rejected {
+                reason: format!("ticket {} already exists", payload.ticket_id),
+                kind: "ticket_already_exists".into(),
+            };
+        }
+        CommandDecision::Accepted {
+            events: vec![EventSpec {
+                event_type: "TicketCreated".into(),
+                payload: serde_json::json!({
+                    "ticket_id": payload.ticket_id,
+                    "company_id": payload.company_id,
+                    "requester_id": payload.requester_id,
+                    "logged_by_staff_id": payload.logged_by_staff_id,
+                    "title": payload.title,
+                    "description": payload.description,
+                    "priority": payload.priority,
+                }),
+            }],
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct AssignTicketPayload {
+    pub ticket_id: String,
+    pub staff_id: String,
+}
+
+pub struct AssignTicket;
+
+/// `specs/skilj-helpdesk.allium`'s `rule StaffPicksUpTicket`:
+/// `requires: ticket.status = open`.
+#[auto_register(BOUNDED_CONTEXT)]
+impl CommandType for AssignTicket {
+    type Payload = AssignTicketPayload;
+    type Event = HelpdeskEvent;
+    const NAME: &'static str = "AssignTicket";
+    fn tag_mappings() -> Vec<TagMapping> {
+        ticket_tag()
+    }
+    fn rest_trigger_allowed() -> bool {
+        true
+    }
+    fn decide(payload: &Self::Payload, matching_events: &[Self::Event]) -> CommandDecision {
+        match ticket_status(matching_events, &payload.ticket_id) {
+            None => CommandDecision::Rejected {
+                reason: format!("ticket {} does not exist", payload.ticket_id),
+                kind: "ticket_not_found".into(),
+            },
+            Some(TicketStatus::Open) => CommandDecision::Accepted {
+                events: vec![EventSpec {
+                    event_type: "TicketAssigned".into(),
+                    payload: serde_json::json!({
+                        "ticket_id": payload.ticket_id,
+                        "company_id": company_id_for_ticket(matching_events, &payload.ticket_id)
+                            .expect("a ticket with any status has a TicketCreated in its own history"),
+                        "staff_id": payload.staff_id,
+                    }),
+                }],
+            },
+            Some(other) => CommandDecision::Rejected {
+                reason: format!(
+                    "ticket {} is {other:?}, not open - only an open ticket can be picked up",
+                    payload.ticket_id
+                ),
+                kind: "ticket_not_open".into(),
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ResolveTicketPayload {
+    pub ticket_id: String,
+}
+
+pub struct ResolveTicket;
+
+/// `specs/skilj-helpdesk.allium`'s `rule StaffResolvesTicket`:
+/// `requires: ticket.status = in_progress`.
+#[auto_register(BOUNDED_CONTEXT)]
+impl CommandType for ResolveTicket {
+    type Payload = ResolveTicketPayload;
+    type Event = HelpdeskEvent;
+    const NAME: &'static str = "ResolveTicket";
+    fn tag_mappings() -> Vec<TagMapping> {
+        ticket_tag()
+    }
+    fn rest_trigger_allowed() -> bool {
+        true
+    }
+    fn decide(payload: &Self::Payload, matching_events: &[Self::Event]) -> CommandDecision {
+        match ticket_status(matching_events, &payload.ticket_id) {
+            None => CommandDecision::Rejected {
+                reason: format!("ticket {} does not exist", payload.ticket_id),
+                kind: "ticket_not_found".into(),
+            },
+            Some(TicketStatus::InProgress) => CommandDecision::Accepted {
+                events: vec![EventSpec {
+                    event_type: "TicketResolved".into(),
+                    payload: serde_json::json!({
+                        "ticket_id": payload.ticket_id,
+                        "company_id": company_id_for_ticket(matching_events, &payload.ticket_id)
+                            .expect("a ticket with any status has a TicketCreated in its own history"),
+                    }),
+                }],
+            },
+            Some(other) => CommandDecision::Rejected {
+                reason: format!(
+                    "ticket {} is {other:?}, not in progress - only a picked-up ticket can be resolved",
+                    payload.ticket_id
+                ),
+                kind: "ticket_not_in_progress".into(),
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ReopenTicketPayload {
+    pub ticket_id: String,
+}
+
+pub struct ReopenTicket;
+
+/// `specs/skilj-helpdesk.allium`'s `rule TicketReopened`: `requires:
+/// ticket.status = resolved`.
+#[auto_register(BOUNDED_CONTEXT)]
+impl CommandType for ReopenTicket {
+    type Payload = ReopenTicketPayload;
+    type Event = HelpdeskEvent;
+    const NAME: &'static str = "ReopenTicket";
+    fn tag_mappings() -> Vec<TagMapping> {
+        ticket_tag()
+    }
+    fn rest_trigger_allowed() -> bool {
+        true
+    }
+    fn decide(payload: &Self::Payload, matching_events: &[Self::Event]) -> CommandDecision {
+        match ticket_status(matching_events, &payload.ticket_id) {
+            None => CommandDecision::Rejected {
+                reason: format!("ticket {} does not exist", payload.ticket_id),
+                kind: "ticket_not_found".into(),
+            },
+            Some(TicketStatus::Resolved) => CommandDecision::Accepted {
+                events: vec![EventSpec {
+                    event_type: "TicketReopened".into(),
+                    payload: serde_json::json!({
+                        "ticket_id": payload.ticket_id,
+                        "company_id": company_id_for_ticket(matching_events, &payload.ticket_id)
+                            .expect("a ticket with any status has a TicketCreated in its own history"),
+                    }),
+                }],
+            },
+            Some(other) => CommandDecision::Rejected {
+                reason: format!(
+                    "ticket {} is {other:?}, not resolved - only a resolved ticket can be reopened",
+                    payload.ticket_id
+                ),
+                kind: "ticket_not_resolved".into(),
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct RequestInfoFromCustomerPayload {
+    pub ticket_id: String,
+    pub staff_id: String,
+    pub message: String,
+}
+
+pub struct RequestInfoFromCustomer;
+
+/// `specs/skilj-helpdesk.allium`'s `rule StaffRequestsInfo`: `requires:
+/// ticket.status = in_progress`.
+#[auto_register(BOUNDED_CONTEXT)]
+impl CommandType for RequestInfoFromCustomer {
+    type Payload = RequestInfoFromCustomerPayload;
+    type Event = HelpdeskEvent;
+    const NAME: &'static str = "RequestInfoFromCustomer";
+    fn tag_mappings() -> Vec<TagMapping> {
+        ticket_tag()
+    }
+    fn rest_trigger_allowed() -> bool {
+        true
+    }
+    fn decide(payload: &Self::Payload, matching_events: &[Self::Event]) -> CommandDecision {
+        match ticket_status(matching_events, &payload.ticket_id) {
+            None => CommandDecision::Rejected {
+                reason: format!("ticket {} does not exist", payload.ticket_id),
+                kind: "ticket_not_found".into(),
+            },
+            Some(TicketStatus::InProgress) => CommandDecision::Accepted {
+                events: vec![EventSpec {
+                    event_type: "TicketInfoRequested".into(),
+                    payload: serde_json::json!({
+                        "ticket_id": payload.ticket_id,
+                        "company_id": company_id_for_ticket(matching_events, &payload.ticket_id)
+                            .expect("a ticket with any status has a TicketCreated in its own history"),
+                        "staff_id": payload.staff_id,
+                        "message": payload.message,
+                    }),
+                }],
+            },
+            Some(other) => CommandDecision::Rejected {
+                reason: format!(
+                    "ticket {} is {other:?}, not in progress - can only ask a picked-up ticket's customer for more information",
+                    payload.ticket_id
+                ),
+                kind: "ticket_not_in_progress".into(),
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct CustomerRespondsToTicketPayload {
+    pub ticket_id: String,
+    pub requester_id: String,
+    pub message: String,
+}
+
+pub struct CustomerRespondsToTicket;
+
+/// `specs/skilj-helpdesk.allium`'s `rule CustomerReplies`: `requires:
+/// ticket.status = waiting_on_customer`.
+#[auto_register(BOUNDED_CONTEXT)]
+impl CommandType for CustomerRespondsToTicket {
+    type Payload = CustomerRespondsToTicketPayload;
+    type Event = HelpdeskEvent;
+    const NAME: &'static str = "CustomerRespondsToTicket";
+    fn tag_mappings() -> Vec<TagMapping> {
+        ticket_tag()
+    }
+    fn rest_trigger_allowed() -> bool {
+        true
+    }
+    fn decide(payload: &Self::Payload, matching_events: &[Self::Event]) -> CommandDecision {
+        match ticket_status(matching_events, &payload.ticket_id) {
+            None => CommandDecision::Rejected {
+                reason: format!("ticket {} does not exist", payload.ticket_id),
+                kind: "ticket_not_found".into(),
+            },
+            Some(TicketStatus::WaitingOnCustomer) => CommandDecision::Accepted {
+                events: vec![EventSpec {
+                    event_type: "TicketCustomerResponded".into(),
+                    payload: serde_json::json!({
+                        "ticket_id": payload.ticket_id,
+                        "company_id": company_id_for_ticket(matching_events, &payload.ticket_id)
+                            .expect("a ticket with any status has a TicketCreated in its own history"),
+                        "requester_id": payload.requester_id,
+                        "message": payload.message,
+                    }),
+                }],
+            },
+            Some(other) => CommandDecision::Rejected {
+                reason: format!(
+                    "ticket {} is {other:?}, not waiting on the customer - nothing to respond to",
+                    payload.ticket_id
+                ),
+                kind: "ticket_not_waiting_on_customer".into(),
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct CloseTicketPayload {
+    pub ticket_id: String,
+}
+
+pub struct CloseTicket;
+
+/// `specs/skilj-helpdesk.allium`'s `rule TicketAutoCloses`: `requires:
+/// ticket.status = resolved`. Submitted by `src/bin/scheduler.rs` - see
+/// `TicketClosed`'s own doc comment.
+#[auto_register(BOUNDED_CONTEXT)]
+impl CommandType for CloseTicket {
+    type Payload = CloseTicketPayload;
+    type Event = HelpdeskEvent;
+    const NAME: &'static str = "CloseTicket";
+    fn tag_mappings() -> Vec<TagMapping> {
+        ticket_tag()
+    }
+    fn rest_trigger_allowed() -> bool {
+        true
+    }
+    fn decide(payload: &Self::Payload, matching_events: &[Self::Event]) -> CommandDecision {
+        match ticket_status(matching_events, &payload.ticket_id) {
+            None => CommandDecision::Rejected {
+                reason: format!("ticket {} does not exist", payload.ticket_id),
+                kind: "ticket_not_found".into(),
+            },
+            Some(TicketStatus::Resolved) => CommandDecision::Accepted {
+                events: vec![EventSpec {
+                    event_type: "TicketClosed".into(),
+                    payload: serde_json::json!({
+                        "ticket_id": payload.ticket_id,
+                        "company_id": company_id_for_ticket(matching_events, &payload.ticket_id)
+                            .expect("a ticket with any status has a TicketCreated in its own history"),
+                    }),
+                }],
+            },
+            Some(other) => CommandDecision::Rejected {
+                reason: format!(
+                    "ticket {} is {other:?}, not resolved - only a resolved ticket auto-closes",
+                    payload.ticket_id
+                ),
+                kind: "ticket_not_resolved".into(),
+            },
+        }
+    }
+}
+
+// --- projection ---
+
+#[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
+pub struct TicketSummaryState {
+    pub status: Option<String>,
+    /// A plain string, not `Option<TicketPriority>` - found the hard
+    /// way, over a real GraphQL request (`tests/graphql.rs`): a
+    /// `schemars`-derived enum's JSON Schema shape doesn't match what
+    /// `skilj-graphql`'s mapper recognises as a scalar, so it falls
+    /// back to its own documented behaviour (docs/architecture.md
+    /// §5.1) - an opaque, *double*-JSON-encoded string
+    /// (`"\"urgent\""`, not `"urgent"`). Not a bug to work around at
+    /// the GraphQL layer; a plain string field here is simply the
+    /// right shape for a read-model a GraphQL client will actually
+    /// query.
+    pub priority: Option<String>,
+    pub assigned_staff_id: Option<String>,
+}
+
+fn priority_str(priority: TicketPriority) -> &'static str {
+    match priority {
+        TicketPriority::Low => "low",
+        TicketPriority::Medium => "medium",
+        TicketPriority::High => "high",
+        TicketPriority::Urgent => "urgent",
+    }
+}
+
+/// Keyed by `ticket_id`. `specs/skilj-helpdesk.allium`'s `unhandled`
+/// derived field is `status not in {resolved, closed}` - not stored
+/// here directly since `closed` never occurs in this pass
+/// (`TicketAutoCloses` is deferred); a caller derives it from `status`
+/// the same way.
+pub struct TicketSummary;
+
+#[auto_register(BOUNDED_CONTEXT)]
+impl Projection for TicketSummary {
+    type State = TicketSummaryState;
+    type Event = HelpdeskEvent;
+    const NAME: &'static str = "TicketSummary";
+    fn consumed_event_types() -> Vec<&'static str> {
+        vec![
+            "TicketCreated",
+            "TicketAssigned",
+            "TicketResolved",
+            "TicketReopened",
+            "TicketInfoRequested",
+            "TicketCustomerResponded",
+            "TicketClosed",
+        ]
+    }
+    fn sync() -> bool {
+        true
+    }
+    fn keys(event: &Self::Event) -> Vec<String> {
+        match event {
+            HelpdeskEvent::CompanySignedUp(_)
+            | HelpdeskEvent::CompanyActivated(_)
+            | HelpdeskEvent::CompanyExpired(_) => vec![],
+            HelpdeskEvent::TicketCreated(p) => vec![p.ticket_id.clone()],
+            HelpdeskEvent::TicketAssigned(p) => vec![p.ticket_id.clone()],
+            HelpdeskEvent::TicketResolved(p) => vec![p.ticket_id.clone()],
+            HelpdeskEvent::TicketReopened(p) => vec![p.ticket_id.clone()],
+            HelpdeskEvent::TicketInfoRequested(p) => vec![p.ticket_id.clone()],
+            HelpdeskEvent::TicketCustomerResponded(p) => vec![p.ticket_id.clone()],
+            HelpdeskEvent::TicketClosed(p) => vec![p.ticket_id.clone()],
+        }
+    }
+    fn project(state: &mut Self::State, event: &Self::Event, _key: &str) {
+        match event {
+            HelpdeskEvent::CompanySignedUp(_)
+            | HelpdeskEvent::CompanyActivated(_)
+            | HelpdeskEvent::CompanyExpired(_) => {}
+            HelpdeskEvent::TicketCreated(p) => {
+                state.status = Some("open".into());
+                state.priority = Some(priority_str(p.priority).to_string());
+            }
+            HelpdeskEvent::TicketAssigned(p) => {
+                state.status = Some("in_progress".into());
+                state.assigned_staff_id = Some(p.staff_id.clone());
+            }
+            HelpdeskEvent::TicketResolved(_) => {
+                state.status = Some("resolved".into());
+            }
+            HelpdeskEvent::TicketReopened(_) => {
+                state.status = Some("in_progress".into());
+            }
+            HelpdeskEvent::TicketInfoRequested(_) => {
+                state.status = Some("waiting_on_customer".into());
+            }
+            HelpdeskEvent::TicketCustomerResponded(_) => {
+                state.status = Some("in_progress".into());
+            }
+            HelpdeskEvent::TicketClosed(_) => {
+                state.status = Some("closed".into());
+            }
+        }
+    }
+}
+
+// --- company-wide ticket list, for the frontend ---
+
+/// One turn of the `StaffRequestsInfo`/`CustomerReplies` back-and-forth
+/// (`rule StaffRequestsInfo`/`CustomerReplies` in the spec) - the actual
+/// conversation those two rules previously carried no content for.
+/// Nothing stops the cycle repeating (assign → ask → reply → ask again),
+/// so this accumulates across as many rounds as actually happen, not
+/// just one.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct TicketMessage {
+    pub author_id: String,
+    pub from_staff: bool,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub struct TicketListEntry {
+    pub ticket_id: String,
+    pub title: String,
+    pub description: String,
+    pub status: String,
+    pub priority: String,
+    pub requester_id: String,
+    pub assigned_staff_id: Option<String>,
+    pub messages: Vec<TicketMessage>,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
+pub struct CompanyTicketListState {
+    pub tickets: std::collections::HashMap<String, TicketListEntry>,
+}
+
+/// Keyed by `company_id`. What `frontend/` actually queries to render
+/// both sides of the app: the staff dashboard shows every entry, the
+/// customer view filters client-side to `requester_id = self` (the
+/// `StaffTicketQueue`/`CustomerPortal` surfaces `specs/skilj-helpdesk.allium`
+/// describes at the domain level - this is their real implementation,
+/// merged into one projection since nothing here is actually customer-
+/// only data; the split is presentation, not access control).
+pub struct CompanyTicketList;
+
+#[auto_register(BOUNDED_CONTEXT)]
+impl Projection for CompanyTicketList {
+    type State = CompanyTicketListState;
+    type Event = HelpdeskEvent;
+    const NAME: &'static str = "CompanyTicketList";
+    fn consumed_event_types() -> Vec<&'static str> {
+        vec![
+            "TicketCreated",
+            "TicketAssigned",
+            "TicketResolved",
+            "TicketReopened",
+            "TicketInfoRequested",
+            "TicketCustomerResponded",
+            "TicketClosed",
+        ]
+    }
+    fn sync() -> bool {
+        true
+    }
+    fn keys(event: &Self::Event) -> Vec<String> {
+        match event {
+            HelpdeskEvent::CompanySignedUp(_)
+            | HelpdeskEvent::CompanyActivated(_)
+            | HelpdeskEvent::CompanyExpired(_) => vec![],
+            HelpdeskEvent::TicketCreated(p) => vec![p.company_id.clone()],
+            // Every ticket-lifecycle event past creation now carries its
+            // own `company_id` too (stamped by each command's own
+            // `decide()` via `company_id_for_ticket` - see that
+            // function's doc comment) precisely so this projection's
+            // instance key is always the real company, not a stand-in.
+            HelpdeskEvent::TicketAssigned(p) => vec![p.company_id.clone()],
+            HelpdeskEvent::TicketResolved(p) => vec![p.company_id.clone()],
+            HelpdeskEvent::TicketReopened(p) => vec![p.company_id.clone()],
+            HelpdeskEvent::TicketInfoRequested(p) => vec![p.company_id.clone()],
+            HelpdeskEvent::TicketCustomerResponded(p) => vec![p.company_id.clone()],
+            HelpdeskEvent::TicketClosed(p) => vec![p.company_id.clone()],
+        }
+    }
+    fn project(state: &mut Self::State, event: &Self::Event, _key: &str) {
+        match event {
+            HelpdeskEvent::CompanySignedUp(_)
+            | HelpdeskEvent::CompanyActivated(_)
+            | HelpdeskEvent::CompanyExpired(_) => {}
+            HelpdeskEvent::TicketCreated(p) => {
+                state.tickets.insert(
+                    p.ticket_id.clone(),
+                    TicketListEntry {
+                        ticket_id: p.ticket_id.clone(),
+                        title: p.title.clone(),
+                        description: p.description.clone(),
+                        status: "open".into(),
+                        priority: priority_str(p.priority).to_string(),
+                        requester_id: p.requester_id.clone(),
+                        assigned_staff_id: None,
+                        messages: Vec::new(),
+                    },
+                );
+            }
+            HelpdeskEvent::TicketAssigned(p) => {
+                if let Some(entry) = state.tickets.get_mut(&p.ticket_id) {
+                    entry.status = "in_progress".into();
+                    entry.assigned_staff_id = Some(p.staff_id.clone());
+                }
+            }
+            HelpdeskEvent::TicketResolved(p) => {
+                if let Some(entry) = state.tickets.get_mut(&p.ticket_id) {
+                    entry.status = "resolved".into();
+                }
+            }
+            HelpdeskEvent::TicketReopened(p) => {
+                if let Some(entry) = state.tickets.get_mut(&p.ticket_id) {
+                    entry.status = "in_progress".into();
+                }
+            }
+            HelpdeskEvent::TicketInfoRequested(p) => {
+                if let Some(entry) = state.tickets.get_mut(&p.ticket_id) {
+                    entry.status = "waiting_on_customer".into();
+                    entry.messages.push(TicketMessage {
+                        author_id: p.staff_id.clone(),
+                        from_staff: true,
+                        text: p.message.clone(),
+                    });
+                }
+            }
+            HelpdeskEvent::TicketCustomerResponded(p) => {
+                if let Some(entry) = state.tickets.get_mut(&p.ticket_id) {
+                    entry.status = "in_progress".into();
+                    entry.messages.push(TicketMessage {
+                        author_id: p.requester_id.clone(),
+                        from_staff: false,
+                        text: p.message.clone(),
+                    });
+                }
+            }
+            HelpdeskEvent::TicketClosed(p) => {
+                if let Some(entry) = state.tickets.get_mut(&p.ticket_id) {
+                    entry.status = "closed".into();
+                }
+            }
+        }
+    }
+}
