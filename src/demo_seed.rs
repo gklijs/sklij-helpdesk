@@ -109,6 +109,21 @@ const CUSTOMER_REPLY_MESSAGES: &[&str] = &[
     "Thanks for looking into this!",
 ];
 
+const INTERNAL_NOTES: &[&str] = &[
+    "customer sounds frustrated, keep an eye on this one",
+    "looks like the same bug as last week's ticket",
+    "waiting on engineering, don't chase before EOD",
+    "VIP account - escalate to the lead if it stalls",
+];
+
+const RATING_COMMENTS: &[Option<&str>] = &[
+    Some("Fast and friendly, thanks!"),
+    Some("Took a while but got there."),
+    None,
+    Some("Would like a follow-up on the root cause."),
+    None,
+];
+
 fn random_priority(rng: &mut Rng) -> TicketPriority {
     // ~12% urgent - enough that `alerter` (which only ever pages on
     // `rule UrgentTicketNeedsImmediateAttention`, see `alerting.rs`'s
@@ -130,6 +145,11 @@ pub enum SeedTicketStatus {
     InProgress,
     WaitingOnCustomer,
     Resolved,
+    /// `MergeTickets`'s own outcome for the duplicate side - see that
+    /// action's own handling in `next_action`/`apply_outcome` below.
+    /// Never itself advanced further; a merged ticket is as terminal
+    /// here as it is for real (`helpdesk.rs`'s own `TicketStatus::Merged`).
+    Merged,
 }
 
 #[derive(Debug, Clone)]
@@ -222,6 +242,20 @@ pub enum SeedAction {
     ReopenTicket {
         ticket_id: String,
     },
+    AddInternalNote {
+        ticket_id: String,
+        staff_id: String,
+        note: String,
+    },
+    RateTicket {
+        ticket_id: String,
+        rating: u8,
+        comment: Option<String>,
+    },
+    MergeTickets {
+        primary_ticket_id: String,
+        duplicate_ticket_id: String,
+    },
 }
 
 /// Picks the next fake REST call to make. Never mutates `state` itself -
@@ -239,6 +273,19 @@ pub enum SeedAction {
 /// "error rate" panel than a real deployment - where rejections are
 /// business-as-usual - would ever show.
 pub fn next_action(state: &SeedState, rng: &mut Rng) -> SeedAction {
+    // Merging is checked first, and only rarely (1 in 15): it needs a
+    // *pair* of the same company's own tickets, unlike every other
+    // action below which just advances one - see `merge_candidate`'s
+    // own doc comment for how that pair is picked.
+    if state.tickets.len() >= 2 && rng.chance(1, 15) {
+        if let Some((primary_ticket_id, duplicate_ticket_id)) = merge_candidate(state, rng) {
+            return SeedAction::MergeTickets {
+                primary_ticket_id,
+                duplicate_ticket_id,
+            };
+        }
+    }
+
     if state.tickets.is_empty() || rng.chance(2, 5) {
         let company_id = state.companies[rng.below(state.companies.len())].clone();
         let ticket_id = state.next_ticket_id();
@@ -261,13 +308,21 @@ pub fn next_action(state: &SeedState, rng: &mut Rng) -> SeedAction {
         (SeedTicketStatus::Open, false) => SeedAction::AssignTicket { ticket_id, staff_id },
         (SeedTicketStatus::Open, true) => SeedAction::ResolveTicket { ticket_id },
 
-        (SeedTicketStatus::InProgress, false) if rng.chance(2, 3) => {
+        // 60% resolve, 20% ask the customer something, 20% just leave a
+        // note for another agent - the same three things a real
+        // in-progress ticket keeps doing until it's actually done.
+        (SeedTicketStatus::InProgress, false) if rng.chance(3, 5) => {
             SeedAction::ResolveTicket { ticket_id }
         }
-        (SeedTicketStatus::InProgress, false) => SeedAction::RequestInfo {
+        (SeedTicketStatus::InProgress, false) if rng.chance(1, 2) => SeedAction::RequestInfo {
             ticket_id,
             staff_id,
             message: REQUEST_INFO_MESSAGES[rng.below(REQUEST_INFO_MESSAGES.len())].to_string(),
+        },
+        (SeedTicketStatus::InProgress, false) => SeedAction::AddInternalNote {
+            ticket_id,
+            staff_id,
+            note: INTERNAL_NOTES[rng.below(INTERNAL_NOTES.len())].to_string(),
         },
         (SeedTicketStatus::InProgress, true) => SeedAction::AssignTicket { ticket_id, staff_id },
 
@@ -278,9 +333,16 @@ pub fn next_action(state: &SeedState, rng: &mut Rng) -> SeedAction {
         },
         (SeedTicketStatus::WaitingOnCustomer, true) => SeedAction::ResolveTicket { ticket_id },
 
+        // 20% reopen, ~27% the customer rates it, else a fresh ticket -
+        // a resolved ticket in this demo never sits idle for long.
         (SeedTicketStatus::Resolved, false) if rng.chance(1, 5) => {
             SeedAction::ReopenTicket { ticket_id }
         }
+        (SeedTicketStatus::Resolved, false) if rng.chance(1, 3) => SeedAction::RateTicket {
+            ticket_id,
+            rating: 1 + rng.below(5) as u8,
+            comment: RATING_COMMENTS[rng.below(RATING_COMMENTS.len())].map(str::to_string),
+        },
         (SeedTicketStatus::Resolved, false) => SeedAction::CreateTicket {
             ticket_id: state.next_ticket_id(),
             company_id: state.companies[rng.below(state.companies.len())].clone(),
@@ -290,7 +352,33 @@ pub fn next_action(state: &SeedState, rng: &mut Rng) -> SeedAction {
             priority: random_priority(rng),
         },
         (SeedTicketStatus::Resolved, true) => SeedAction::AssignTicket { ticket_id, staff_id },
+
+        // Merged is as terminal here as it is for real - nothing left to
+        // advance, so provoke a (correctly-rejected) attempt either way.
+        (SeedTicketStatus::Merged, _) => SeedAction::AssignTicket { ticket_id, staff_id },
     }
+}
+
+/// Picks two of this worker's own tracked tickets that share a company
+/// and aren't already merged - `MergeTickets` itself also rejects a
+/// cross-company or already-merged attempt (`helpdesk.rs`'s own
+/// `tickets_belong_to_different_companies`/status guards), so this is a
+/// courtesy to make the *common* case succeed, not a substitute for
+/// those real guards; a `None` here just means try something else this
+/// tick, not that no such pair could ever exist.
+fn merge_candidate(state: &SeedState, rng: &mut Rng) -> Option<(String, String)> {
+    let start = rng.below(state.tickets.len());
+    for offset in 1..state.tickets.len() {
+        let a = &state.tickets[start];
+        let b = &state.tickets[(start + offset) % state.tickets.len()];
+        if a.company_id == b.company_id
+            && a.status != SeedTicketStatus::Merged
+            && b.status != SeedTicketStatus::Merged
+        {
+            return Some((a.ticket_id.clone(), b.ticket_id.clone()));
+        }
+    }
+    None
 }
 
 /// Updates `state` to match what the real server just did - called with
@@ -345,6 +433,19 @@ pub fn apply_outcome(state: &mut SeedState, action: &SeedAction, accepted: bool)
         SeedAction::ReopenTicket { ticket_id } => {
             if let Some(t) = state.ticket_mut(ticket_id) {
                 t.status = SeedTicketStatus::InProgress;
+            }
+        }
+        // Cosmetic facts, not lifecycle steps - neither changes the
+        // ticket's own tracked status (real `AddInternalNote`/
+        // `RateTicket` don't either, see their own doc comments in
+        // `helpdesk.rs`), so there's nothing for this tracker to update.
+        SeedAction::AddInternalNote { .. } | SeedAction::RateTicket { .. } => {}
+        SeedAction::MergeTickets {
+            duplicate_ticket_id,
+            ..
+        } => {
+            if let Some(t) = state.ticket_mut(duplicate_ticket_id) {
+                t.status = SeedTicketStatus::Merged;
             }
         }
     }

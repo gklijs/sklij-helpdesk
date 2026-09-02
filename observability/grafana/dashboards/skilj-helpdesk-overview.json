@@ -191,6 +191,72 @@
         "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 0.01 } ] },
         "color": { "mode": "thresholds" } }, "overrides": [] },
       "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
+    },
+
+    { "id": 50, "type": "row", "title": "Beyond the original spec: escalation, merge, CSAT, notes", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 41 } },
+    {
+      "id": 51, "type": "stat", "title": "Escalations / min",
+      "description": "SLA-breach escalations (EscalateTicket) - see helpdesk.rs's own TicketEscalated doc comment.",
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 42 },
+      "datasource": { "type": "prometheus", "uid": "skilj-prometheus" },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "skilj-prometheus" },
+          "expr": "sum(rate(skilj_commands_processed_total{command_type=\"EscalateTicket\",outcome=\"accepted\"}[5m])) * 60",
+          "refId": "A" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short", "decimals": 1 }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "graphMode": "area" }
+    },
+    {
+      "id": 52, "type": "stat", "title": "Merges / min",
+      "description": "MergeTickets - skilj's own DCB model reading two tickets' tag streams at once.",
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 42 },
+      "datasource": { "type": "prometheus", "uid": "skilj-prometheus" },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "skilj-prometheus" },
+          "expr": "sum(rate(skilj_commands_processed_total{command_type=\"MergeTickets\",outcome=\"accepted\"}[5m])) * 60",
+          "refId": "A" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short", "decimals": 1 }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "graphMode": "area" }
+    },
+    {
+      "id": 53, "type": "stat", "title": "Tickets rated / min",
+      "description": "RateTicket (CSAT) throughput - a rate, not a satisfaction score: the rating value itself isn't an OTel metric, only queryable per-ticket via GraphQL/the projection.",
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 42 },
+      "datasource": { "type": "prometheus", "uid": "skilj-prometheus" },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "skilj-prometheus" },
+          "expr": "sum(rate(skilj_events_appended_total{event_type=\"TicketRated\"}[5m])) * 60",
+          "refId": "A" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short", "decimals": 1 }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "graphMode": "area" }
+    },
+    {
+      "id": 54, "type": "stat", "title": "Internal notes / min",
+      "description": "AddInternalNote - staff-only, deliberately absent from the customer-facing projections (see TicketInternalNoteAdded's own doc comment).",
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 42 },
+      "datasource": { "type": "prometheus", "uid": "skilj-prometheus" },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "skilj-prometheus" },
+          "expr": "sum(rate(skilj_events_appended_total{event_type=\"TicketInternalNoteAdded\"}[5m])) * 60",
+          "refId": "A" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short", "decimals": 1 }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "graphMode": "area" }
+    },
+    {
+      "id": 55, "type": "timeseries", "title": "New-flow command throughput by outcome",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 46 },
+      "datasource": { "type": "prometheus", "uid": "skilj-prometheus" },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "skilj-prometheus" },
+          "expr": "sum by (command_type, outcome) (rate(skilj_commands_processed_total{command_type=~\"EscalateTicket|MergeTickets|RateTicket|AddInternalNote\"}[1m]))",
+          "legendFormat": "{{command_type}} ({{outcome}})", "refId": "A" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
     }
   ]
 }

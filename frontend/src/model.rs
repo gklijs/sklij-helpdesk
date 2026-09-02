@@ -29,4 +29,17 @@ pub struct TicketListEntry {
     pub requester_id: String,
     pub assigned_staff_id: Option<String>,
     pub messages: Vec<TicketMessage>,
+    pub escalated: bool,
+    pub rating: Option<u8>,
+}
+
+/// Mirrors `skilj_helpdesk::helpdesk::TicketInternalNote` - fetched
+/// separately from `TicketListEntry` above, on demand
+/// (`pages::dashboard`'s own "Notes" toggle), never as part of the one
+/// eager `CompanyTicketList` fetch - see that projection's own doc
+/// comment for why internal notes live in their own projection at all.
+#[derive(Debug, Clone, Deserialize)]
+pub struct TicketInternalNote {
+    pub staff_id: String,
+    pub note: String,
 }

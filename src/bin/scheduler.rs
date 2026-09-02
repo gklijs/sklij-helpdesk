@@ -21,22 +21,46 @@
 //! deadline/mock-payment logic is `src/scheduling.rs`'s own, tested
 //! there without any HTTP or Postgres involved.
 //!
+//! **Restart safety**: see `alerter.rs`'s own doc comment - the exact
+//! same in-memory-state-plus-non-replayable-`mode=auto`-cursor gap
+//! applies here, over `rule TrialPeriodEnds`/`rule TicketAutoCloses`
+//! instead of `rule TicketBecomesOverdue`, fixed the identical way
+//! (`load_state`/`save_state` below, byte-for-byte the same shape as
+//! `alerter.rs`'s own - not shared between the two binaries for the
+//! same no-common-library-boundary reason `consume`/`submit_command`
+//! already aren't).
+//!
 //! Configuration (env vars, same minimal style as `alerter.rs`):
 //!   SKILJ_BASE_URL                     - default "http://localhost:3000"
 //!   TRIAL_DURATION_DAYS                - default 30 (matches the spec's
 //!                                         `config.trial_duration = 1.month`)
 //!   AUTO_CLOSE_AFTER_DAYS              - default 7  (matches
 //!                                         `config.auto_close_after`)
-//!   Six EventReadTokens ("id.secret"), one per event type this binary
+//!   SCHEDULER_STATE_FILE               - default "scheduler-state.json";
+//!                                         empty string disables
+//!                                         checkpointing - see
+//!                                         `alerter.rs`'s own
+//!                                         ALERTER_STATE_FILE doc.
+//!   Seven EventReadTokens ("id.secret"), one per event type this binary
 //!   needs to track company/ticket state from:
 //!     COMPANY_SIGNED_UP_TOKEN, COMPANY_ACTIVATED_TOKEN,
 //!     COMPANY_EXPIRED_TOKEN, TICKET_RESOLVED_TOKEN,
-//!     TICKET_REOPENED_TOKEN, TICKET_CLOSED_TOKEN
+//!     TICKET_REOPENED_TOKEN, TICKET_CLOSED_TOKEN, TICKETS_MERGED_TOKEN
+//!     (the last one exists only to drop a resolved-then-merged
+//!     duplicate ticket out of `resolved_tickets` below - without it,
+//!     `rule TicketAutoCloses` would resubmit a `CloseTicket` for that
+//!     same duplicate every tick, forever, each one correctly rejected
+//!     by `helpdesk.rs`'s own "Merged, not resolved" check but never
+//!     actually stopping - a real bug this project found and fixed the
+//!     same way `ALERTER_EVENT_TYPES`'s own `TicketsMerged` handling
+//!     already did for `rule TicketBecomesOverdue`, just missed here
+//!     originally since `MergeTickets` postdates this file's own first
+//!     pass)
 //!   Three CommandTokens, one per mutation this binary submits:
 //!     CONVERT_COMPANY_TRIAL_TOKEN, EXPIRE_COMPANY_TRIAL_TOKEN,
 //!     CLOSE_TICKET_TOKEN
 //!
-//! Nine tokens is a lot of environment configuration for one small
+//! Ten tokens is a lot of environment configuration for one small
 //! binary - a direct, visible consequence of skilj's own per-type token
 //! scoping (`AccessToken` in specs/skilj.allium: one capability, one
 //! registered type, per token). A real deployment would likely load
@@ -50,8 +74,10 @@
 //! why `_telemetry` below is just held, not explicitly shut down.
 
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use skilj_helpdesk::scheduling::{mock_charge_succeeds, should_auto_close, trial_period_has_ended};
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::time::Duration as StdDuration;
 
 const POLL_INTERVAL: StdDuration = StdDuration::from_secs(30);
@@ -66,9 +92,13 @@ struct Config {
     ticket_resolved_token: String,
     ticket_reopened_token: String,
     ticket_closed_token: String,
+    tickets_merged_token: String,
     convert_company_trial_token: String,
     expire_company_trial_token: String,
     close_ticket_token: String,
+    /// `None` when `SCHEDULER_STATE_FILE` is set to an empty string -
+    /// see `alerter.rs`'s identical field for why this exists.
+    state_file: Option<PathBuf>,
 }
 
 impl Config {
@@ -85,6 +115,11 @@ impl Config {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(default)
         };
+        let state_file = match std::env::var("SCHEDULER_STATE_FILE") {
+            Ok(s) if s.is_empty() => None,
+            Ok(s) => Some(PathBuf::from(s)),
+            Err(_) => Some(PathBuf::from("scheduler-state.json")),
+        };
         Config {
             base_url: std::env::var("SKILJ_BASE_URL")
                 .unwrap_or_else(|_| "http://localhost:3000".to_string()),
@@ -96,18 +131,25 @@ impl Config {
             ticket_resolved_token: required("TICKET_RESOLVED_TOKEN"),
             ticket_reopened_token: required("TICKET_REOPENED_TOKEN"),
             ticket_closed_token: required("TICKET_CLOSED_TOKEN"),
+            tickets_merged_token: required("TICKETS_MERGED_TOKEN"),
             convert_company_trial_token: required("CONVERT_COMPANY_TRIAL_TOKEN"),
             expire_company_trial_token: required("EXPIRE_COMPANY_TRIAL_TOKEN"),
             close_ticket_token: required("CLOSE_TICKET_TOKEN"),
+            state_file,
         }
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Serialize, Deserialize)]
 struct State {
     /// company_id -> when `CompanySignedUp` fired (its trial clock start).
     trialing_companies: HashMap<String, DateTime<Utc>>,
-    /// ticket_id -> when `TicketResolved` last fired.
+    /// ticket_id -> when `TicketResolved` last fired. A duplicate
+    /// merged away via `MergeTickets` (`TicketsMerged` below) is
+    /// removed from here the same way `TicketReopened`/`TicketClosed`
+    /// already do - it's just as terminal, and `rule TicketAutoCloses`
+    /// would otherwise resubmit a `CloseTicket` for it forever, always
+    /// rejected, never actually stopping.
     resolved_tickets: HashMap<String, DateTime<Utc>>,
 }
 
@@ -117,7 +159,10 @@ async fn main() {
 
     let config = Config::from_env();
     let client = reqwest::Client::new();
-    let mut state = State::default();
+    let mut state = match &config.state_file {
+        Some(path) => load_state(path),
+        None => State::default(),
+    };
     println!("scheduler: polling {} every {POLL_INTERVAL:?}", config.base_url);
 
     loop {
@@ -125,7 +170,44 @@ async fn main() {
             eprintln!("scheduler: tick failed, will retry: {e}");
             tracing::warn!(error = %e, "scheduler: tick failed, will retry");
         }
+        // See `alerter.rs`'s identical checkpoint call for why this
+        // happens every tick, success or not.
+        if let Some(path) = &config.state_file {
+            save_state(path, &state);
+        }
         tokio::time::sleep(POLL_INTERVAL).await;
+    }
+}
+
+/// Byte-for-byte the same shape as `alerter.rs`'s own `load_state` -
+/// see that one's doc comment.
+fn load_state(path: &std::path::Path) -> State {
+    match std::fs::read_to_string(path) {
+        Ok(contents) => match serde_json::from_str(&contents) {
+            Ok(state) => {
+                println!("scheduler: resumed tracking state from {}", path.display());
+                state
+            }
+            Err(e) => {
+                eprintln!(
+                    "scheduler: {} exists but couldn't be parsed ({e}) - starting fresh",
+                    path.display()
+                );
+                State::default()
+            }
+        },
+        Err(_) => State::default(),
+    }
+}
+
+/// Byte-for-byte the same shape as `alerter.rs`'s own `save_state` -
+/// see that one's doc comment.
+fn save_state(path: &std::path::Path, state: &State) {
+    let tmp = path.with_extension("json.tmp");
+    let write = std::fs::write(&tmp, serde_json::to_vec(state).expect("State always serializes"))
+        .and_then(|()| std::fs::rename(&tmp, path));
+    if let Err(e) = write {
+        eprintln!("scheduler: couldn't checkpoint state to {}: {e}", path.display());
     }
 }
 
@@ -173,6 +255,11 @@ async fn tick(
     for (_, payload, _) in consume(client, &config.base_url, &config.ticket_closed_token).await? {
         if let Some(ticket_id) = payload["ticket_id"].as_str() {
             state.resolved_tickets.remove(ticket_id);
+        }
+    }
+    for (_, payload, _) in consume(client, &config.base_url, &config.tickets_merged_token).await? {
+        if let Some(duplicate_ticket_id) = payload["duplicate_ticket_id"].as_str() {
+            state.resolved_tickets.remove(duplicate_ticket_id);
         }
     }
 

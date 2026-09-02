@@ -29,3 +29,11 @@ Thumbs.db
 
 # Logs
 *.log
+
+# alerter/scheduler restart-safety checkpoints (src/bin/alerter.rs,
+# src/bin/scheduler.rs's own ALERTER_STATE_FILE/SCHEDULER_STATE_FILE) -
+# local runtime state, not something to commit
+/alerter-state.json
+/alerter-state.json.tmp
+/scheduler-state.json
+/scheduler-state.json.tmp

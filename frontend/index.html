@@ -132,11 +132,21 @@
       .badge.status-in_progress { background: var(--brand-light); color: var(--brand-dark); }
       .badge.status-waiting_on_customer { background: var(--warn-bg); color: var(--warn); }
       .badge.status-resolved, .badge.status-closed { background: var(--ok-bg); color: var(--ok); }
+      /* Not in the original spec - MergeTickets's own outcome for the
+         duplicate side (see helpdesk.rs's TicketStatus::Merged). Neutral
+         grey: as terminal as "closed", but a distinct fact from it. */
+      .badge.status-merged { background: #f3f4f6; color: #4b5563; }
 
       .badge.priority-low { background: #f3f4f6; color: #4b5563; }
       .badge.priority-medium { background: var(--info-bg); color: var(--info); }
       .badge.priority-high { background: var(--warn-bg); color: var(--warn); }
       .badge.priority-urgent { background: var(--danger-bg); color: var(--danger); }
+      /* TicketEscalated - a real SLA-breach alert, not a routine
+         priority; deliberately louder than the priority badges. */
+      .badge.escalated { background: var(--danger-bg); color: var(--danger); margin-left: 0.3rem; }
+
+      .rating-given { color: var(--ok); font-weight: 600; margin: 0 0 0.5rem; }
+      .internal-notes { margin-top: 0.75rem; padding-top: 0.5rem; border-top: 1px dashed var(--border); }
 
       .error { color: var(--danger); background: var(--danger-bg); padding: 0.5rem 0.75rem; border-radius: 0.4rem; }
       .error:empty { display: none; }

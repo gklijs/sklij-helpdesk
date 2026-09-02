@@ -1,9 +1,31 @@
-use crate::{api, auth, config, model::TicketListEntry};
+use crate::{
+    api, auth, config,
+    model::{TicketInternalNote, TicketListEntry},
+};
 use leptos::ev::SubmitEvent;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use std::collections::HashMap;
 use web_sys::window;
+
+/// `TicketInternalNotes` is its own projection, queried on demand, not
+/// as part of the one eager `CompanyTicketList` fetch `Dashboard`
+/// already does - see that projection's own doc comment in
+/// `helpdesk.rs`. Shared between the "Notes" toggle's own first fetch
+/// and `AddInternalNote`'s own re-fetch-after-success, rather than
+/// duplicated inline in each.
+async fn fetch_internal_notes(token: &str, ticket_id: &str) -> Result<Vec<TicketInternalNote>, String> {
+    let json = api::query_projection(
+        token,
+        config::BOUNDED_CONTEXT,
+        "TicketInternalNotes",
+        ticket_id,
+        "helpdesk_TicketInternalNotes",
+        "notes",
+    )
+    .await?;
+    serde_json::from_value(json).map_err(|e| e.to_string())
+}
 
 /// Dex's own opaque `sub` values (see `auth::decode_jwt_sub`'s own doc
 /// comment on why they're not the plain userID) are ~30 characters of
@@ -190,14 +212,20 @@ fn TicketRow(
     set_status: WriteSignal<String>,
 ) -> impl IntoView {
     let ticket_id = ticket.ticket_id.clone();
-    let run = move |command_type_name: &'static str, payload: serde_json::Value| {
+    // Clones `token` for `run`'s own environment rather than moving the
+    // outer parameter in directly - `toggle_notes`/`add_note` below need
+    // their own copy of it too.
+    let run = {
         let token = token.clone();
-        spawn_local(async move {
-            match api::submit_command(&token, config::BOUNDED_CONTEXT, command_type_name, &payload).await {
-                Ok(_) => set_refresh.update(|n| *n += 1),
-                Err(e) => set_status.set(format!("{command_type_name} failed: {e}")),
-            }
-        });
+        move |command_type_name: &'static str, payload: serde_json::Value| {
+            let token = token.clone();
+            spawn_local(async move {
+                match api::submit_command(&token, config::BOUNDED_CONTEXT, command_type_name, &payload).await {
+                    Ok(_) => set_refresh.update(|n| *n += 1),
+                    Err(e) => set_status.set(format!("{command_type_name} failed: {e}")),
+                }
+            });
+        }
     };
 
     let assign = {
@@ -246,6 +274,7 @@ fn TicketRow(
     let reply = {
         let ticket_id = ticket_id.clone();
         let my_sub = my_sub.clone();
+        let run = run.clone();
         move |_| {
             let text = message_text.get();
             set_message_text.set(String::new());
@@ -256,10 +285,117 @@ fn TicketRow(
         }
     };
 
+    // CSAT (RateTicket) - customer-only, own ticket, once resolved/closed,
+    // and only while `ticket.rating` is still absent (see
+    // `TicketSummaryState::rating`'s own doc comment for why that field
+    // exists at all: exactly so this form knows when to stop showing
+    // itself).
+    let (rating_value, set_rating_value) = signal(5u32);
+    let (rating_comment, set_rating_comment) = signal(String::new());
+    let can_rate = !is_staff
+        && is_own_ticket
+        && matches!(ticket.status.as_str(), "resolved" | "closed")
+        && ticket.rating.is_none();
+    let existing_rating = ticket.rating;
+    let submit_rating = {
+        let ticket_id = ticket_id.clone();
+        let run = run.clone();
+        move |_| {
+            let rating = rating_value.get();
+            let comment = rating_comment.get();
+            set_rating_comment.set(String::new());
+            let comment = if comment.trim().is_empty() {
+                serde_json::Value::Null
+            } else {
+                serde_json::Value::String(comment)
+            };
+            run(
+                "RateTicket",
+                serde_json::json!({ "ticket_id": ticket_id, "rating": rating, "comment": comment }),
+            )
+        }
+    };
+
+    // Internal notes - staff-only, fetched on demand (a second, separate
+    // query - see `fetch_internal_notes`'s own doc comment for why this
+    // never rides along with the one eager `CompanyTicketList` fetch).
+    let (note_text, set_note_text) = signal(String::new());
+    let (notes, set_notes) = signal(Vec::<TicketInternalNote>::new());
+    let (notes_open, set_notes_open) = signal(false);
+    let toggle_notes = {
+        let ticket_id = ticket_id.clone();
+        let token = token.clone();
+        move |_| {
+            let opening = !notes_open.get();
+            set_notes_open.set(opening);
+            if opening {
+                let ticket_id = ticket_id.clone();
+                let token = token.clone();
+                spawn_local(async move {
+                    match fetch_internal_notes(&token, &ticket_id).await {
+                        Ok(list) => set_notes.set(list),
+                        Err(e) => set_status.set(format!("couldn't load notes: {e}")),
+                    }
+                });
+            }
+        }
+    };
+    let add_note = {
+        let ticket_id = ticket_id.clone();
+        let my_sub = my_sub.clone();
+        let token = token.clone();
+        move |_| {
+            let text = note_text.get();
+            if text.trim().is_empty() {
+                return;
+            }
+            set_note_text.set(String::new());
+            let ticket_id = ticket_id.clone();
+            let staff_id = my_sub.clone();
+            let token = token.clone();
+            spawn_local(async move {
+                let payload =
+                    serde_json::json!({ "ticket_id": ticket_id, "staff_id": staff_id, "note": text });
+                match api::submit_command(&token, config::BOUNDED_CONTEXT, "AddInternalNote", &payload)
+                    .await
+                {
+                    Ok(_) => match fetch_internal_notes(&token, &ticket_id).await {
+                        Ok(list) => set_notes.set(list),
+                        Err(e) => set_status.set(format!("couldn't reload notes: {e}")),
+                    },
+                    Err(e) => set_status.set(format!("AddInternalNote failed: {e}")),
+                }
+            });
+        }
+    };
+
+    // Merge - staff-only, on either side (this ticket becomes the
+    // primary, whatever's typed in becomes the duplicate) - no
+    // ticket-picker UI, just a raw id, same "type the id in" shortcut
+    // `on_create` above already takes for its own generated ticket_id.
+    let (merge_duplicate_id, set_merge_duplicate_id) = signal(String::new());
+    let can_merge = is_staff && !matches!(ticket.status.as_str(), "closed" | "merged");
+    let merge = {
+        let ticket_id = ticket_id.clone();
+        let run = run.clone();
+        move |_| {
+            let duplicate_ticket_id = merge_duplicate_id.get();
+            if duplicate_ticket_id.trim().is_empty() {
+                return;
+            }
+            set_merge_duplicate_id.set(String::new());
+            run(
+                "MergeTickets",
+                serde_json::json!({ "primary_ticket_id": ticket_id, "duplicate_ticket_id": duplicate_ticket_id }),
+            )
+        }
+    };
+
     let status_badge_class = format!("badge status-{}", ticket.status);
     let status_text = ticket.status.replace('_', " ");
     let priority_badge_class = format!("badge priority-{}", ticket.priority);
     let priority_text = ticket.priority.clone();
+    let escalated = ticket.escalated;
     let status_for_staff_1 = ticket.status.clone();
     let status_for_staff_2 = ticket.status.clone();
     let status_for_staff_3 = ticket.status.clone();
@@ -272,7 +408,10 @@ fn TicketRow(
         <tr>
             <td>{ticket.title.clone()}</td>
             <td><span class=status_badge_class>{status_text}</span></td>
-            <td><span class=priority_badge_class>{priority_text}</span></td>
+            <td>
+                <span class=priority_badge_class>{priority_text}</span>
+                {escalated.then(|| view! { <span class="badge escalated">"⚠ Escalated"</span> })}
+            </td>
             <td>{short_id(&ticket.requester_id)}</td>
             <td>{ticket.assigned_staff_id.as_deref().map(short_id).unwrap_or_default()}</td>
             <td>
@@ -318,6 +457,69 @@ fn TicketRow(
                             on:input:target=move |ev| set_message_text.set(ev.target().value())
                         />
                         <button on:click=reply>"Reply"</button>
+                    </div>
+                })}
+                {existing_rating.map(|r| view! {
+                    <p class="rating-given">{format!("You rated this ticket: {r}★")}</p>
+                })}
+                {can_rate.then(|| view! {
+                    <div class="reply-form">
+                        <select on:change:target=move |ev| set_rating_value.set(ev.target().value().parse().unwrap_or(5))>
+                            <option value="5">"★★★★★ (5)"</option>
+                            <option value="4">"★★★★ (4)"</option>
+                            <option value="3">"★★★ (3)"</option>
+                            <option value="2">"★★ (2)"</option>
+                            <option value="1">"★ (1)"</option>
+                        </select>
+                        <input
+                            type="text"
+                            placeholder="Comment (optional)"
+                            prop:value=rating_comment
+                            on:input:target=move |ev| set_rating_comment.set(ev.target().value())
+                        />
+                        <button on:click=submit_rating>"Rate"</button>
+                    </div>
+                })}
+                {is_staff.then(|| view! {
+                    <div class="internal-notes">
+                        <button on:click=toggle_notes>
+                            {move || if notes_open.get() { "Hide notes" } else { "Notes" }}
+                        </button>
+                        {move || {
+                            let add_note = add_note.clone();
+                            notes_open.get().then(move || view! {
+                                <div>
+                                    <ul class="messages">
+                                        {move || notes.get().into_iter().map(|n| view! {
+                                            <li class="from-staff">
+                                                <strong>{format!("{}: ", short_id(&n.staff_id))}</strong>
+                                                {n.note}
+                                            </li>
+                                        }).collect_view()}
+                                    </ul>
+                                    <div class="reply-form">
+                                        <input
+                                            type="text"
+                                            placeholder="Leave a note for other staff..."
+                                            prop:value=note_text
+                                            on:input:target=move |ev| set_note_text.set(ev.target().value())
+                                        />
+                                        <button on:click=add_note>"Add note"</button>
+                                    </div>
+                                </div>
+                            })
+                        }}
+                    </div>
+                })}
+                {can_merge.then(|| view! {
+                    <div class="reply-form">
+                        <input
+                            type="text"
+                            placeholder="Duplicate ticket id to merge into this one..."
+                            prop:value=merge_duplicate_id
+                            on:input:target=move |ev| set_merge_duplicate_id.set(ev.target().value())
+                        />
+                        <button on:click=merge>"Merge"</button>
                     </div>
                 })}
             </td>

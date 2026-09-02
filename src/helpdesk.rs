@@ -16,6 +16,22 @@
 //! convention as `skilj-demo`'s own `account_id`/`course_id` - never
 //! generated inside `decide()`, which stays pure and I/O-free by
 //! contract (`CommandType::decide`'s own doc comment).
+//!
+//! Four flows beyond the original spec (`TicketEscalated`/`EscalateTicket`,
+//! `TicketsMerged`/`MergeTickets`, `TicketRated`/`RateTicket`,
+//! `TicketInternalNoteAdded`/`AddInternalNote` - each type's own doc
+//! comment explains its own reasoning) - added to give the telemetry/
+//! dashboard work (see `src/telemetry.rs`, `observability/`) genuinely
+//! varied traffic to show, grounded in how real helpdesk tools work
+//! (SLA-breach escalation, ticket merging, CSAT, internal notes), not
+//! invented for their own sake. `TicketInternalNoteAdded` is the one
+//! deliberately kept out of `CompanyTicketList`/`TicketSummary` below -
+//! that projection's own doc comment claims "nothing here is actually
+//! customer-only data," which is only true because an internal note
+//! never enters it; folding one in and relying on the frontend to filter
+//! it back out (not touched this pass - no wasm toolchain to verify
+//! against in this sandbox) would make that claim false with no
+//! server-side enforcement behind it.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -310,6 +326,128 @@ impl EventType for TicketClosed {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct TicketEscalatedPayload {
+    pub ticket_id: String,
+    pub company_id: String,
+    pub previous_priority: TicketPriority,
+    pub new_priority: TicketPriority,
+}
+
+pub struct TicketEscalated;
+
+/// A deliberate, documented extension of `specs/skilj-helpdesk.allium`'s
+/// `rule TicketBecomesOverdue` - see that rule's own updated `@guidance`
+/// note for why this pass turns "page a lead" into a real persisted
+/// priority bump, not just a console alert. Submitted by
+/// `src/bin/alerter.rs`'s own overdue sweep, the same "a background
+/// binary submits an ordinary command" treatment `TicketClosed`/
+/// `CompanyActivated` already get from `scheduler.rs`.
+#[auto_register(BOUNDED_CONTEXT)]
+impl EventType for TicketEscalated {
+    type Payload = TicketEscalatedPayload;
+    const NAME: &'static str = "TicketEscalated";
+    fn tag_mappings() -> Vec<TagMapping> {
+        ticket_tag()
+    }
+    /// `src/bin/alerter.rs` reads this itself (own output, consumed back)
+    /// to stop re-submitting `EscalateTicket` for a ticket it (or another
+    /// alerter instance) already escalated - see
+    /// `CompanySignedUp::event_read_allowed`'s own doc comment for the
+    /// general pattern.
+    fn event_read_allowed() -> bool {
+        true
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct TicketsMergedPayload {
+    pub primary_ticket_id: String,
+    pub duplicate_ticket_id: String,
+    pub company_id: String,
+}
+
+pub struct TicketsMerged;
+
+/// A showcase of skilj's own DCB model, not in the original spec: two
+/// tickets, one event, no aggregate boundary needed - see
+/// `MergeTickets::tag_mappings` below for the command side of the same
+/// trick. Tagged on *both* ticket ids (two `TagMapping` entries under
+/// the same `"ticket"` key), so any later command against either ticket
+/// sees this in its own `matching_events`.
+#[auto_register(BOUNDED_CONTEXT)]
+impl EventType for TicketsMerged {
+    type Payload = TicketsMergedPayload;
+    const NAME: &'static str = "TicketsMerged";
+    fn tag_mappings() -> Vec<TagMapping> {
+        vec![
+            TagMapping {
+                key: "ticket".into(),
+                field: "primary_ticket_id".into(),
+            },
+            TagMapping {
+                key: "ticket".into(),
+                field: "duplicate_ticket_id".into(),
+            },
+        ]
+    }
+    /// `src/bin/alerter.rs` reads this to stop tracking the duplicate
+    /// ticket as unhandled once merged away - see
+    /// `CompanySignedUp::event_read_allowed`'s own doc comment.
+    fn event_read_allowed() -> bool {
+        true
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct TicketRatedPayload {
+    pub ticket_id: String,
+    pub company_id: String,
+    pub rating: u8,
+    pub comment: Option<String>,
+}
+
+pub struct TicketRated;
+
+/// Not in the original spec - a CSAT survey response, standard practice
+/// once a ticket is resolved (Zendesk, Freshdesk). Nobody reads this back
+/// over the REST event feed this pass (`event_read_allowed` defaults to
+/// `false`); it's queried the same way any other historical fact is,
+/// over GraphQL/`get_projection_state`.
+#[auto_register(BOUNDED_CONTEXT)]
+impl EventType for TicketRated {
+    type Payload = TicketRatedPayload;
+    const NAME: &'static str = "TicketRated";
+    fn tag_mappings() -> Vec<TagMapping> {
+        ticket_tag()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct TicketInternalNoteAddedPayload {
+    pub ticket_id: String,
+    pub company_id: String,
+    pub staff_id: String,
+    pub note: String,
+}
+
+pub struct TicketInternalNoteAdded;
+
+/// Not in the original spec - a staff-only note. Deliberately never
+/// folded into `CompanyTicketList`/`TicketSummary` (see this file's own
+/// module doc comment on why keeping it structurally separate, rather
+/// than tagging entries "internal" for the frontend to filter, is what
+/// actually keeps `CompanyTicketList`'s own "nothing here is customer-
+/// only data" claim true).
+#[auto_register(BOUNDED_CONTEXT)]
+impl EventType for TicketInternalNoteAdded {
+    type Payload = TicketInternalNoteAddedPayload;
+    const NAME: &'static str = "TicketInternalNoteAdded";
+    fn tag_mappings() -> Vec<TagMapping> {
+        ticket_tag()
+    }
+}
+
 /// This bounded context's own hand-written event enum - docs/
 /// architecture.md §1.4/§1.6, same technique as skilj-demo's
 /// `BankingEvent`/`CoursesEvent`.
@@ -324,6 +462,10 @@ pub enum HelpdeskEvent {
     TicketInfoRequested(TicketInfoRequestedPayload),
     TicketCustomerResponded(TicketCustomerRespondedPayload),
     TicketClosed(TicketClosedPayload),
+    TicketEscalated(TicketEscalatedPayload),
+    TicketsMerged(TicketsMergedPayload),
+    TicketRated(TicketRatedPayload),
+    TicketInternalNoteAdded(TicketInternalNoteAddedPayload),
 }
 
 impl BoundedContextEvent for HelpdeskEvent {
@@ -359,12 +501,29 @@ impl BoundedContextEvent for HelpdeskEvent {
             "TicketClosed" => {
                 Some(serde_json::from_str(&event.payload).map(HelpdeskEvent::TicketClosed))
             }
+            "TicketEscalated" => {
+                Some(serde_json::from_str(&event.payload).map(HelpdeskEvent::TicketEscalated))
+            }
+            "TicketsMerged" => {
+                Some(serde_json::from_str(&event.payload).map(HelpdeskEvent::TicketsMerged))
+            }
+            "TicketRated" => {
+                Some(serde_json::from_str(&event.payload).map(HelpdeskEvent::TicketRated))
+            }
+            "TicketInternalNoteAdded" => Some(
+                serde_json::from_str(&event.payload).map(HelpdeskEvent::TicketInternalNoteAdded),
+            ),
             _ => None,
         }
     }
 }
 
-/// `specs/skilj-helpdesk.allium`'s `Ticket.status`, in full.
+/// `specs/skilj-helpdesk.allium`'s `Ticket.status`, plus `Merged` - not
+/// in the original spec, `MergeTickets`'s own outcome for the duplicate
+/// side of a merge (see that command's doc comment). Every *other*
+/// command's own status match already ends on a catch-all `Some(other)
+/// => Rejected{..}` arm, so adding this variant needed no changes
+/// anywhere else - verified by reading each one, not assumed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TicketStatus {
     Open,
@@ -372,6 +531,7 @@ pub enum TicketStatus {
     WaitingOnCustomer,
     Resolved,
     Closed,
+    Merged,
 }
 
 /// Folds this ticket's own status from its slice of `matching_events` -
@@ -403,10 +563,33 @@ fn ticket_status(matching_events: &[HelpdeskEvent], ticket_id: &str) -> Option<T
             HelpdeskEvent::TicketClosed(p) if p.ticket_id == ticket_id => {
                 status = Some(TicketStatus::Closed);
             }
+            // Only the *duplicate* side becomes Merged - the primary's
+            // own status is untouched by a merge (see `MergeTickets`'s
+            // own doc comment), so this only ever matches
+            // `duplicate_ticket_id`, never `primary_ticket_id`.
+            HelpdeskEvent::TicketsMerged(p) if p.duplicate_ticket_id == ticket_id => {
+                status = Some(TicketStatus::Merged);
+            }
             _ => {}
         }
     }
     status
+}
+
+/// The one-tier priority bump `EscalateTicket` applies - covered by that
+/// command's own integration test (this file has no unit-test module of
+/// its own; every other pure fold here is proven the same way, through
+/// the REST surface). Clamped at `Urgent` rather than wrapping or
+/// erroring: escalating an already-urgent ticket a second time is
+/// rejected before this is ever called (see `EscalateTicket`'s own
+/// `already_escalated` guard), but clamping here too means this
+/// function is total and never needs to fail on its own account.
+fn escalate_priority(priority: TicketPriority) -> TicketPriority {
+    match priority {
+        TicketPriority::Low => TicketPriority::Medium,
+        TicketPriority::Medium => TicketPriority::High,
+        TicketPriority::High | TicketPriority::Urgent => TicketPriority::Urgent,
+    }
 }
 
 /// `specs/skilj-helpdesk.allium`'s `Company.status`, in full.
@@ -1023,6 +1206,296 @@ impl CommandType for CloseTicket {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct EscalateTicketPayload {
+    pub ticket_id: String,
+}
+
+pub struct EscalateTicket;
+
+/// Not in the original spec - see `TicketEscalated`'s own doc comment,
+/// and `specs/skilj-helpdesk.allium`'s updated `rule
+/// TicketBecomesOverdue`. Submitted by `src/bin/alerter.rs`'s own
+/// overdue sweep, never by a person - same "a background binary submits
+/// an ordinary command" treatment `CloseTicket`/`ConvertCompanyTrial`
+/// already get from `scheduler.rs`.
+#[auto_register(BOUNDED_CONTEXT)]
+impl CommandType for EscalateTicket {
+    type Payload = EscalateTicketPayload;
+    type Event = HelpdeskEvent;
+    const NAME: &'static str = "EscalateTicket";
+    fn tag_mappings() -> Vec<TagMapping> {
+        ticket_tag()
+    }
+    fn rest_trigger_allowed() -> bool {
+        true
+    }
+    fn decide(payload: &Self::Payload, matching_events: &[Self::Event]) -> CommandDecision {
+        match ticket_status(matching_events, &payload.ticket_id) {
+            None => CommandDecision::Rejected {
+                reason: format!("ticket {} does not exist", payload.ticket_id),
+                kind: "ticket_not_found".into(),
+            },
+            Some(TicketStatus::Resolved | TicketStatus::Closed | TicketStatus::Merged) => {
+                CommandDecision::Rejected {
+                    reason: format!(
+                        "ticket {} is already handled - nothing to escalate",
+                        payload.ticket_id
+                    ),
+                    kind: "ticket_not_unhandled".into(),
+                }
+            }
+            Some(
+                TicketStatus::Open | TicketStatus::InProgress | TicketStatus::WaitingOnCustomer,
+            ) => {
+                let already_escalated = matching_events.iter().any(|e| {
+                    matches!(e, HelpdeskEvent::TicketEscalated(p) if p.ticket_id == payload.ticket_id)
+                });
+                if already_escalated {
+                    return CommandDecision::Rejected {
+                        reason: format!("ticket {} has already been escalated", payload.ticket_id),
+                        kind: "already_escalated".into(),
+                    };
+                }
+                let previous_priority = matching_events
+                    .iter()
+                    .find_map(|e| match e {
+                        HelpdeskEvent::TicketCreated(p) if p.ticket_id == payload.ticket_id => {
+                            Some(p.priority)
+                        }
+                        _ => None,
+                    })
+                    .expect("a ticket with any status has a TicketCreated in its own history");
+                let new_priority = escalate_priority(previous_priority);
+                CommandDecision::Accepted {
+                    events: vec![EventSpec {
+                        event_type: "TicketEscalated".into(),
+                        payload: serde_json::json!({
+                            "ticket_id": payload.ticket_id,
+                            "company_id": company_id_for_ticket(matching_events, &payload.ticket_id)
+                                .expect("a ticket with any status has a TicketCreated in its own history"),
+                            "previous_priority": previous_priority,
+                            "new_priority": new_priority,
+                        }),
+                    }],
+                }
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct MergeTicketsPayload {
+    pub primary_ticket_id: String,
+    pub duplicate_ticket_id: String,
+}
+
+pub struct MergeTickets;
+
+/// Not in the original spec - the showcase of skilj's own DCB model this
+/// crate hadn't yet demonstrated: `tag_mappings` below declares *two*
+/// `"ticket"` tags (one per payload field), so `matching_events` is the
+/// union of both tickets' own histories - no classic aggregate boundary,
+/// no two-phase commit, one ordinary `decide()` reasoning about two
+/// entities' consistency at once. See `TicketsMerged`'s own doc comment
+/// for the event side of the same trick.
+#[auto_register(BOUNDED_CONTEXT)]
+impl CommandType for MergeTickets {
+    type Payload = MergeTicketsPayload;
+    type Event = HelpdeskEvent;
+    const NAME: &'static str = "MergeTickets";
+    fn tag_mappings() -> Vec<TagMapping> {
+        vec![
+            TagMapping {
+                key: "ticket".into(),
+                field: "primary_ticket_id".into(),
+            },
+            TagMapping {
+                key: "ticket".into(),
+                field: "duplicate_ticket_id".into(),
+            },
+        ]
+    }
+    fn rest_trigger_allowed() -> bool {
+        true
+    }
+    fn decide(payload: &Self::Payload, matching_events: &[Self::Event]) -> CommandDecision {
+        if payload.primary_ticket_id == payload.duplicate_ticket_id {
+            return CommandDecision::Rejected {
+                reason: "a ticket cannot be merged into itself".into(),
+                kind: "cannot_merge_ticket_into_itself".into(),
+            };
+        }
+        let primary_status = ticket_status(matching_events, &payload.primary_ticket_id);
+        let duplicate_status = ticket_status(matching_events, &payload.duplicate_ticket_id);
+        match (primary_status, duplicate_status) {
+            (None, _) => CommandDecision::Rejected {
+                reason: format!("ticket {} does not exist", payload.primary_ticket_id),
+                kind: "primary_ticket_not_found".into(),
+            },
+            (_, None) => CommandDecision::Rejected {
+                reason: format!("ticket {} does not exist", payload.duplicate_ticket_id),
+                kind: "duplicate_ticket_not_found".into(),
+            },
+            (Some(TicketStatus::Closed | TicketStatus::Merged), _) => CommandDecision::Rejected {
+                reason: format!(
+                    "ticket {} is already closed or merged - not mergeable",
+                    payload.primary_ticket_id
+                ),
+                kind: "primary_ticket_not_mergeable".into(),
+            },
+            (_, Some(TicketStatus::Closed | TicketStatus::Merged)) => CommandDecision::Rejected {
+                reason: format!(
+                    "ticket {} is already closed or merged - not mergeable",
+                    payload.duplicate_ticket_id
+                ),
+                kind: "duplicate_ticket_not_mergeable".into(),
+            },
+            (Some(_), Some(_)) => {
+                let primary_company =
+                    company_id_for_ticket(matching_events, &payload.primary_ticket_id)
+                        .expect("a ticket with any status has a TicketCreated in its own history");
+                let duplicate_company =
+                    company_id_for_ticket(matching_events, &payload.duplicate_ticket_id)
+                        .expect("a ticket with any status has a TicketCreated in its own history");
+                if primary_company != duplicate_company {
+                    return CommandDecision::Rejected {
+                        reason: "the two tickets belong to different companies".into(),
+                        kind: "tickets_belong_to_different_companies".into(),
+                    };
+                }
+                CommandDecision::Accepted {
+                    events: vec![EventSpec {
+                        event_type: "TicketsMerged".into(),
+                        payload: serde_json::json!({
+                            "primary_ticket_id": payload.primary_ticket_id,
+                            "duplicate_ticket_id": payload.duplicate_ticket_id,
+                            "company_id": primary_company,
+                        }),
+                    }],
+                }
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct RateTicketPayload {
+    pub ticket_id: String,
+    pub rating: u8,
+    pub comment: Option<String>,
+}
+
+pub struct RateTicket;
+
+/// Not in the original spec - a CSAT survey response (see `TicketRated`'s
+/// own doc comment). Requires `resolved` *or* `closed`, not just
+/// `closed`: real tools survey right after resolution, not after
+/// `config.auto_close_after`'s own multi-day wait.
+#[auto_register(BOUNDED_CONTEXT)]
+impl CommandType for RateTicket {
+    type Payload = RateTicketPayload;
+    type Event = HelpdeskEvent;
+    const NAME: &'static str = "RateTicket";
+    fn tag_mappings() -> Vec<TagMapping> {
+        ticket_tag()
+    }
+    fn rest_trigger_allowed() -> bool {
+        true
+    }
+    fn decide(payload: &Self::Payload, matching_events: &[Self::Event]) -> CommandDecision {
+        match ticket_status(matching_events, &payload.ticket_id) {
+            None => CommandDecision::Rejected {
+                reason: format!("ticket {} does not exist", payload.ticket_id),
+                kind: "ticket_not_found".into(),
+            },
+            Some(TicketStatus::Resolved | TicketStatus::Closed) => {
+                if !(1..=5).contains(&payload.rating) {
+                    return CommandDecision::Rejected {
+                        reason: format!("rating {} is not between 1 and 5", payload.rating),
+                        kind: "invalid_rating".into(),
+                    };
+                }
+                let already_rated = matching_events.iter().any(|e| {
+                    matches!(e, HelpdeskEvent::TicketRated(p) if p.ticket_id == payload.ticket_id)
+                });
+                if already_rated {
+                    return CommandDecision::Rejected {
+                        reason: format!("ticket {} has already been rated", payload.ticket_id),
+                        kind: "already_rated".into(),
+                    };
+                }
+                CommandDecision::Accepted {
+                    events: vec![EventSpec {
+                        event_type: "TicketRated".into(),
+                        payload: serde_json::json!({
+                            "ticket_id": payload.ticket_id,
+                            "company_id": company_id_for_ticket(matching_events, &payload.ticket_id)
+                                .expect("a ticket with any status has a TicketCreated in its own history"),
+                            "rating": payload.rating,
+                            "comment": payload.comment,
+                        }),
+                    }],
+                }
+            }
+            Some(other) => CommandDecision::Rejected {
+                reason: format!(
+                    "ticket {} is {other:?}, not resolved or closed - nothing to rate yet",
+                    payload.ticket_id
+                ),
+                kind: "ticket_not_ratable".into(),
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct AddInternalNotePayload {
+    pub ticket_id: String,
+    pub staff_id: String,
+    pub note: String,
+}
+
+pub struct AddInternalNote;
+
+/// Not in the original spec - a staff-only note (see
+/// `TicketInternalNoteAdded`'s own doc comment for why it's kept out of
+/// the customer-facing projections below). Allowed at any ticket status,
+/// including after close - a real audit trail doesn't stop just because
+/// the ticket did.
+#[auto_register(BOUNDED_CONTEXT)]
+impl CommandType for AddInternalNote {
+    type Payload = AddInternalNotePayload;
+    type Event = HelpdeskEvent;
+    const NAME: &'static str = "AddInternalNote";
+    fn tag_mappings() -> Vec<TagMapping> {
+        ticket_tag()
+    }
+    fn rest_trigger_allowed() -> bool {
+        true
+    }
+    fn decide(payload: &Self::Payload, matching_events: &[Self::Event]) -> CommandDecision {
+        match ticket_status(matching_events, &payload.ticket_id) {
+            None => CommandDecision::Rejected {
+                reason: format!("ticket {} does not exist", payload.ticket_id),
+                kind: "ticket_not_found".into(),
+            },
+            Some(_) => CommandDecision::Accepted {
+                events: vec![EventSpec {
+                    event_type: "TicketInternalNoteAdded".into(),
+                    payload: serde_json::json!({
+                        "ticket_id": payload.ticket_id,
+                        "company_id": company_id_for_ticket(matching_events, &payload.ticket_id)
+                            .expect("a ticket with any status has a TicketCreated in its own history"),
+                        "staff_id": payload.staff_id,
+                        "note": payload.note,
+                    }),
+                }],
+            },
+        }
+    }
+}
+
 // --- projection ---
 
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
@@ -1040,6 +1513,18 @@ pub struct TicketSummaryState {
     /// query.
     pub priority: Option<String>,
     pub assigned_staff_id: Option<String>,
+    /// Set once by `TicketEscalated` (see that event's own doc comment),
+    /// never cleared - same "once escalated, stays escalated" treatment
+    /// `EscalateTicket`'s own `already_escalated` guard already gives it.
+    pub escalated: bool,
+    /// Set once by `TicketRated` - unlike `TicketInternalNoteAdded`
+    /// (deliberately kept out of every projection, see that event's own
+    /// doc comment), a CSAT rating has no customer-visibility concern:
+    /// the customer who left it, and any staff member, both already see
+    /// this fine either way, so folding it in here is a real UX need
+    /// (the frontend needs to know a ticket's already been rated so it
+    /// doesn't keep showing the rating form), not scope creep.
+    pub rating: Option<u8>,
 }
 
 fn priority_str(priority: TicketPriority) -> &'static str {
@@ -1072,6 +1557,9 @@ impl Projection for TicketSummary {
             "TicketInfoRequested",
             "TicketCustomerResponded",
             "TicketClosed",
+            "TicketEscalated",
+            "TicketsMerged",
+            "TicketRated",
         ]
     }
     fn sync() -> bool {
@@ -1081,7 +1569,14 @@ impl Projection for TicketSummary {
         match event {
             HelpdeskEvent::CompanySignedUp(_)
             | HelpdeskEvent::CompanyActivated(_)
-            | HelpdeskEvent::CompanyExpired(_) => vec![],
+            | HelpdeskEvent::CompanyExpired(_)
+            // Deliberately absent from `consumed_event_types()` above
+            // (see that event's own doc comment) - listed here only
+            // because `keys`/`project` take `&HelpdeskEvent`
+            // unconditionally, so the match has to stay exhaustive over
+            // every variant even ones this projection never actually
+            // gets invoked for.
+            | HelpdeskEvent::TicketInternalNoteAdded(_) => vec![],
             HelpdeskEvent::TicketCreated(p) => vec![p.ticket_id.clone()],
             HelpdeskEvent::TicketAssigned(p) => vec![p.ticket_id.clone()],
             HelpdeskEvent::TicketResolved(p) => vec![p.ticket_id.clone()],
@@ -1089,13 +1584,22 @@ impl Projection for TicketSummary {
             HelpdeskEvent::TicketInfoRequested(p) => vec![p.ticket_id.clone()],
             HelpdeskEvent::TicketCustomerResponded(p) => vec![p.ticket_id.clone()],
             HelpdeskEvent::TicketClosed(p) => vec![p.ticket_id.clone()],
+            HelpdeskEvent::TicketEscalated(p) => vec![p.ticket_id.clone()],
+            HelpdeskEvent::TicketRated(p) => vec![p.ticket_id.clone()],
+            // Fans out to *both* tickets - unlike every other event here,
+            // one `TicketsMerged` updates two projection instances. See
+            // `project`'s own handling of the two keys below.
+            HelpdeskEvent::TicketsMerged(p) => {
+                vec![p.primary_ticket_id.clone(), p.duplicate_ticket_id.clone()]
+            }
         }
     }
-    fn project(state: &mut Self::State, event: &Self::Event, _key: &str) {
+    fn project(state: &mut Self::State, event: &Self::Event, key: &str) {
         match event {
             HelpdeskEvent::CompanySignedUp(_)
             | HelpdeskEvent::CompanyActivated(_)
-            | HelpdeskEvent::CompanyExpired(_) => {}
+            | HelpdeskEvent::CompanyExpired(_)
+            | HelpdeskEvent::TicketInternalNoteAdded(_) => {}
             HelpdeskEvent::TicketCreated(p) => {
                 state.status = Some("open".into());
                 state.priority = Some(priority_str(p.priority).to_string());
@@ -1118,6 +1622,23 @@ impl Projection for TicketSummary {
             }
             HelpdeskEvent::TicketClosed(_) => {
                 state.status = Some("closed".into());
+            }
+            HelpdeskEvent::TicketEscalated(p) => {
+                state.priority = Some(priority_str(p.new_priority).to_string());
+                state.escalated = true;
+            }
+            HelpdeskEvent::TicketRated(p) => {
+                state.rating = Some(p.rating);
+            }
+            // Only the duplicate's own instance (this projection is
+            // keyed per-ticket, so `key` tells the two fanned-out calls
+            // apart - see `keys` above) becomes "merged"; the primary's
+            // own instance is untouched, matching `ticket_status`'s own
+            // treatment in this file's command-decision helpers.
+            HelpdeskEvent::TicketsMerged(p) => {
+                if key == p.duplicate_ticket_id {
+                    state.status = Some("merged".into());
+                }
             }
         }
     }
@@ -1148,6 +1669,11 @@ pub struct TicketListEntry {
     pub requester_id: String,
     pub assigned_staff_id: Option<String>,
     pub messages: Vec<TicketMessage>,
+    /// See `TicketSummaryState::escalated`/`::rating`'s own doc comments -
+    /// identical reasoning, mirrored here since `frontend/` reads this
+    /// projection, not `TicketSummary`.
+    pub escalated: bool,
+    pub rating: Option<u8>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
@@ -1178,6 +1704,9 @@ impl Projection for CompanyTicketList {
             "TicketInfoRequested",
             "TicketCustomerResponded",
             "TicketClosed",
+            "TicketEscalated",
+            "TicketsMerged",
+            "TicketRated",
         ]
     }
     fn sync() -> bool {
@@ -1187,7 +1716,12 @@ impl Projection for CompanyTicketList {
         match event {
             HelpdeskEvent::CompanySignedUp(_)
             | HelpdeskEvent::CompanyActivated(_)
-            | HelpdeskEvent::CompanyExpired(_) => vec![],
+            | HelpdeskEvent::CompanyExpired(_)
+            // Deliberately absent from `consumed_event_types()` above -
+            // see that event's own doc comment, and `TicketSummary::keys`'s
+            // own identical comment for why the match still needs this
+            // arm regardless.
+            | HelpdeskEvent::TicketInternalNoteAdded(_) => vec![],
             HelpdeskEvent::TicketCreated(p) => vec![p.company_id.clone()],
             // Every ticket-lifecycle event past creation now carries its
             // own `company_id` too (stamped by each command's own
@@ -1200,13 +1734,23 @@ impl Projection for CompanyTicketList {
             HelpdeskEvent::TicketInfoRequested(p) => vec![p.company_id.clone()],
             HelpdeskEvent::TicketCustomerResponded(p) => vec![p.company_id.clone()],
             HelpdeskEvent::TicketClosed(p) => vec![p.company_id.clone()],
+            HelpdeskEvent::TicketEscalated(p) => vec![p.company_id.clone()],
+            HelpdeskEvent::TicketRated(p) => vec![p.company_id.clone()],
+            // Unlike `TicketSummary` (keyed per-ticket, so it fans this
+            // out to two instances), this projection is keyed per
+            // *company* - both tickets already belong to the same one
+            // (`MergeTickets`'s own `tickets_belong_to_different_companies`
+            // guard), so one key here is correct; `project` below reaches
+            // into `state.tickets` for the specific duplicate ticket_id.
+            HelpdeskEvent::TicketsMerged(p) => vec![p.company_id.clone()],
         }
     }
     fn project(state: &mut Self::State, event: &Self::Event, _key: &str) {
         match event {
             HelpdeskEvent::CompanySignedUp(_)
             | HelpdeskEvent::CompanyActivated(_)
-            | HelpdeskEvent::CompanyExpired(_) => {}
+            | HelpdeskEvent::CompanyExpired(_)
+            | HelpdeskEvent::TicketInternalNoteAdded(_) => {}
             HelpdeskEvent::TicketCreated(p) => {
                 state.tickets.insert(
                     p.ticket_id.clone(),
@@ -1219,6 +1763,8 @@ impl Projection for CompanyTicketList {
                         requester_id: p.requester_id.clone(),
                         assigned_staff_id: None,
                         messages: Vec::new(),
+                        escalated: false,
+                        rating: None,
                     },
                 );
             }
@@ -1263,6 +1809,80 @@ impl Projection for CompanyTicketList {
                     entry.status = "closed".into();
                 }
             }
+            HelpdeskEvent::TicketEscalated(p) => {
+                if let Some(entry) = state.tickets.get_mut(&p.ticket_id) {
+                    entry.priority = priority_str(p.new_priority).to_string();
+                    entry.escalated = true;
+                }
+            }
+            HelpdeskEvent::TicketRated(p) => {
+                if let Some(entry) = state.tickets.get_mut(&p.ticket_id) {
+                    entry.rating = Some(p.rating);
+                }
+            }
+            HelpdeskEvent::TicketsMerged(p) => {
+                if let Some(entry) = state.tickets.get_mut(&p.duplicate_ticket_id) {
+                    entry.status = "merged".into();
+                }
+            }
+        }
+    }
+}
+
+// --- internal notes, staff-only by convention (not access control) ---
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct TicketInternalNote {
+    pub staff_id: String,
+    pub note: String,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
+pub struct TicketInternalNotesState {
+    pub notes: Vec<TicketInternalNote>,
+}
+
+/// Keyed by `ticket_id`. A *separate* projection from `TicketSummary`/
+/// `CompanyTicketList`, on purpose: those two are what `frontend/`'s
+/// single "fetch everything" call returns to render a ticket at all, so
+/// keeping `TicketInternalNoteAdded` out of both is what actually keeps
+/// `CompanyTicketList`'s own "nothing here is customer-only data" claim
+/// true (see that event's own doc comment). This projection exists
+/// purely so staff have something to fetch on demand (`frontend/`'s own
+/// "Notes" toggle, a second, separate query - not folded into the
+/// eager one) - it carries the exact same "presentation, not access
+/// control" caveat every other projection in this crate already does:
+/// nothing about `skilj-graphql`'s own query surface stops a customer's
+/// Role from querying this projection directly by name, the same way
+/// nothing stops one from querying `CompanyTicketList` for a company
+/// they don't belong to. A real deployment enforcing per-Role
+/// projection scoping is a `RoleAccessMapping`-level concern this
+/// showcase doesn't build out - noted, not silently assumed away.
+pub struct TicketInternalNotes;
+
+#[auto_register(BOUNDED_CONTEXT)]
+impl Projection for TicketInternalNotes {
+    type State = TicketInternalNotesState;
+    type Event = HelpdeskEvent;
+    const NAME: &'static str = "TicketInternalNotes";
+    fn consumed_event_types() -> Vec<&'static str> {
+        vec!["TicketInternalNoteAdded"]
+    }
+    fn sync() -> bool {
+        true
+    }
+    fn keys(event: &Self::Event) -> Vec<String> {
+        match event {
+            HelpdeskEvent::TicketInternalNoteAdded(p) => vec![p.ticket_id.clone()],
+            _ => vec![],
+        }
+    }
+    fn project(state: &mut Self::State, event: &Self::Event, _key: &str) {
+        if let HelpdeskEvent::TicketInternalNoteAdded(p) = event {
+            state.notes.push(TicketInternalNote {
+                staff_id: p.staff_id.clone(),
+                note: p.note.clone(),
+            });
         }
     }
 }

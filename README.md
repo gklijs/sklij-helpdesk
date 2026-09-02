@@ -21,13 +21,21 @@ simplifications (see "What's not built" below).
 - **Customers** file support tickets; **staff** work through them
   (assign → resolve → close, with a request-info/waiting-on-customer
   detour).
-- **Alerting**: urgent tickets, and tickets nobody's picked up in a
-  while, page a lead — via a separately-deployable consumer of skilj's
-  own REST event feed, not anything built into skilj itself.
+- **Alerting**: urgent tickets page a lead immediately; a ticket
+  nobody's handled in a while gets escalated (priority bumped, a real
+  persisted `TicketEscalated`, not just a console alert) and paged too —
+  via a separately-deployable consumer of skilj's own REST event feed,
+  not anything built into skilj itself.
 - **Two deadline-driven rules** (trial conversion, ticket auto-close)
   are driven by another separately-deployable consumer, for the same
   reason: skilj's own scheduling primitive fires on a shared cron, not
   per-entity deadlines.
+- **Three more flows beyond the original spec** — ticket merging (a real
+  showcase of skilj's own DCB model reading two tickets' own histories
+  in one command, no aggregate boundary needed), CSAT ratings, and
+  staff-only internal notes — each grounded in how Zendesk/Freshdesk/
+  Jira Service Management actually work, added to give the telemetry
+  work below genuinely varied traffic to show.
 - **A real login**: a self-hosted OIDC provider (Dex), Authorization
   Code + PKCE, a real customer/staff dashboard in the browser.
 
@@ -41,7 +49,7 @@ simplifications (see "What's not built" below).
 | `src/telemetry.rs` | Shared OTel wiring all three binaries call into (see "Telemetry & dashboards" below) |
 | `src/demo_seed.rs` | Pure decision logic behind the optional fake-traffic loop (`SEED_DEMO_TRAFFIC=1`) |
 | `src/bin/server.rs` | The runnable server (REST + GraphQL) |
-| `src/bin/alerter.rs` | Consumes the event feed, pages a lead on urgent/overdue tickets |
+| `src/bin/alerter.rs` | Consumes the event feed, pages a lead on urgent tickets and escalates ones nobody's handled in time |
 | `src/bin/scheduler.rs` | Consumes the event feed, converts/expires trials and auto-closes tickets |
 | `tests/` | Integration tests (real HTTP, real Postgres) — split into several files by concern; see `tests/company.rs`'s own doc comment for why |
 | `dex/config.yaml` | The real OIDC provider's config (two demo logins) |

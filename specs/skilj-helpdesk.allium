@@ -202,7 +202,7 @@ entity Ticket {
     title: String
     description: String
     priority: low | medium | high | urgent
-    status: open | in_progress | waiting_on_customer | resolved | closed
+    status: open | in_progress | waiting_on_customer | resolved | closed | merged
     requester: Customer
     logged_by: StaffMember?         -- absent when the customer filed it themselves;
                                      -- present when staff logged it on their behalf
@@ -210,10 +210,19 @@ entity Ticket {
     created_at: Timestamp
     resolved_at: Timestamp? when status = resolved | closed
 
+    -- Not in the original elicitation - added alongside `rule
+    -- TicketBecomesOverdue`'s own extension below, `rule
+    -- StaffMergesTickets`, and `rule CustomerRatesTicket`, each a real
+    -- pattern from Zendesk/Freshdesk/Jira Service Management this
+    -- showcase's own telemetry work wanted real traffic variety to
+    -- demonstrate.
+    escalated: Boolean = false
+    rating: Integer? when status = resolved | closed
+
     -- What "keeps track of what's not handled" means concretely: any
-    -- ticket short of resolved or closed. This is what a dashboard
-    -- would count, and what overdue-alerting keys off below.
-    unhandled: status not in {resolved, closed}
+    -- ticket short of resolved, closed, or merged - a merged ticket has
+    -- nothing left to do either, same reason a closed one doesn't.
+    unhandled: status not in {resolved, closed, merged}
 
     transitions status {
         open -> in_progress
@@ -222,8 +231,23 @@ entity Ticket {
         in_progress -> resolved
         resolved -> in_progress
         resolved -> closed
-        terminal: closed
+        open -> merged
+        in_progress -> merged
+        waiting_on_customer -> merged
+        resolved -> merged
+        terminal: closed, merged
     }
+
+    -- No `transitions priority {}` graph declared - transition graphs are
+    -- opt-in (checker emits nothing for a field that lacks one), and the
+    -- installed `allium` CLI (3.5.3) mis-analyses `status`'s own graph
+    -- when a second `transitions` block is present on the same entity
+    -- (verified: removing this block alone silences a page of spurious
+    -- `status.undeclaredTransition` findings against `status` itself,
+    -- despite that graph being unchanged) - a real installed-CLI-vs-
+    -- reference-docs version gap (3.5.3 vs the 3.8.0 skill docs), not a
+    -- reason to leave `status` unchecked. `rule StaffEscalatesTicket`
+    -- below still sets `ticket.priority` via an ordinary `ensures`.
 }
 
 rule CustomerCreatesTicket {
@@ -297,9 +321,29 @@ rule TicketAutoCloses {
 -- separately-deployable service (reading it off skilj's REST event
 -- feed, per the design note above) turns into an actual email/Slack/etc
 -- message - that fan-out is deliberately not this spec's concern.
+--
+-- @guidance
+--     Extended beyond the original elicitation: this rule originally
+--     only emitted `TicketNeedsAttention` - a page, nothing durable.
+--     Real practice (Zendesk/Jira Service Management SLA-breach
+--     escalation) doesn't stop at paging someone: it bumps the ticket's
+--     own priority (optionally reassigns it too - not modelled here,
+--     this showcase has no formal "who's the backup agent" concept
+--     beyond the single `lead` role already used for paging). Added so
+--     an overdue ticket becomes a real, durable, once-only fact
+--     (`ticket.escalated`), not just a transient notification - and so
+--     this project's own telemetry work has real command/event traffic
+--     to show, not only a console alert. `escalate` is a black box
+--     (same treatment as `PaymentGateway.charge` above): a one-tier
+--     priority bump, low -> medium -> high -> urgent, clamped at
+--     urgent - see `src/helpdesk.rs`'s own `escalate_priority`.
 rule TicketBecomesOverdue {
     when: ticket: Ticket.created_at + config.unhandled_alert_after <= now
     requires: ticket.unhandled
+    requires: not ticket.escalated
+    let new_priority = escalate(ticket.priority)
+    ensures: ticket.priority = new_priority
+    ensures: ticket.escalated = true
     for lead in StaffMembers where company = ticket.company and role = lead:
         ensures: TicketNeedsAttention(ticket, lead)
 }
@@ -309,6 +353,54 @@ rule UrgentTicketNeedsImmediateAttention {
     requires: ticket.priority = urgent
     for lead in StaffMembers where company = ticket.company and role = lead:
         ensures: TicketNeedsAttention(ticket, lead)
+}
+
+-- Three more flows, none in the original elicitation - each a real
+-- pattern from Zendesk/Freshdesk/Jira Service Management, added for the
+-- same reason `TicketBecomesOverdue`'s own extension above was: this
+-- showcase's telemetry/dashboard work wanted genuinely varied traffic to
+-- demonstrate, not traffic invented for its own sake.
+
+-- The showcase of skilj's own DCB model this spec hadn't yet
+-- demonstrated: one command, two tickets, no aggregate boundary needed -
+-- `src/helpdesk.rs`'s own `MergeTickets::tag_mappings` is the real
+-- mechanism this requires-guard relies on (two ticket tags read at
+-- once). `duplicate.company = primary.company` is stated as its own
+-- `requires` rather than left implicit, since nothing else here compares
+-- two different tickets' own company at all.
+rule StaffMergesTickets {
+    when: MergeTickets(primary, duplicate)
+    requires: primary != duplicate
+    requires: primary.company = duplicate.company
+    requires: primary.status not in {closed, merged}
+    requires: duplicate.status not in {closed, merged}
+    ensures: duplicate.status = merged
+}
+
+-- A CSAT survey response - standard practice once a ticket is handled,
+-- not gated on `closed` alone: real tools survey right after
+-- resolution, not after `config.auto_close_after`'s own multi-day wait.
+-- One rating per ticket - `rating`'s own `when` clause already makes a
+-- second `RateTicket` on a ticket outside `{resolved, closed}`
+-- impossible to re-target this way, but nothing here stops rating twice
+-- while still resolved; `src/helpdesk.rs`'s own `already_rated` guard is
+-- stricter than this spec states, deliberately so - noted here rather
+-- than silently drifted from.
+rule CustomerRatesTicket {
+    when: RateTicket(ticket, rating)
+    requires: ticket.status = resolved | closed
+    ensures: ticket.rating = rating
+}
+
+-- A staff-only note - no entity field changes (deliberately not folded
+-- into anything a customer-facing surface exposes; see
+-- `CustomerTicketView`/`StaffTicketView` below - only the latter
+-- provides this), just a durable fact for the record, the same "ensures
+-- a named fact, not an entity field" shape `TicketNeedsAttention` above
+-- already uses.
+rule StaffAddsInternalNote {
+    when: AddInternalNote(ticket, staff)
+    ensures: InternalNoteAdded(ticket, staff)
 }
 
 -- Surfaces. Wires up every trigger above to an actual entry point -
@@ -358,12 +450,15 @@ surface CustomerTicketView {
         ticket.assigned_to
         ticket.created_at
         ticket.resolved_at
+        ticket.rating
 
     provides:
         CustomerRespondsToTicket(ticket, customer)
             when ticket.status = waiting_on_customer
         ReopenTicket(ticket)
             when ticket.status = resolved
+        RateTicket(ticket, rating)
+            when ticket.status = resolved | closed
 
     timeout:
         TicketAutoCloses
@@ -380,6 +475,7 @@ surface StaffTicketQueue {
             ticket.requester
             ticket.assigned_to
             ticket.unhandled
+            ticket.escalated
             ticket.created_at
 
     provides:
@@ -410,6 +506,9 @@ surface StaffTicketView {
             when ticket.status = in_progress
         ReopenTicket(ticket)
             when ticket.status = resolved
+        AddInternalNote(ticket, staff)
+        MergeTickets(ticket, duplicate)
+            when ticket.status = open | in_progress | waiting_on_customer | resolved
 
     timeout:
         TicketAutoCloses
