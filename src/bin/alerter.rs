@@ -447,9 +447,21 @@ async fn send_alert(client: &reqwest::Client, webhook_url: Option<&str>, alert: 
     // see https://api.slack.com/messaging/webhooks. `mrkdwn` (Slack's
     // own dialect, not real Markdown) for the ticket id, so it renders
     // as inline code in the channel rather than plain text.
+    //
+    // `escape_slack_text` on both fields is load-bearing, not
+    // decoration: `ticket_id`/`company_id` are plain, unvalidated
+    // `String`s a customer fully controls via an ordinary `CreateTicket`
+    // request (`helpdesk.rs`'s own `CreateTicketPayload`) - without
+    // escaping, a `ticket_id` containing Slack's own link/mention
+    // syntax (backtick-then-`<!channel>`, or a masked `<https://
+    // evil.example|...>` link) would render *live* in the support
+    // team's own trusted alerting channel: a real message-injection/
+    // phishing vector a security review caught, not a formatting nicety.
     let text = format!(
         "*[{:?}]* ticket `{}` (company `{}`) needs a lead's attention",
-        alert.reason, alert.ticket_id, alert.company_id
+        alert.reason,
+        escape_slack_text(&alert.ticket_id),
+        escape_slack_text(&alert.company_id)
     );
     let result = client
         .post(webhook_url)
@@ -461,4 +473,15 @@ async fn send_alert(client: &reqwest::Client, webhook_url: Option<&str>, alert: 
         eprintln!("alerter: failed to post Slack alert: {e}");
         tracing::warn!(error = %e, ticket_id = %alert.ticket_id, "alerter: failed to post Slack alert");
     }
+}
+
+/// Slack's own documented escaping for text sent through its API
+/// (https://api.slack.com/reference/surfaces/formatting#escaping) -
+/// `&` first, so it doesn't double-escape the entities `<`/`>` just
+/// became. This is what stops a caller-controlled string from being
+/// interpreted as Slack's own link/mention syntax (`<...>`) once it
+/// lands in a `text` field - see `send_alert`'s own call site for why
+/// that matters here specifically.
+fn escape_slack_text(s: &str) -> String {
+    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
 }

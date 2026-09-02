@@ -137,3 +137,110 @@ fn an_urgent_ticket_posts_a_real_slack_alert() {
         assert!(text.contains(&company_id), "expected our own company id in the Slack text, got: {text}");
     });
 }
+
+/// Regression test for a real finding from a security review of this
+/// crate: `ticket_id` is a plain, unvalidated `String` a customer fully
+/// controls via an ordinary `CreateTicket` request, and it used to be
+/// interpolated into the Slack `text` field unescaped - a `ticket_id`
+/// containing Slack's own link/mention syntax would render *live* in
+/// the support team's own trusted alerting channel (a channel-wide
+/// `@channel` ping, or a masked link posing as a legitimate one), not
+/// as literal text. Fixed by `src/bin/alerter.rs`'s own
+/// `escape_slack_text` - this proves it actually closes the exploit
+/// end to end, against the real binary and a real (fake) Slack
+/// endpoint, not just that the escaping function's own unit behaviour
+/// looks right in isolation.
+#[test]
+fn a_malicious_ticket_id_cannot_inject_slack_markup() {
+    runtime().block_on(async {
+        if test_db().await.is_none() {
+            return;
+        }
+        let (skilj, pool, mapping) = setup().await;
+        let router = skilj.rest_router();
+        let base_url = serve_for_real(router.clone()).await;
+        let (webhook_url, captured) = spawn_fake_slack_webhook().await;
+
+        let sign_up = mint_command_token(&pool, &mapping, BOUNDED_CONTEXT, "SignUpCompany").await;
+        let create_ticket = mint_command_token(&pool, &mapping, BOUNDED_CONTEXT, "CreateTicket").await;
+        let tokens = mint_alerter_tokens(&pool, &mapping, BOUNDED_CONTEXT).await;
+
+        let stderr_log = std::env::temp_dir().join(format!("{}.log", unique_name("alerter-slack-injection-stderr")));
+        struct Cleanup<'a>(&'a std::path::Path);
+        impl Drop for Cleanup<'_> {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_file(self.0);
+            }
+        }
+        let _cleanup = Cleanup(&stderr_log);
+
+        let _alerter = spawn_alerter(
+            &base_url,
+            &tokens,
+            &stderr_log,
+            &[("ALERTER_STATE_FILE", ""), ("SLACK_WEBHOOK_URL", &webhook_url)],
+        );
+
+        let company_id = unique_name("company");
+        // A marker unaffected by escaping (only `&`/`<`/`>` are ever
+        // touched), so this test can find its own post among a shared
+        // database's other traffic the same way
+        // `an_urgent_ticket_posts_a_real_slack_alert` does, without the
+        // injection payload itself needing to survive verbatim into the
+        // search key.
+        let marker = unique_name("inject");
+        // A textbook Slack markup-injection payload - a channel-wide
+        // mention plus a masked link - exactly the exploit the security
+        // review's own finding described.
+        let ticket_id = format!("{marker}`<!channel> <https://evil.example|click here>");
+        trigger(
+            &router,
+            &sign_up,
+            serde_json::json!({ "company_id": company_id, "name": "Acme", "contact_email": "a@acme.example" }),
+        )
+        .await;
+        trigger(
+            &router,
+            &create_ticket,
+            serde_json::json!({
+                "ticket_id": ticket_id, "company_id": company_id, "requester_id": unique_name("customer"),
+                "logged_by_staff_id": null, "title": "injection attempt", "description": "d", "priority": "urgent",
+            }),
+        )
+        .await;
+
+        wait_until(Duration::from_secs(20), "the fake Slack webhook to receive our own ticket's post", || {
+            let captured = captured.clone();
+            let marker = marker.clone();
+            async move {
+                captured
+                    .0
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|p| p["text"].as_str().is_some_and(|t| t.contains(&marker)))
+            }
+        })
+        .await;
+
+        let posts = captured.0.lock().unwrap();
+        let post = posts
+            .iter()
+            .find(|p| p["text"].as_str().is_some_and(|t| t.contains(&marker)))
+            .unwrap_or_else(|| panic!("no Slack post mentioned our own ticket (marker {marker}): {posts:?}"));
+        let text = post["text"].as_str().unwrap();
+
+        // The actual regression check: Slack's own live markup syntax
+        // (a bare `<`) must never reach the channel unescaped - if it
+        // did, `<!channel>` would ping the whole channel and the masked
+        // link would render as a trusted-looking clickable URL.
+        assert!(
+            !text.contains("<!channel>") && !text.contains("<https://evil.example"),
+            "unescaped Slack markup reached the alert text - injection succeeded: {text}"
+        );
+        assert!(
+            text.contains("&lt;!channel&gt;") && text.contains("&lt;https://evil.example"),
+            "expected the malicious markup escaped as literal text, got: {text}"
+        );
+    });
+}
