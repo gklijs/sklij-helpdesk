@@ -112,6 +112,14 @@ cargo run --bin alerter    # pages a lead on urgent/overdue tickets
 cargo run --bin scheduler  # converts/expires trials, auto-closes tickets
 ```
 
+`alerter`'s own paging is console-only by default; set `SLACK_WEBHOOK_URL`
+(a real [Slack incoming webhook](https://api.slack.com/messaging/webhooks)
+URL) to also post each alert there — a worked example of the real-channel
+seam `src/bin/alerter.rs`'s own module doc comment describes.
+`tests/alerter_slack_webhook.rs` verifies the actual HTTP contract
+(a real `POST {"text": ...}`) against a fake webhook receiver, not a
+real Slack workspace — that part's on you to point at your own.
+
 **Tests**: `cargo test` — real integration tests against a real (or
 [`postgresql_embedded`](https://crates.io/crates/postgresql_embedded))
 Postgres; DB-dependent ones skip cleanly if neither is reachable.
@@ -207,7 +215,17 @@ silently absent:
   its own skilj tenant (bounded context), stamped from a template via
   `CreateBoundedContextFromTemplate`. This pass keeps one shared
   bounded context instead, to prove the domain logic without also
-  building the tenancy mechanism around it.
+  building the tenancy mechanism around it. The mechanism itself is
+  proven, though, not just assumed: `tests/multi_tenant_provisioning.rs`
+  stamps a real second bounded context from the shared `helpdesk`
+  context as its template, grants a role access to it in the same call,
+  runs `SignUpCompany`/`CreateTicket` against it independently, and
+  confirms the result never leaks into the shared context's own
+  projection state. What that test's own doc comment leaves open — the
+  real migration this pass doesn't attempt — is what `SignUpCompany`
+  would have to become (a real cross-context orchestration, not one
+  command), and what `alerter.rs`/`scheduler.rs` watching *every*
+  tenant's own event feed would even mean.
 - **A backend-for-frontend / GraphQL schema beyond what's registered**
   — the frontend talks to skilj-graphql's own auto-generated schema
   directly; there's no hand-written GraphQL layer.

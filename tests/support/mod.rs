@@ -18,6 +18,9 @@ use skilj_core::bootstrap::ContextCreator;
 use skilj_core::db::{self, Pool};
 use skilj_core::event_store::{BoundedContext, BoundedContextStatus};
 use skilj_core::shared::{generate_token_id, generate_token_secret};
+use std::path::Path;
+use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
 use tower::ServiceExt;
 
 // --- provisioning: DATABASE_URL, else embedded Postgres, else skip ---
@@ -168,6 +171,47 @@ pub async fn seed_admin(pool: &Pool) -> RoleAccessMapping {
         .await
         .unwrap();
     mapping
+}
+
+/// A fresh `Role` with no `RoleAccessMapping` at all (unlike
+/// `seed_admin`, which grants one on the shared helpdesk context) -
+/// `tests/multi_tenant_provisioning.rs`'s own use for this is a role
+/// that starts with access to nothing, and is granted access to a
+/// brand-new tenant only by `createBoundedContextFromTemplate` itself
+/// (`@guarantee AccessGrantedWithCreation` in specs/skilj.allium) -
+/// proving that grant is real, not assuming it.
+pub async fn seed_role(pool: &Pool, name: &str) -> Role {
+    let role = Role {
+        id: generate_token_id(),
+        external_subject: unique_name(&format!("subject-{name}")),
+        name: name.to_string(),
+        superadmin: false,
+        status: RoleStatus::Active,
+        created_at: test_now(),
+        revoked_at: None,
+    };
+    db::insert_role(pool, &role).await.unwrap();
+    role
+}
+
+/// A `Role` with `superadmin: true` - `CreateBoundedContextFromTemplate`
+/// (and `AddBoundedContext`/`DeleteBoundedContext`) are gated on this
+/// flag directly (`require_active_superadmin`), never on a
+/// `RoleAccessMapping` - see specs/skilj.allium's own note on why:
+/// these are operations on the set of contexts a deployment has, not
+/// operations within one. No mapping to seed here for the same reason.
+pub async fn seed_superadmin(pool: &Pool) -> Role {
+    let role = Role {
+        id: generate_token_id(),
+        external_subject: unique_name("subject-superadmin"),
+        name: "Test Superadmin".to_string(),
+        superadmin: true,
+        status: RoleStatus::Active,
+        created_at: test_now(),
+        revoked_at: None,
+    };
+    db::insert_role(pool, &role).await.unwrap();
+    role
 }
 
 /// A fully-built `Skilj` with the helpdesk bounded context reconciled -
@@ -460,4 +504,141 @@ pub fn graphql_accepted(response: &serde_json::Value) -> bool {
     response["data"]["submitCommand"]["accepted"]
         .as_bool()
         .expect("submitCommand.accepted is always present when there are no GraphQL errors")
+}
+
+// --- driving the *actual compiled* `alerter` binary as a real child
+// process against a real socket - shared by tests/alerter_restart_safety.rs
+// and tests/alerter_slack_webhook.rs, both of which need it for the
+// same reason: each is testing something (a restart, an outbound HTTP
+// call) that only exists at the level of the real binary, not the pure
+// decision logic tests/alerting_feed.rs already covers in-process. See
+// tests/alerter_restart_safety.rs's own module doc comment for the
+// fuller "why this is a different kind of test" explanation.
+
+/// Binds a real ephemeral-port `TcpListener` and serves `router` on it
+/// in the background (`tokio::spawn` - never awaited, so the caller's
+/// own test keeps running) - what the real `alerter`/`scheduler`
+/// binaries need that `trigger()`'s in-process `.oneshot()` doesn't
+/// provide: an actual socket a real `reqwest` client (running in a
+/// real child process) can connect to. Returns the base URL to give
+/// that child process as `SKILJ_BASE_URL`.
+pub async fn serve_for_real(router: axum::Router) -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("failed to bind an ephemeral port for a real test server");
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        axum::serve(listener, router).await.expect("test server failed");
+    });
+    base_url
+}
+
+/// Every `EventReadToken`/`CommandToken` `src/bin/alerter.rs`'s own
+/// `Config::from_env` requires, minted once and reused across however
+/// many times a test restarts the binary - real deployments would do
+/// the same (one set of credentials, not reminted per restart).
+pub struct AlerterTokens {
+    pub ticket_created: String,
+    pub ticket_resolved: String,
+    pub ticket_reopened: String,
+    pub ticket_closed: String,
+    pub ticket_escalated: String,
+    pub tickets_merged: String,
+    pub escalate_ticket: String,
+}
+
+pub async fn mint_alerter_tokens(pool: &Pool, mapping: &RoleAccessMapping, bounded_context: &str) -> AlerterTokens {
+    AlerterTokens {
+        ticket_created: mint_event_read_token(pool, mapping, bounded_context, "TicketCreated").await,
+        ticket_resolved: mint_event_read_token(pool, mapping, bounded_context, "TicketResolved").await,
+        ticket_reopened: mint_event_read_token(pool, mapping, bounded_context, "TicketReopened").await,
+        ticket_closed: mint_event_read_token(pool, mapping, bounded_context, "TicketClosed").await,
+        ticket_escalated: mint_event_read_token(pool, mapping, bounded_context, "TicketEscalated").await,
+        tickets_merged: mint_event_read_token(pool, mapping, bounded_context, "TicketsMerged").await,
+        escalate_ticket: mint_command_token(pool, mapping, bounded_context, "EscalateTicket").await,
+    }
+}
+
+/// Kills (`SIGKILL`) and reaps the wrapped child unconditionally when
+/// dropped - including on a panic unwind (a `wait_until` timeout,
+/// below, being the expected case here). `std::process::Child` does
+/// *not* do this itself: a plain `Child` going out of scope, panic or
+/// not, leaves the real OS process running. Found the hard way, in an
+/// earlier pass of this same test harness: a deliberate negative-control
+/// run (reintroducing the bug `tests/alerter_restart_safety.rs` exists
+/// to catch) left an orphaned `alerter` process behind once its own
+/// `wait_until` timed out and panicked before reaching the manual
+/// `.kill()` call that used to be the only thing stopping it - still
+/// polling a test server that no longer existed, invisible until a
+/// `pgrep` turned it up well after the test binary itself had exited.
+pub struct KillOnDrop(pub Child);
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// Spawns the *actual compiled* `alerter` binary (`CARGO_BIN_EXE_alerter`,
+/// set by Cargo for integration tests in a crate whose own `Cargo.toml`
+/// registers a `[[bin]] name = "alerter"`, guaranteeing it's built
+/// before this test runs) against `base_url`. `env_overrides` is where
+/// each caller sets whatever's specific to what it's testing
+/// (`ALERTER_STATE_FILE`, `UNHANDLED_ALERT_AFTER_HOURS`,
+/// `SLACK_WEBHOOK_URL`, ...) - this helper only wires up the tokens
+/// every alerter needs regardless.
+pub fn spawn_alerter(
+    base_url: &str,
+    tokens: &AlerterTokens,
+    stderr_log: &Path,
+    env_overrides: &[(&str, &str)],
+) -> KillOnDrop {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_alerter"));
+    command
+        .env("SKILJ_BASE_URL", base_url)
+        .env("TICKET_CREATED_TOKEN", &tokens.ticket_created)
+        .env("TICKET_RESOLVED_TOKEN", &tokens.ticket_resolved)
+        .env("TICKET_REOPENED_TOKEN", &tokens.ticket_reopened)
+        .env("TICKET_CLOSED_TOKEN", &tokens.ticket_closed)
+        .env("TICKET_ESCALATED_TOKEN", &tokens.ticket_escalated)
+        .env("TICKETS_MERGED_TOKEN", &tokens.tickets_merged)
+        .env("ESCALATE_TICKET_TOKEN", &tokens.escalate_ticket)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        // Captured to a file, not a pipe left undrained (that risks the
+        // child blocking forever once the pipe buffer fills) - only
+        // read back if a test fails, to help debug it.
+        .stderr(std::fs::File::create(stderr_log).unwrap());
+    for (key, value) in env_overrides {
+        command.env(key, value);
+    }
+    let child = command
+        .spawn()
+        .expect("failed to spawn the alerter binary - was it built? (CARGO_BIN_EXE_alerter)");
+    KillOnDrop(child)
+}
+
+/// Polls `predicate` every 200ms until it's true or `timeout` elapses -
+/// for anything inherently about real elapsed time (a real child
+/// process's own poll interval, a real HTTP round trip), not something
+/// `trigger()`'s synchronous in-process request/response can wait on
+/// the way most of this crate's other tests do. `predicate` itself
+/// returns a future (rather than being sync) so an async check like a
+/// projection read doesn't need a runtime-within-a-runtime to call from
+/// here - no `futures` crate dependency needed just for this.
+pub async fn wait_until<F, Fut>(timeout: Duration, what: &str, mut predicate: F)
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    let start = Instant::now();
+    loop {
+        if predicate().await {
+            return;
+        }
+        if start.elapsed() > timeout {
+            panic!("timed out after {timeout:?} waiting for: {what}");
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
 }

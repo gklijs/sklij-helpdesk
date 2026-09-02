@@ -12,11 +12,15 @@
 //! down a real listening server, a different kind of test" than this
 //! crate's other integration tests, which drive `Skilj::rest_router()`
 //! in-process via `tower::ServiceExt::oneshot`. This file is exactly
-//! that different kind: a real `TcpListener`/`axum::serve` (so the
-//! *actual compiled* `alerter` binary, run as a real child process, has
-//! a real socket to talk to over `reqwest`) and the real binary itself,
-//! killed with `SIGKILL` (not a graceful shutdown - the whole point is
-//! proving this survives a crash, not just a clean stop) and restarted.
+//! that different kind: a real socket (so the *actual compiled*
+//! `alerter` binary, run as a real child process, has something to talk
+//! to over `reqwest`) and the real binary itself, killed with `SIGKILL`
+//! (not a graceful shutdown - the whole point is proving this survives
+//! a crash, not just a clean stop) and restarted. The plumbing for both
+//! (`support::serve_for_real`, `support::spawn_alerter`/`KillOnDrop`,
+//! `support::wait_until`) lives in `tests/support/mod.rs`, shared with
+//! `tests/alerter_slack_webhook.rs` - the other test that needs the
+//! real binary rather than its in-process decision logic.
 //!
 //! Kept out of `tests/alerting_feed.rs` deliberately: it already covers
 //! the alerter's pure decision logic and event-feed path in-process,
@@ -28,125 +32,8 @@ mod support;
 
 use skilj_helpdesk::helpdesk::{TicketSummaryState, BOUNDED_CONTEXT};
 use std::path::Path;
-use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant};
-use support::{mint_command_token, mint_event_read_token, projection_state, runtime, setup, test_db, trigger, unique_name};
-
-async fn command_token(
-    pool: &skilj_core::db::Pool,
-    mapping: &skilj_core::access_control::RoleAccessMapping,
-    command_type_name: &str,
-) -> String {
-    mint_command_token(pool, mapping, BOUNDED_CONTEXT, command_type_name).await
-}
-
-async fn event_token(
-    pool: &skilj_core::db::Pool,
-    mapping: &skilj_core::access_control::RoleAccessMapping,
-    event_type_name: &str,
-) -> String {
-    mint_event_read_token(pool, mapping, BOUNDED_CONTEXT, event_type_name).await
-}
-
-/// Every env var `src/bin/alerter.rs`'s own `Config::from_env` requires,
-/// minted once and reused across both the pre-restart and post-restart
-/// process - real `alerter` deployments would do the same (one set of
-/// credentials, not reminted per restart).
-struct AlerterTokens {
-    ticket_created: String,
-    ticket_resolved: String,
-    ticket_reopened: String,
-    ticket_closed: String,
-    ticket_escalated: String,
-    tickets_merged: String,
-    escalate_ticket: String,
-}
-
-/// Kills (`SIGKILL`) and reaps the wrapped child unconditionally when
-/// dropped - including on a panic unwind, e.g. `wait_until` below
-/// timing out. `std::process::Child` does *not* do this itself: a
-/// plain `Child` going out of scope, panic or not, leaves the real OS
-/// process running. Found the hard way: an earlier version of this
-/// test without this guard, run once deliberately against a
-/// reintroduced version of the bug this test exists to catch, left an
-/// orphaned `alerter` process behind after its own escalation check
-/// timed out and panicked before reaching the manual `.kill()` call
-/// that used to be the only thing stopping it - still polling a test
-/// server that no longer existed, still re-writing its own checkpoint
-/// file forever, invisible until a `pgrep` turned it up well after the
-/// test binary itself had exited. Exactly the kind of leak this
-/// project's own session history already had to clean up once for
-/// real (leaked `postgresql_embedded` clusters) - this guard is that
-/// lesson applied here before it could repeat.
-struct KillOnDrop(Child);
-impl Drop for KillOnDrop {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
-
-/// Spawns the *actual compiled* `alerter` binary (`CARGO_BIN_EXE_alerter`,
-/// set by Cargo for integration tests in a crate whose own `Cargo.toml`
-/// registers a `[[bin]] name = "alerter"`, guaranteeing it's built
-/// before this test runs) against `base_url`, checkpointing to
-/// `state_file`. `unhandled_alert_after_hours` is the same knob
-/// `src/bin/alerter.rs`'s own doc comment describes for a demo: `0` to
-/// escalate an already-overdue ticket on the very first tick.
-fn spawn_alerter(
-    base_url: &str,
-    tokens: &AlerterTokens,
-    state_file: &Path,
-    unhandled_alert_after_hours: u32,
-    stderr_log: &Path,
-) -> KillOnDrop {
-    let child = Command::new(env!("CARGO_BIN_EXE_alerter"))
-        .env("SKILJ_BASE_URL", base_url)
-        .env("UNHANDLED_ALERT_AFTER_HOURS", unhandled_alert_after_hours.to_string())
-        .env("ALERTER_STATE_FILE", state_file)
-        .env("TICKET_CREATED_TOKEN", &tokens.ticket_created)
-        .env("TICKET_RESOLVED_TOKEN", &tokens.ticket_resolved)
-        .env("TICKET_REOPENED_TOKEN", &tokens.ticket_reopened)
-        .env("TICKET_CLOSED_TOKEN", &tokens.ticket_closed)
-        .env("TICKET_ESCALATED_TOKEN", &tokens.ticket_escalated)
-        .env("TICKETS_MERGED_TOKEN", &tokens.tickets_merged)
-        .env("ESCALATE_TICKET_TOKEN", &tokens.escalate_ticket)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        // Captured to a file, not a pipe left undrained (that risks the
-        // child blocking forever once the pipe buffer fills) - only
-        // read back if this test fails, to help debug it.
-        .stderr(std::fs::File::create(stderr_log).unwrap())
-        .spawn()
-        .expect("failed to spawn the alerter binary - was it built? (CARGO_BIN_EXE_alerter)");
-    KillOnDrop(child)
-}
-
-/// Polls `predicate` every 200ms until it's true or `timeout` elapses -
-/// this test is inherently about real elapsed time (a real child
-/// process's own `POLL_INTERVAL`, a real HTTP round trip), not
-/// something `trigger()`'s synchronous in-process request/response can
-/// wait on the way every other test in this crate does. `predicate`
-/// itself returns a future (rather than being sync) so an async check
-/// like a projection read doesn't need a runtime-within-a-runtime to
-/// call from here - no `futures` crate dependency needed just for this
-/// one test, only what `tokio` (already a real dependency) provides.
-async fn wait_until<F, Fut>(timeout: Duration, what: &str, mut predicate: F)
-where
-    F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = bool>,
-{
-    let start = Instant::now();
-    loop {
-        if predicate().await {
-            return;
-        }
-        if start.elapsed() > timeout {
-            panic!("timed out after {timeout:?} waiting for: {what}");
-        }
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    }
-}
+use std::time::Duration;
+use support::{mint_alerter_tokens, mint_command_token, projection_state, runtime, serve_for_real, setup, spawn_alerter, test_db, trigger, unique_name, wait_until};
 
 fn checkpoint_tracks_ticket(state_file: &Path, ticket_id: &str) -> bool {
     let Ok(contents) = std::fs::read_to_string(state_file) else {
@@ -168,32 +55,14 @@ fn alerter_survives_a_hard_restart_without_forgetting_an_already_tracked_ticket(
         }
         let (skilj, pool, mapping) = setup().await;
         // `trigger()` below needs its own handle on the router; the
-        // spawned server (real socket, for the alerter subprocess) takes
-        // ownership of a clone - same `Skilj`/pool underneath either way.
+        // real server started by `serve_for_real` takes ownership of a
+        // clone - same `Skilj`/pool underneath either way.
         let router = skilj.rest_router();
-        let router_for_server = router.clone();
+        let base_url = serve_for_real(router.clone()).await;
 
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("failed to bind an ephemeral port for the test server");
-        let base_url = format!("http://{}", listener.local_addr().unwrap());
-        tokio::spawn(async move {
-            axum::serve(listener, router_for_server)
-                .await
-                .expect("test server failed");
-        });
-
-        let sign_up = command_token(&pool, &mapping, "SignUpCompany").await;
-        let create_ticket = command_token(&pool, &mapping, "CreateTicket").await;
-        let tokens = AlerterTokens {
-            ticket_created: event_token(&pool, &mapping, "TicketCreated").await,
-            ticket_resolved: event_token(&pool, &mapping, "TicketResolved").await,
-            ticket_reopened: event_token(&pool, &mapping, "TicketReopened").await,
-            ticket_closed: event_token(&pool, &mapping, "TicketClosed").await,
-            ticket_escalated: event_token(&pool, &mapping, "TicketEscalated").await,
-            tickets_merged: event_token(&pool, &mapping, "TicketsMerged").await,
-            escalate_ticket: command_token(&pool, &mapping, "EscalateTicket").await,
-        };
+        let sign_up = mint_command_token(&pool, &mapping, BOUNDED_CONTEXT, "SignUpCompany").await;
+        let create_ticket = mint_command_token(&pool, &mapping, BOUNDED_CONTEXT, "CreateTicket").await;
+        let tokens = mint_alerter_tokens(&pool, &mapping, BOUNDED_CONTEXT).await;
 
         let company_id = unique_name("company");
         let ticket_id = unique_name("ticket");
@@ -231,11 +100,17 @@ fn alerter_survives_a_hard_restart_without_forgetting_an_already_tracked_ticket(
             }
         }
         let _cleanup = Cleanup(&[&state_file, &stderr_1, &stderr_2]);
+        let state_file_str = state_file.to_str().unwrap();
 
         // --- phase 1: track the ticket, then crash ---
         // A high threshold - this alerter must not escalate anything
         // yet, only observe and checkpoint the still-open ticket.
-        let first = spawn_alerter(&base_url, &tokens, &state_file, 999, &stderr_1);
+        let first = spawn_alerter(
+            &base_url,
+            &tokens,
+            &stderr_1,
+            &[("ALERTER_STATE_FILE", state_file_str), ("UNHANDLED_ALERT_AFTER_HOURS", "999")],
+        );
         wait_until(Duration::from_secs(20), "checkpoint file to track our ticket", || {
             std::future::ready(checkpoint_tracks_ticket(&state_file, &ticket_id))
         })
@@ -258,7 +133,12 @@ fn alerter_survives_a_hard_restart_without_forgetting_an_already_tracked_ticket(
         // carry `created_at`/`unhandled` through, this second process
         // would never know this ticket exists at all, and nothing below
         // would ever happen, no matter how long this waits.
-        let second = spawn_alerter(&base_url, &tokens, &state_file, 0, &stderr_2);
+        let second = spawn_alerter(
+            &base_url,
+            &tokens,
+            &stderr_2,
+            &[("ALERTER_STATE_FILE", state_file_str), ("UNHANDLED_ALERT_AFTER_HOURS", "0")],
+        );
 
         wait_until(Duration::from_secs(20), "the restarted alerter to escalate our ticket", || {
             let pool = pool.clone();

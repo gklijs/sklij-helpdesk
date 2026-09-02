@@ -70,13 +70,21 @@
 //!     TICKET_CLOSED_TOKEN, TICKET_ESCALATED_TOKEN, TICKETS_MERGED_TOKEN
 //!   One CommandToken:
 //!     ESCALATE_TICKET_TOKEN
+//!   SLACK_WEBHOOK_URL             - optional; unset means console-only
+//!                                  (the original behaviour, and still
+//!                                  what every alert does regardless).
 //!
-//! What actually happens on an alert is deliberately a `println!`: the
-//! real channel (email, Slack, PagerDuty, ...) is exactly the piece
-//! `specs/skilj-helpdesk.allium`'s Excludes section leaves open -
-//! "the alerting service's concern, not this spec's". Swap
-//! `send_alert` below for a real integration; nothing else in this
-//! file needs to change.
+//! What actually happens on an alert was deliberately just a `println!`,
+//! the real channel (email, Slack, PagerDuty, ...) being exactly the
+//! piece `specs/skilj-helpdesk.allium`'s Excludes section leaves open:
+//! "the alerting service's concern, not this spec's". `send_alert`
+//! below is now a *worked example* of swapping that placeholder for a
+//! real one (Slack's own incoming-webhook API - a POST of `{"text":
+//! ...}`, no SDK needed), proving the seam the doc comment above used
+//! to only describe actually works - console output stays unconditional
+//! either way, Slack is additive when `SLACK_WEBHOOK_URL` is set. A
+//! second real channel (PagerDuty, say) would plug in the exact same
+//! way, right alongside it.
 //!
 //! Telemetry: `skilj_helpdesk::telemetry::init` (see that module's own
 //! doc comment) as service `"skilj-helpdesk-alerter"` - same OTLP
@@ -108,6 +116,9 @@ struct Config {
     /// `None` when `ALERTER_STATE_FILE` is set to an empty string -
     /// checkpointing opted out of, back to pure in-memory `state`.
     state_file: Option<PathBuf>,
+    /// `None` when `SLACK_WEBHOOK_URL` is unset - `send_alert` below
+    /// then stays console-only, exactly the original behaviour.
+    slack_webhook_url: Option<String>,
 }
 
 impl Config {
@@ -139,6 +150,7 @@ impl Config {
             escalate_ticket_token: required("ESCALATE_TICKET_TOKEN"),
             unhandled_alert_after: chrono::Duration::hours(hours),
             state_file,
+            slack_webhook_url: std::env::var("SLACK_WEBHOOK_URL").ok().filter(|s| !s.is_empty()),
         }
     }
 }
@@ -256,7 +268,7 @@ async fn tick(
                 state.company_id.insert(p.ticket_id.clone(), p.company_id.clone());
                 state.unhandled.insert(p.ticket_id.clone());
                 if let Some(alert) = evaluate_ticket_created(&p) {
-                    send_alert(&alert);
+                    send_alert(client, config.slack_webhook_url.as_deref(), &alert).await;
                 }
             }
             Err(e) => eprintln!("alerter: couldn't decode TicketCreated payload: {e}"),
@@ -314,11 +326,16 @@ async fn tick(
         .await
         {
             Ok(()) => {
-                send_alert(&skilj_helpdesk::alerting::Alert {
-                    ticket_id: ticket_id.clone(),
-                    company_id: state.company_id.get(&ticket_id).cloned().unwrap_or_default(),
-                    reason: skilj_helpdesk::alerting::AlertReason::Overdue,
-                });
+                send_alert(
+                    client,
+                    config.slack_webhook_url.as_deref(),
+                    &skilj_helpdesk::alerting::Alert {
+                        ticket_id: ticket_id.clone(),
+                        company_id: state.company_id.get(&ticket_id).cloned().unwrap_or_default(),
+                        reason: skilj_helpdesk::alerting::AlertReason::Overdue,
+                    },
+                )
+                .await;
                 state.escalated.insert(ticket_id);
             }
             Err(e) => {
@@ -403,9 +420,14 @@ async fn submit_command(
     }
 }
 
-/// The one place a real channel integration plugs in - see this file's
-/// own module doc comment.
-fn send_alert(alert: &skilj_helpdesk::alerting::Alert) {
+/// Console output (unconditional) plus, when `webhook_url` is set, a
+/// real Slack post - the worked example this file's own module doc
+/// comment describes. A rejected/unreachable webhook is logged and
+/// swallowed, not propagated: a broken Slack integration should degrade
+/// this binary back to console-only, never take the whole poll loop
+/// down (same "a failed checkpoint shouldn't stop `tick`" reasoning
+/// `save_state` already gets).
+async fn send_alert(client: &reqwest::Client, webhook_url: Option<&str>, alert: &skilj_helpdesk::alerting::Alert) {
     println!(
         "ALERT [{:?}]: ticket {} (company {}) needs a lead's attention",
         alert.reason, alert.ticket_id, alert.company_id
@@ -416,4 +438,27 @@ fn send_alert(alert: &skilj_helpdesk::alerting::Alert) {
         company_id = %alert.company_id,
         "alerter: paged a lead"
     );
+
+    let Some(webhook_url) = webhook_url else {
+        return;
+    };
+    // Slack's own incoming-webhook contract: a bare `{"text": ...}`
+    // POST, no SDK, no auth beyond the URL itself being the secret -
+    // see https://api.slack.com/messaging/webhooks. `mrkdwn` (Slack's
+    // own dialect, not real Markdown) for the ticket id, so it renders
+    // as inline code in the channel rather than plain text.
+    let text = format!(
+        "*[{:?}]* ticket `{}` (company `{}`) needs a lead's attention",
+        alert.reason, alert.ticket_id, alert.company_id
+    );
+    let result = client
+        .post(webhook_url)
+        .json(&serde_json::json!({ "text": text }))
+        .send()
+        .await
+        .and_then(|response| response.error_for_status());
+    if let Err(e) = result {
+        eprintln!("alerter: failed to post Slack alert: {e}");
+        tracing::warn!(error = %e, ticket_id = %alert.ticket_id, "alerter: failed to post Slack alert");
+    }
 }
