@@ -1,0 +1,140 @@
+name: CI
+
+# Two independent jobs, matching this repo's own crate split:
+# `backend` (this crate - depends on the sibling `skilj`/`skilj-core`
+# crates via a *path* dependency, see Cargo.toml's own comment on why -
+# so it needs that sibling repo checked out too, not just this one) and
+# `frontend` (frontend/ - a separate crate, no workspace, no skilj
+# dependency at all: see frontend/Cargo.toml's own doc comment).
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancel a superseded run (e.g. a new push to the same PR) rather than
+# letting both finish.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    services:
+      # A real Postgres, not `postgresql_embedded` - sidesteps that
+      # crate's own sandbox/network-egress fragility entirely (see
+      # tests/support/mod.rs's own `provision()` doc comment: it already
+      # prefers `DATABASE_URL` over embedded Postgres whenever it's set,
+      # which is exactly what this service container gives it).
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: skilj_helpdesk_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+
+      # Cargo.toml: `skilj = { path = "../skilj/skilj" }` (and
+      # `skilj-core` the same way) - a sibling checkout, not a crates.io
+      # version, matching this project's own local-dev convention
+      # (README.md's own `[skilj](../skilj)` link assumes the same
+      # layout). No pinned commit: this tracks skilj's own `main`, the
+      # same thing a fresh local clone next to this repo would give you
+      # - if that ever proves too unstable for CI, pin a commit SHA here
+      # instead.
+      - name: Clone skilj (sibling path dependency)
+        run: git clone --depth 1 https://codeberg.org/gklijs/SklilJ.git ../skilj
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+
+      # Fails fast, before waiting on Postgres below - `-D warnings`:
+      # this crate's own clippy is already zero-warning across all
+      # targets (bins, tests), so a new warning is a real regression,
+      # not noise to triage.
+      - name: Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Build
+        run: cargo build --locked --all-targets
+
+      # DATABASE_URL set -> tests/support/mod.rs's own `provision()`
+      # uses this service container directly, never embedded Postgres -
+      # so a real DB backs every integration test here.
+      # --nocapture: without it, the Rust test harness *discards*
+      # stdout/stderr (including the `eprintln!("skipping: ...")` below)
+      # for every passing test, only ever showing it for a failing one -
+      # since a silent DB skip makes the test itself pass (it just
+      # returns early), that capturing would make the very thing this
+      # job exists to catch invisible to the check right below. Proved
+      # by hand before trusting it: pointed DATABASE_URL at a bad
+      # address and confirmed "Fail if any DB-dependent test silently
+      # skipped" below only actually fires with --nocapture on.
+      - name: Test
+        env:
+          DATABASE_URL: postgres://postgres:postgres@localhost:5432/skilj_helpdesk_test
+        run: |
+          set -o pipefail
+          cargo test --locked -- --nocapture 2>&1 | tee test-output.log
+
+      # This crate's own tests are explicitly written to skip cleanly
+      # (not fail) when no database is reachable, rather than break a
+      # contributor's `cargo test` with no Postgres running (see
+      # tests/support/mod.rs's own doc comment) - exactly right for a
+      # local dev loop, exactly wrong for CI to stay silent about: with
+      # DATABASE_URL pointing at a healthy service container above, a
+      # "skipping:" line here means something is actually broken (a bad
+      # connection string, a failed migration, ...), not "no DB
+      # available" - so CI treats it as a hard failure instead of
+      # reporting a false "all green".
+      - name: Fail if any DB-dependent test silently skipped
+        run: |
+          if grep -q "skipping:" test-output.log; then
+            echo "::error::A DB-dependent test skipped instead of running for real against the service-container Postgres above - this should never happen in CI. Matched line(s):"
+            grep "skipping:" test-output.log
+            exit 1
+          fi
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: frontend
+
+      - uses: jetli/trunk-action@v0.5.1
+        with:
+          version: "0.21.14"
+
+      # frontend/'s own stated testing philosophy is "no unit tests this
+      # pass - verified by actually running it" (see its Cargo.toml/
+      # README) - `trunk build` is the honest CI equivalent of that:
+      # not a real browser run (see the run skill for how that's done
+      # by hand), but it does catch every compile-time and asset-bundling
+      # failure a broken change could introduce.
+      - name: trunk build
+        run: trunk build

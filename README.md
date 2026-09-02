@@ -1,5 +1,7 @@
 # skilj-helpdesk
 
+[![CI](https://github.com/gklijs/sklij-helpdesk/actions/workflows/ci.yml/badge.svg)](https://github.com/gklijs/sklij-helpdesk/actions/workflows/ci.yml)
+
 A showcase SaaS helpdesk built on [skilj](../skilj) — a Rust library for
 event-sourced, DDD-style applications. This project exists to exercise
 skilj for real: every piece below was built, run, and verified against
