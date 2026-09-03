@@ -1,0 +1,32 @@
+version: 2
+updates:
+  # Two separate Cargo projects, matching this repo's own structure -
+  # frontend/ is a deliberately separate crate, not part of a workspace
+  # with the root (see frontend/Cargo.toml's own doc comment), so it
+  # has its own Cargo.lock and needs its own entry here.
+  #
+  # Cargo.toml's own path dependencies (`skilj`/`skilj-core`, pointing
+  # at the sibling `../skilj` checkout - see that file's own comment)
+  # aren't crates.io packages, so Dependabot has nothing to propose for
+  # them either way; CI already tracks skilj's own `main` branch
+  # directly (`.github/workflows/ci.yml`'s own "Clone skilj" step) for
+  # exactly that reason.
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+
+  - package-ecosystem: "cargo"
+    directory: "/frontend"
+    schedule:
+      interval: "weekly"
+
+  # The Action versions ci.yml itself pins (actions/checkout,
+  # dtolnay/rust-toolchain, Swatinem/rust-cache, jetli/trunk-action) -
+  # the same class of bug the CI pipeline's own history already hit
+  # once for real (a stale/wrong version format on jetli/trunk-action),
+  # just kept from recurring silently instead of caught after the fact.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"

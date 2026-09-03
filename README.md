@@ -158,7 +158,12 @@ cargo run --bin server      # and, in their own terminals, alerter/scheduler
 dashboard is already there, auto-provisioned, refreshing every 5s.
 Traces and logs are in Grafana's own Explore view against the Tempo/Loki
 datasources (also auto-provisioned, cross-linked from a trace to its own
-logs).
+logs). The "Average CSAT"/"CSAT distribution" panels are a real domain
+metric, not just command throughput — `server.rs`'s own
+`run_csat_metrics_loop` consumes `TicketRated` off the event feed
+(`skilj-core`'s generic counters only ever see *that* a rating happened,
+never the 1-5 value) and records it as `skilj_helpdesk_ticket_ratings_total`,
+labelled by rating.
 
 **4. Optionally, generate fake traffic** so the dashboard actually has
 something to show without driving curl by hand — `SEED_DEMO_TRAFFIC=1`

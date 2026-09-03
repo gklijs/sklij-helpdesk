@@ -222,7 +222,7 @@
     },
     {
       "id": 53, "type": "stat", "title": "Tickets rated / min",
-      "description": "RateTicket (CSAT) throughput - a rate, not a satisfaction score: the rating value itself isn't an OTel metric, only queryable per-ticket via GraphQL/the projection.",
+      "description": "RateTicket (CSAT) throughput - a rate, not a satisfaction score. See the \"Average CSAT\"/\"CSAT distribution\" panels below for the rating value itself, recorded as its own metric by src/bin/server.rs's own run_csat_metrics_loop.",
       "gridPos": { "h": 4, "w": 6, "x": 12, "y": 42 },
       "datasource": { "type": "prometheus", "uid": "skilj-prometheus" },
       "targets": [
@@ -257,6 +257,32 @@
       ],
       "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
       "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
+    },
+    {
+      "id": 56, "type": "stat", "title": "Average CSAT",
+      "description": "Weighted average of skilj_helpdesk_ticket_ratings_total's own \"rating\" label (1-5) - src/bin/server.rs's own run_csat_metrics_loop records this, a real domain metric skilj-core's generic command/event counters can't see (they only know a RateTicket happened, never the value).",
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 54 },
+      "datasource": { "type": "prometheus", "uid": "skilj-prometheus" },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "skilj-prometheus" },
+          "expr": "sum(skilj_helpdesk_ticket_ratings_total{rating=\"1\"} * 1 or skilj_helpdesk_ticket_ratings_total{rating=\"2\"} * 2 or skilj_helpdesk_ticket_ratings_total{rating=\"3\"} * 3 or skilj_helpdesk_ticket_ratings_total{rating=\"4\"} * 4 or skilj_helpdesk_ticket_ratings_total{rating=\"5\"} * 5) / sum(skilj_helpdesk_ticket_ratings_total)",
+          "refId": "A" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short", "decimals": 2, "min": 1, "max": 5 }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "graphMode": "area" }
+    },
+    {
+      "id": 57, "type": "barchart", "title": "CSAT distribution",
+      "description": "skilj_helpdesk_ticket_ratings_total broken down by its own \"rating\" label - a real per-value breakdown (how many 5-star vs 1-star), not just a throughput rate.",
+      "gridPos": { "h": 4, "w": 18, "x": 6, "y": 54 },
+      "datasource": { "type": "prometheus", "uid": "skilj-prometheus" },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "skilj-prometheus" },
+          "expr": "sum by (rating) (skilj_helpdesk_ticket_ratings_total)",
+          "legendFormat": "{{rating}} star(s)", "instant": true, "refId": "A" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "orientation": "horizontal" }
     }
   ]
 }

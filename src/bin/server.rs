@@ -55,6 +55,8 @@
 
 use chrono::Utc;
 use jsonwebtoken::{EncodingKey, Header};
+use opentelemetry::metrics::Counter;
+use opentelemetry::KeyValue;
 use serde_json::json;
 use skilj::{IdpConfig, SigningAlgorithm, Skilj};
 use skilj_core::access_control::{self, AccessLevel, Role, RoleAccessMapping, RoleStatus};
@@ -65,7 +67,31 @@ use skilj_core::shared::{generate_token_id, generate_token_secret};
 use skilj_helpdesk::demo_seed::{self, Rng, SeedAction, SeedState, DEMO_COMPANIES};
 use skilj_helpdesk::helpdesk::BOUNDED_CONTEXT;
 use std::collections::HashMap;
+use std::sync::LazyLock;
 use std::time::Duration;
+
+// --- CSAT metric - see run_csat_metrics_loop's own doc comment ---
+//
+// Same `LazyLock`/`opentelemetry::global::meter()` shape
+// `skilj-core::db`'s own `COMMANDS_PROCESSED`/`EVENTS_APPENDED` use (see
+// that module's own doc comment on why this only actually exports once
+// `telemetry::init` has already run) - `"skilj-helpdesk"` as the meter's
+// own scope name, not `"skilj-core"`, since this metric is this
+// application's own domain fact, not a library-level one.
+//
+// A labelled counter, not a histogram: a rating is one of exactly five
+// values, not a continuous measurement - `rating="5"` as an attribute
+// gives a clean per-value breakdown in Prometheus (`sum by (rating)
+// (...)`) without needing histogram bucket boundaries tuned to a 1-5
+// scale (the default ones aren't), and the same series still answers
+// "what's the average" just as well (`sum(rating * value) / sum(value)`
+// summed by hand in PromQL, or read straight off the distribution panel).
+static TICKET_RATINGS: LazyLock<Counter<u64>> = LazyLock::new(|| {
+    opentelemetry::global::meter("skilj-helpdesk")
+        .u64_counter("skilj_helpdesk.ticket.ratings")
+        .with_description("CSAT ratings recorded via RateTicket, by rating value (1-5).")
+        .build()
+});
 
 // --- local JWKS/IdP shortcut - see this file's own doc comment above ---
 //
@@ -285,6 +311,65 @@ async fn mint_event_tokens(
     Ok(tokens)
 }
 
+/// A `TicketRated` payload carries the actual rating - `skilj-core`'s
+/// own generic `skilj_commands_processed_total`/`skilj_events_appended_total`
+/// (what the dashboard's own "Tickets rated / min" panel already uses)
+/// only ever see *that* a `RateTicket` happened, never the 1-5 value
+/// itself, since neither is domain-aware. This is that missing piece: a
+/// small consumer of this server's own real event feed - the identical
+/// "separately-deployable consumer" shape `src/bin/alerter.rs`'s own
+/// module doc comment describes, just spawned inline here rather than
+/// as its own binary, since one counter doesn't earn a whole deployable
+/// unit of its own. Gated on telemetry actually being configured
+/// (`main`'s own `telemetry.is_some()`) - with no `MeterProvider`
+/// installed, `TICKET_RATINGS` already records into a harmless no-op
+/// meter, but there is no reason to keep a poll loop and its own token
+/// alive for that.
+async fn run_csat_metrics_loop(client: &reqwest::Client, base_url: &str, token: &str) {
+    const POLL_INTERVAL: Duration = Duration::from_secs(5);
+    loop {
+        match consume_ticket_rated(client, base_url, token).await {
+            Ok(ratings) => {
+                for rating in ratings {
+                    TICKET_RATINGS.add(1, &[KeyValue::new("rating", i64::from(rating))]);
+                }
+            }
+            Err(e) => eprintln!("csat metrics: poll failed, will retry: {e}"),
+        }
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
+}
+
+/// One `GET /v1/events/consume?mode=auto` call, decoded down to just the
+/// `rating` field this loop needs - the identical shape
+/// `src/bin/alerter.rs`'s own `consume` has, duplicated rather than
+/// shared for the same "no common library boundary worth introducing
+/// for one helper" reason that file's own doc comment gives.
+async fn consume_ticket_rated(client: &reqwest::Client, base_url: &str, token: &str) -> Result<Vec<u8>, reqwest::Error> {
+    #[derive(serde::Deserialize)]
+    struct ConsumeResponse {
+        events: Vec<EventDto>,
+    }
+    #[derive(serde::Deserialize)]
+    struct EventDto {
+        payload: serde_json::Value,
+    }
+    let response = client
+        .get(format!("{base_url}/v1/events/consume"))
+        .query(&[("mode", "auto")])
+        .bearer_auth(token)
+        .send()
+        .await?
+        .error_for_status()?;
+    let body: ConsumeResponse = response.json().await?;
+    Ok(body
+        .events
+        .into_iter()
+        .filter_map(|e| e.payload["rating"].as_u64())
+        .map(|r| r as u8)
+        .collect())
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Must be the very first thing this binary does - see
@@ -460,6 +545,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             &command_type,
             generate_token_id(),
             generate_token_secret(),
+            // Unrestricted - these are this file's own bootstrap
+            // command tokens (printed for the demo curl example, and
+            // handed to demo_seed's own fake traffic), not scoped to
+            // any one company, same reasoning as every other `None`
+            // scope in this file.
+            None,
             Utc::now(),
         )?;
         db::insert_command_token(&pool, &token).await?;
@@ -475,6 +566,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let alerter_event_tokens = mint_event_tokens(&pool, &mapping, ALERTER_EVENT_TYPES).await?;
     println!("\nscheduler's own event read tokens:");
     let scheduler_event_tokens = mint_event_tokens(&pool, &mapping, SCHEDULER_EVENT_TYPES).await?;
+
+    // Only if telemetry is actually configured - see
+    // run_csat_metrics_loop's own doc comment for why a token and a
+    // poll loop otherwise have nothing to record into.
+    let csat_metrics_token = if telemetry.is_some() {
+        println!("\nCSAT metrics' own event read token:");
+        Some(mint_event_tokens(&pool, &mapping, &["TicketRated"]).await?["TicketRated"].clone())
+    } else {
+        None
+    };
 
     // Ready-to-paste env vars for the other two binaries this session
     // built - closes the loop between all three.
@@ -523,6 +624,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
          \x20      http://localhost:{port}/v1/commands/trigger",
         command_tokens["SignUpCompany"],
     );
+
+    if let Some(token) = csat_metrics_token {
+        println!("\nrecording CSAT ratings as a real metric (skilj_helpdesk_ticket_ratings_total)");
+        let base_url = format!("http://localhost:{port}");
+        let client = reqwest::Client::new();
+        tokio::spawn(async move { run_csat_metrics_loop(&client, &base_url, &token).await });
+    }
 
     // Optional fake traffic - see this file's own module doc comment.
     // Reuses the exact CommandTokens just minted/printed above, so this

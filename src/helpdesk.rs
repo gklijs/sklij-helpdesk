@@ -410,16 +410,22 @@ pub struct TicketRatedPayload {
 pub struct TicketRated;
 
 /// Not in the original spec - a CSAT survey response, standard practice
-/// once a ticket is resolved (Zendesk, Freshdesk). Nobody reads this back
-/// over the REST event feed this pass (`event_read_allowed` defaults to
-/// `false`); it's queried the same way any other historical fact is,
-/// over GraphQL/`get_projection_state`.
+/// once a ticket is resolved (Zendesk, Freshdesk).
 #[auto_register(BOUNDED_CONTEXT)]
 impl EventType for TicketRated {
     type Payload = TicketRatedPayload;
     const NAME: &'static str = "TicketRated";
     fn tag_mappings() -> Vec<TagMapping> {
         ticket_tag()
+    }
+    /// `src/csat_metrics.rs` reads this via an `EventReadToken` to
+    /// record the rating *value* as a real metric - see
+    /// `CompanySignedUp::event_read_allowed`'s own doc comment for why
+    /// this default needs an explicit override. Everything else about
+    /// a rating (who gave it, the comment) still only ever goes through
+    /// GraphQL/`get_projection_state`, same as before this existed.
+    fn event_read_allowed() -> bool {
+        true
     }
 }
 

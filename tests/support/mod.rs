@@ -281,6 +281,10 @@ pub async fn mint_command_token(
         &command_type,
         generate_token_id(),
         generate_token_secret(),
+        // Unrestricted - matching every call site's own prior behaviour
+        // before `scope` existed, same as `mint_event_read_token`'s
+        // identical `None` right above.
+        None,
         test_now(),
     )
     .unwrap();
