@@ -163,6 +163,12 @@ pub async fn seed_admin(pool: &Pool) -> RoleAccessMapping {
         bounded_context,
         level: AccessLevel::Admin,
         can_read_sensitive: false,
+        // Unrestricted, as this admin helper always was before `scope`
+        // existed - most of this crate's own tests want an unscoped
+        // caller; see `seed_role`/`seed_superadmin` and
+        // `tests/cross_company_projection_scoping.rs` for the ones that
+        // deliberately want a scoped one instead.
+        scope: None,
         status: RoleStatus::Active,
         created_at: test_now(),
         revoked_at: None,
@@ -212,6 +218,31 @@ pub async fn seed_superadmin(pool: &Pool) -> Role {
     };
     db::insert_role(pool, &role).await.unwrap();
     role
+}
+
+/// Grants `role` a `Write`-level `RoleAccessMapping` on the helpdesk
+/// bounded context, restricted to `scope` (see `RoleAccessMapping.scope`'s
+/// own doc comment in the sibling `skilj` repo) - `seed_admin` grants
+/// the identical shape but always unscoped; this is the scoped
+/// counterpart `tests/cross_company_projection_scoping.rs` needs to
+/// stand up a "customer belonging to one specific company" caller.
+pub async fn seed_scoped_mapping(pool: &Pool, role: &Role, scope: Option<String>) -> RoleAccessMapping {
+    let bounded_context = db::get_bounded_context(pool, skilj_helpdesk::helpdesk::BOUNDED_CONTEXT)
+        .await
+        .unwrap()
+        .expect("the helpdesk bounded context must already exist - call setup()/setup_graphql() first");
+    let mapping = RoleAccessMapping {
+        role: role.clone(),
+        bounded_context,
+        level: AccessLevel::Write,
+        can_read_sensitive: false,
+        scope,
+        status: RoleStatus::Active,
+        created_at: test_now(),
+        revoked_at: None,
+    };
+    db::insert_role_access_mapping(pool, &mapping).await.unwrap();
+    mapping
 }
 
 /// A fully-built `Skilj` with the helpdesk bounded context reconciled -
@@ -274,6 +305,12 @@ pub async fn mint_event_read_token(
         &event_type,
         generate_token_id(),
         generate_token_secret(),
+        // Unrestricted, matching every call site's own prior behaviour
+        // before `scope` existed - nothing in this crate's own test
+        // suite needs a scoped *token* specifically (only a scoped
+        // `RoleAccessMapping`, which is what actually gates GraphQL's
+        // `projection` query - see tests/cross_company_projection_scoping.rs).
+        None,
         test_now(),
     )
     .unwrap();

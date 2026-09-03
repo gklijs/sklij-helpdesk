@@ -443,8 +443,25 @@ pub struct TicketInternalNoteAdded;
 impl EventType for TicketInternalNoteAdded {
     type Payload = TicketInternalNoteAddedPayload;
     const NAME: &'static str = "TicketInternalNoteAdded";
+    /// Tagged on both, same reasoning as `TicketCreated`'s own doc
+    /// comment: `TicketInternalNotes`'s own `OWNER_TAG_KEY` (see that
+    /// projection's own doc comment) needs a "company" tag on *some*
+    /// consuming event to derive an owner from, and this is the only
+    /// one it consumes at all - `TicketCreated`'s own "company" tag
+    /// alone isn't enough here, since `TicketSummary`/`CompanyTicketList`
+    /// consume `TicketCreated` but `TicketInternalNotes` deliberately
+    /// doesn't (see this file's own module doc comment on why).
     fn tag_mappings() -> Vec<TagMapping> {
-        ticket_tag()
+        vec![
+            TagMapping {
+                key: "ticket".into(),
+                field: "ticket_id".into(),
+            },
+            TagMapping {
+                key: "company".into(),
+                field: "company_id".into(),
+            },
+        ]
     }
 }
 
@@ -1548,6 +1565,16 @@ impl Projection for TicketSummary {
     type State = TicketSummaryState;
     type Event = HelpdeskEvent;
     const NAME: &'static str = "TicketSummary";
+    /// See `TicketInternalNotes`'s own doc comment for the vulnerability
+    /// this closes and what it doesn't - `TicketCreated`'s own "company"
+    /// tag (already there for `CreateTicket`'s own consistency check) is
+    /// what an instance's owner derives from here; every other event
+    /// this projection consumes only tags "ticket", so an owner once
+    /// established at creation is never touched again by anything else,
+    /// exactly the "an event lacking the tag leaves it untouched"
+    /// behaviour `docs/architecture.md` §23 (in the sibling `skilj`
+    /// repo) describes.
+    const OWNER_TAG_KEY: Option<&'static str> = Some("company");
     fn consumed_event_types() -> Vec<&'static str> {
         vec![
             "TicketCreated",
@@ -1695,6 +1722,12 @@ impl Projection for CompanyTicketList {
     type State = CompanyTicketListState;
     type Event = HelpdeskEvent;
     const NAME: &'static str = "CompanyTicketList";
+    /// See `TicketSummary`'s own doc comment - identical fix, identical
+    /// reasoning. Keyed by `company_id` itself here (unlike
+    /// `TicketSummary`'s `ticket_id`), so the derived owner ends up
+    /// equal to the key for every instance - a degenerate but correct
+    /// case of the same general mechanism, not special-cased.
+    const OWNER_TAG_KEY: Option<&'static str> = Some("company");
     fn consumed_event_types() -> Vec<&'static str> {
         vec![
             "TicketCreated",
@@ -1850,14 +1883,28 @@ pub struct TicketInternalNotesState {
 /// true (see that event's own doc comment). This projection exists
 /// purely so staff have something to fetch on demand (`frontend/`'s own
 /// "Notes" toggle, a second, separate query - not folded into the
-/// eager one) - it carries the exact same "presentation, not access
-/// control" caveat every other projection in this crate already does:
-/// nothing about `skilj-graphql`'s own query surface stops a customer's
-/// Role from querying this projection directly by name, the same way
-/// nothing stops one from querying `CompanyTicketList` for a company
-/// they don't belong to. A real deployment enforcing per-Role
-/// projection scoping is a `RoleAccessMapping`-level concern this
-/// showcase doesn't build out - noted, not silently assumed away.
+/// eager one).
+///
+/// **Cross-company reads are closed, same-company staff-vs-customer
+/// isn't yet.** A security review found this projection (and
+/// `TicketSummary`/`CompanyTicketList`) readable by any Role with *any*
+/// mapping on the bounded context, regardless of which company the
+/// queried key actually belonged to - `skilj-graphql`'s
+/// `require_read_mapping` checked only that. skilj's own fix
+/// (`docs/architecture.md` §23 in the sibling `skilj` repo) added
+/// `OWNER_TAG_KEY`/`RoleAccessMapping.scope`, adopted here (this
+/// projection's `OWNER_TAG_KEY` below, `TicketInternalNoteAdded`'s own
+/// "company" tag, and `server.rs`'s demo customer Role scoped to its
+/// own company) - closing the cross-company half for all three
+/// projections, `tests/cross_company_projection_scoping.rs` proves it
+/// live. What that mechanism *doesn't* cover, because it's a tenancy
+/// dimension (which company) not a role dimension (staff or not): a
+/// customer scoped to their *own* company can still read this
+/// projection for their own tickets, seeing staff-only notes the
+/// feature was built to keep from them regardless of company. Closing
+/// that needs a different tool (`sensitive_fields`/an encryption master
+/// key skilj-helpdesk has never provisioned, or a new skilj-side
+/// role-type gate) - a real follow-up, not attempted in this pass.
 pub struct TicketInternalNotes;
 
 #[auto_register(BOUNDED_CONTEXT)]
@@ -1865,6 +1912,7 @@ impl Projection for TicketInternalNotes {
     type State = TicketInternalNotesState;
     type Event = HelpdeskEvent;
     const NAME: &'static str = "TicketInternalNotes";
+    const OWNER_TAG_KEY: Option<&'static str> = Some("company");
     fn consumed_event_types() -> Vec<&'static str> {
         vec!["TicketInternalNoteAdded"]
     }

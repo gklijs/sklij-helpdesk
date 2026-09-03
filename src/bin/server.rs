@@ -121,6 +121,13 @@ const TEST_ISSUER: &str = "https://idp.example.test/";
 // `id_token`'s own `sub` claim - not computed, not guessed.
 const DEMO_CUSTOMER_SUB: &str = "Cg1jdXN0b21lci1kZW1vEgVsb2NhbA";
 const DEMO_STAFF_LEAD_SUB: &str = "Cg9zdGFmZi1sZWFkLWRlbW8SBWxvY2Fs";
+// `frontend/src/config.rs`'s own `DEMO_COMPANY_ID` - the walkthrough
+// company README.md's own "sign up the demo company" step creates.
+// This binary needs its own copy (no shared crate boundary between
+// frontend/ and the backend - see frontend/Cargo.toml's own doc
+// comment) to scope the demo customer Role's own RoleAccessMapping
+// below to it.
+const DEMO_COMPANY_ID: &str = "acme";
 
 async fn serve_local_jwks() -> String {
     let jwks = json!({
@@ -262,6 +269,12 @@ async fn mint_event_tokens(
             &event_type,
             generate_token_id(),
             generate_token_secret(),
+            // Unrestricted: alerter/scheduler are operational consumers
+            // watching every company's own events by design (paging a
+            // lead, auto-closing a ticket - neither is "acting as" any
+            // one company) - the same reasoning `mapping`'s own `scope`
+            // below gets for the same reason.
+            None,
             Utc::now(),
         )?;
         db::insert_event_read_token(pool, &token).await?;
@@ -326,6 +339,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         bounded_context,
         level: AccessLevel::Admin,
         can_read_sensitive: false,
+        // Unrestricted - this is the system's own type-registration/
+        // reconciliation bootstrap Role (see `.reconciliation_role`
+        // below), not a caller acting on behalf of any one company.
+        scope: None,
         status: RoleStatus::Active,
         created_at: Utc::now(),
         revoked_at: None,
@@ -358,9 +375,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // safe to repeat" claim needed to be true here too, not just for
         // the bounded context.
         let existing_roles = db::list_roles(&pool).await?;
-        for (label, sub) in [
-            ("customer", DEMO_CUSTOMER_SUB),
-            ("staff-lead", DEMO_STAFF_LEAD_SUB),
+        // The actual fix (see this file's own module doc comment on the
+        // cross-tenant read gap a security review found, and skilj's own
+        // `docs/architecture.md` §23 for the mechanism): the demo
+        // customer's own grant is scoped to its own company, so
+        // `TicketSummary`/`CompanyTicketList`/`TicketInternalNotes` -
+        // every projection that declares `OWNER_TAG_KEY` - now rejects
+        // any instance whose derived owner isn't `DEMO_COMPANY_ID`, not
+        // just "this Role has some mapping on the bounded context."
+        // staff-lead stays unrestricted (`None`) on purpose: real
+        // support staff serve every company sharing this one bounded
+        // context, not just one.
+        for (label, sub, scope) in [
+            ("customer", DEMO_CUSTOMER_SUB, Some(DEMO_COMPANY_ID.to_string())),
+            ("staff-lead", DEMO_STAFF_LEAD_SUB, None),
         ] {
             if existing_roles
                 .iter()
@@ -384,6 +412,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 bounded_context: mapping.bounded_context.clone(),
                 level: AccessLevel::Write,
                 can_read_sensitive: false,
+                scope,
                 status: RoleStatus::Active,
                 created_at: Utc::now(),
                 revoked_at: None,

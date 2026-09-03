@@ -233,7 +233,7 @@ silently absent:
 ## Real bugs this project found (and fixed)
 
 Verifying everything against a live stack — not just "it compiles" —
-surfaced four real bugs, each confirmed failing first, then fixed:
+surfaced five real bugs, each confirmed failing first, then fixed:
 
 1. **skilj-core**: JWT audience validation was never configured, so any
    spec-compliant OIDC token (which always carries `aud`) was rejected
@@ -249,3 +249,21 @@ surfaced four real bugs, each confirmed failing first, then fixed:
 4. **The frontend**: a double-unwrap bug parsing the projection query
    response — found by actually running it in a headless browser
    against the real stack, not by inspection.
+5. **skilj-core/skilj-graphql**: `require_read_mapping` (the only gate on
+   GraphQL's `projection`/event/command read surfaces) checked only "does
+   the caller hold any active grant on this bounded context" — never
+   whether the specific instance queried belonged to that caller. In a
+   bounded context shared by several tenants (this project's own
+   motivating case), any authenticated customer could read another
+   company's tickets, or a staff-only projection like
+   `TicketInternalNotes`, for any company. Found by a security review of
+   this project, fixed in skilj itself (`RoleAccessMapping.scope` +
+   `Projection`/`EventType`/`CommandType.OWNER_TAG_KEY` —
+   `docs/architecture.md` §23–26 in the `skilj` repo), adopted here for
+   `TicketSummary`/`CompanyTicketList`/`TicketInternalNotes` and the demo
+   customer Role — `tests/cross_company_projection_scoping.rs` proves the
+   cross-company half live. What it doesn't close: a customer can still
+   read *their own* company's internal notes — a different (role-type,
+   not tenancy) axis of the same finding, left open rather than reached
+   for encryption infrastructure this project has never provisioned (see
+   `TicketInternalNotes`'s own doc comment in `src/helpdesk.rs`).
