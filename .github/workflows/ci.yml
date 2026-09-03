@@ -128,7 +128,15 @@ jobs:
 
       - uses: jetli/trunk-action@v0.5.1
         with:
-          version: "0.21.14"
+          # Its own required format - "0.21.14" (no `v`) fails at
+          # runtime with "Version tag should start with `v`" even
+          # though it matches a real trunk release tag otherwise. Found
+          # the hard way: every CI run since this workflow first landed
+          # failed on this exact step until now - `frontend`'s own
+          # local verification never caught it because it only ran the
+          # underlying `trunk build` command directly, never the
+          # marketplace action's own input handling.
+          version: "v0.21.14"
 
       # frontend/'s own stated testing philosophy is "no unit tests this
       # pass - verified by actually running it" (see its Cargo.toml/
