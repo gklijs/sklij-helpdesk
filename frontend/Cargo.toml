@@ -29,7 +29,7 @@ two are separate processes, same as alerter/scheduler are.
 
 [dependencies]
 leptos = { version = "0.7", features = ["csr"] }
-leptos_router = "0.7"
+leptos_router = "0.8"
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 web-sys = { version = "0.3", features = ["Window", "Storage", "Location", "Url", "UrlSearchParams"] }
