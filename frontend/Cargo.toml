@@ -28,8 +28,8 @@ two are separate processes, same as alerter/scheduler are.
 """
 
 [dependencies]
-leptos = { version = "0.7", features = ["csr"] }
-leptos_router = "0.7"
+leptos = { version = "0.8", features = ["csr"] }
+leptos_router = "0.8"
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 web-sys = { version = "0.3", features = ["Window", "Storage", "Location", "Url", "UrlSearchParams", "Document", "Element", "MediaQueryList"] }
@@ -37,8 +37,8 @@ js-sys = "0.3"
 gloo-net = "0.6"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sha2 = "0.10"
-base64 = "0.22"
+sha2 = "0.11"
+base64 = "0.23"
 getrandom = { version = "0.2", features = ["js"] }
 rand = "0.8"
 console_error_panic_hook = "0.1"
