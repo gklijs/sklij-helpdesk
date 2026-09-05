@@ -267,8 +267,13 @@ surfaced five real bugs, each confirmed failing first, then fixed:
    `docs/architecture.md` §23–26 in the `skilj` repo), adopted here for
    `TicketSummary`/`CompanyTicketList`/`TicketInternalNotes` and the demo
    customer Role — `tests/cross_company_projection_scoping.rs` proves the
-   cross-company half live. What it doesn't close: a customer can still
-   read *their own* company's internal notes — a different (role-type,
-   not tenancy) axis of the same finding, left open rather than reached
-   for encryption infrastructure this project has never provisioned (see
-   `TicketInternalNotes`'s own doc comment in `src/helpdesk.rs`).
+   cross-company half live. The remaining role-type axis — a customer
+   reading *their own* company's internal notes — stayed open until
+   skilj 0.0.4's `Projection::TEAM_ONLY` (`docs/architecture.md` §31–32
+   in the `skilj` repo, Codeberg issue #17) gave it a real gate instead
+   of encryption infrastructure this project would otherwise have had to
+   provision; adopted here as `TicketInternalNotes`'s own
+   `TEAM_ONLY = Some("staff")` and the demo staff Role's `name` (see
+   `TicketInternalNotes`'s own doc comment in `src/helpdesk.rs`) —
+   `tests/cross_company_projection_scoping.rs` now proves this half live
+   too.
