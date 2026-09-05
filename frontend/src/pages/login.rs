@@ -1,10 +1,14 @@
 use crate::auth::begin_login;
+use crate::theme::ThemeToggle;
 use leptos::prelude::*;
 
 #[component]
 pub fn Login() -> impl IntoView {
     view! {
-        <h1>"SkilJ Helpdesk"</h1>
+        <div class="topbar">
+            <h1>"SkilJ Helpdesk"</h1>
+            <ThemeToggle/>
+        </div>
         <p>"Sign in with the real, self-hosted OIDC provider (Dex) this showcase runs."</p>
         <button on:click=move |_| begin_login()>"Log in"</button>
         <p>

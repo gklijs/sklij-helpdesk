@@ -15,6 +15,18 @@ simplifications (see "What's not built" below).
 
 ![The staff dashboard: a ticket waiting on the customer with a real message thread, and one still open](docs/screenshot.png)
 
+<details>
+<summary>More screens: dark mode, the customer view, and the monitoring dashboard</summary>
+
+|  |  |
+|---|---|
+| ![The same staff dashboard in dark mode, toggled with the theme switch next to Log out](docs/screenshot-dark.png) | ![The customer view: only your own tickets, replying to a staff request for more info](docs/screenshot-customer.png) |
+| Dark mode — a manual override on top of the system default, see "A real login" below | The customer view — same app, same login page, a different role |
+
+![The provisioned Grafana dashboard: command/event throughput, REST latency, and the escalation/merge/CSAT/notes panels added beyond the original spec, all against a live local stack](docs/screenshot-monitoring.png)
+
+</details>
+
 ## What this is
 
 - **A company** signs up for a free trial, then must convert to a paid
@@ -39,7 +51,10 @@ simplifications (see "What's not built" below).
   Jira Service Management actually work, added to give the telemetry
   work below genuinely varied traffic to show.
 - **A real login**: a self-hosted OIDC provider (Dex), Authorization
-  Code + PKCE, a real customer/staff dashboard in the browser.
+  Code + PKCE, a real customer/staff dashboard in the browser — with a
+  dark mode (`frontend/src/theme.rs`) that follows the system's own
+  `prefers-color-scheme` by default, overridable per browser via the
+  toggle next to "Log out"/"Log in".
 
 ## Layout
 

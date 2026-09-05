@@ -3189,7 +3189,7 @@ checksum = "8ee5873ec9cce0195efcb7a4e9507a04cd49aec9c83d0389df45b1ef7ba2e649"
 
 [[package]]
 name = "skilj"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "arc-swap",
  "axum",
@@ -3209,7 +3209,7 @@ dependencies = [
 
 [[package]]
 name = "skilj-core"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "arc-swap",
  "base64 0.23.1",
@@ -3234,7 +3234,7 @@ dependencies = [
 
 [[package]]
 name = "skilj-graphql"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "arc-swap",
  "async-graphql",
@@ -3282,7 +3282,7 @@ dependencies = [
 
 [[package]]
 name = "skilj-macros"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3291,7 +3291,7 @@ dependencies = [
 
 [[package]]
 name = "skilj-rest"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "axum",
  "axum-extra",

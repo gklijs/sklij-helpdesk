@@ -471,9 +471,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // staff-lead stays unrestricted (`None`) on purpose: real
         // support staff serve every company sharing this one bounded
         // context, not just one.
-        for (label, sub, scope) in [
-            ("customer", DEMO_CUSTOMER_SUB, Some(DEMO_COMPANY_ID.to_string())),
-            ("staff-lead", DEMO_STAFF_LEAD_SUB, None),
+        //
+        // `name` is `"staff"`/`"customer"` rather than the older
+        // `"skilj-helpdesk demo {label}"` prose because `Role` has no
+        // separate "team" field - `TicketInternalNotes`'s own
+        // `Projection::TEAM_ONLY = Some("staff")` (see its doc comment
+        // in `src/helpdesk.rs`, skilj 0.0.4) compares against `name`
+        // directly, so the staff-lead Role's `name` must literally be
+        // `"staff"` for it to still read that projection.
+        for (label, sub, scope, name) in [
+            ("customer", DEMO_CUSTOMER_SUB, Some(DEMO_COMPANY_ID.to_string()), "customer"),
+            ("staff-lead", DEMO_STAFF_LEAD_SUB, None, "staff"),
         ] {
             if existing_roles
                 .iter()
@@ -485,7 +493,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let demo_role = Role {
                 id: generate_token_id(),
                 external_subject: sub.to_string(),
-                name: format!("skilj-helpdesk demo {label}"),
+                name: name.to_string(),
                 superadmin: false,
                 status: RoleStatus::Active,
                 created_at: Utc::now(),

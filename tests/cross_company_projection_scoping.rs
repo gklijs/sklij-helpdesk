@@ -22,12 +22,17 @@
 //! This file proves the mechanism actually closes the gap end to end,
 //! over real GraphQL requests (not `support::projection_state`'s direct
 //! DB read, which bypasses this check entirely) - not just that the new
-//! fields compile. See `TicketInternalNotes`'s own doc comment in
-//! `src/helpdesk.rs` for what this does *not* close: a customer scoped
-//! to their own company can still read that company's own internal
-//! notes, a different (role-type, not tenancy) axis of the same
-//! original finding, left open on purpose rather than reached for
-//! encryption infrastructure this crate has never provisioned.
+//! fields compile.
+//!
+//! `OWNER_TAG_KEY` alone left a different-axis gap open: a customer
+//! scoped to their own company could still read that company's own
+//! internal notes, a role-type (staff or not) rather than tenancy gap -
+//! see `TicketInternalNotes`'s own doc comment in `src/helpdesk.rs`.
+//! skilj 0.0.4's `Projection::TEAM_ONLY` (`docs/architecture.md` §31-32
+//! in the sibling `skilj` repo) closes it; adopted here as
+//! `TicketInternalNotes`'s own `TEAM_ONLY = Some("staff")` and
+//! `server.rs`'s demo staff Role `name`. The test below proves that
+//! half live too, alongside the cross-company one.
 
 mod support;
 
@@ -159,15 +164,8 @@ fn a_customer_scoped_to_one_company_cannot_read_another_companys_projections() {
             "company A's own customer must NOT read company B's ticket list: {list_b:?}"
         );
 
-        // --- TicketInternalNotes: the cross-company half this pass
-        // closes - company A's customer reading company B's notes must
-        // fail. (Company A's customer reading company A's *own* notes
-        // is deliberately NOT asserted either way here - that's the
-        // still-open, different axis this file's own module doc comment
-        // and TicketInternalNotes's own doc comment in helpdesk.rs both
-        // describe; asserting it would either lock in a known gap as
-        // "expected" or fail this test on something this pass never
-        // claimed to fix.)
+        // --- TicketInternalNotes: the cross-company half - company A's
+        // customer reading company B's notes must fail.
         let notes_b = graphql_request(
             &router,
             &customer_a_jwt,
@@ -177,6 +175,25 @@ fn a_customer_scoped_to_one_company_cannot_read_another_companys_projections() {
         assert!(
             !succeeded(&notes_b, "notes"),
             "company A's own customer must NOT read company B's internal notes: {notes_b:?}"
+        );
+
+        // --- TicketInternalNotes: the same-company role-type half,
+        // closed by skilj 0.0.4's `Projection::TEAM_ONLY` (see this
+        // file's own module doc comment and `TicketInternalNotes`'s own
+        // doc comment in `src/helpdesk.rs`) - company A's customer must
+        // NOT read company A's *own* internal notes either, even though
+        // `customer_a_jwt`'s scope is satisfied here (this is the same
+        // `ticket_a` note added above, so a pass here would mean the
+        // vulnerability, not the fix).
+        let notes_a_by_customer = graphql_request(
+            &router,
+            &customer_a_jwt,
+            &projection_query("TicketInternalNotes", &ticket_a, "helpdesk_TicketInternalNotes", "notes"),
+        )
+        .await;
+        assert!(
+            !succeeded(&notes_a_by_customer, "notes"),
+            "company A's own customer must NOT read company A's own internal notes - staff-only, not customer-only: {notes_a_by_customer:?}"
         );
 
         let staff_notes_a = graphql_request(

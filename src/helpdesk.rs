@@ -38,7 +38,7 @@ use serde::{Deserialize, Serialize};
 use skilj::{auto_register, CommandType, EventType, Projection};
 use skilj_core::event_store::Event;
 use skilj_core::plugin::BoundedContextEvent;
-use skilj_core::shared::{CommandDecision, EventSpec, TagMapping};
+use skilj_core::shared::{CommandDecision, EventSpec, PrivateField, PrivateFieldKind, TagMapping};
 
 pub const BOUNDED_CONTEXT: &str = "helpdesk";
 
@@ -1486,6 +1486,23 @@ pub struct AddInternalNote;
 /// the customer-facing projections below). Allowed at any ticket status,
 /// including after close - a real audit trail doesn't stop just because
 /// the ticket did.
+///
+/// `private_fields()` below is the one place `TEAM_ONLY = Some("staff")`
+/// on `TicketInternalNotes` (see that projection's own doc comment)
+/// doesn't reach: skilj's generic `CommandQuery`/`inspectCommand`
+/// (GraphQL, `AdminAccess`-gated - skilj-inspector/skilj-tui's own read
+/// path, not anything this crate builds itself) can show any command's
+/// raw payload to a superadmin-mapped Role regardless of `TEAM_ONLY`,
+/// which only gates `ProjectionQuery`. `staff_id`/`note` as
+/// `PrivateFieldKind::Team("staff")` closes that surface too, on the
+/// same terms - no superadmin bypass, `Role.name` must literally be
+/// `"staff"` (`docs/architecture.md`'s own private-field writeup in the
+/// sibling `skilj` repo). A deliberate choice, not a mechanical
+/// default: it means even this project's own platform operators can't
+/// read a ticket's internal notes through generic admin tooling without
+/// also holding a staff Role - accepted here since "staff-only" is
+/// this feature's entire point, not a boundary meant to stop only
+/// customers.
 #[auto_register(BOUNDED_CONTEXT)]
 impl CommandType for AddInternalNote {
     type Payload = AddInternalNotePayload;
@@ -1496,6 +1513,22 @@ impl CommandType for AddInternalNote {
     }
     fn rest_trigger_allowed() -> bool {
         true
+    }
+    fn private_fields() -> Vec<PrivateField> {
+        vec![
+            PrivateField {
+                field: "staff_id".into(),
+                kind: PrivateFieldKind::Team,
+                team: Some("staff".into()),
+                addressee_field: None,
+            },
+            PrivateField {
+                field: "note".into(),
+                kind: PrivateFieldKind::Team,
+                team: Some("staff".into()),
+                addressee_field: None,
+            },
+        ]
     }
     fn decide(payload: &Self::Payload, matching_events: &[Self::Event]) -> CommandDecision {
         match ticket_status(matching_events, &payload.ticket_id) {
@@ -1868,7 +1901,7 @@ impl Projection for CompanyTicketList {
     }
 }
 
-// --- internal notes, staff-only by convention (not access control) ---
+// --- internal notes, staff-only by access control (TEAM_ONLY below) ---
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct TicketInternalNote {
@@ -1891,8 +1924,8 @@ pub struct TicketInternalNotesState {
 /// "Notes" toggle, a second, separate query - not folded into the
 /// eager one).
 ///
-/// **Cross-company reads are closed, same-company staff-vs-customer
-/// isn't yet.** A security review found this projection (and
+/// **Both the cross-company and the same-company staff-vs-customer gaps
+/// are now closed.** A security review found this projection (and
 /// `TicketSummary`/`CompanyTicketList`) readable by any Role with *any*
 /// mapping on the bounded context, regardless of which company the
 /// queried key actually belonged to - `skilj-graphql`'s
@@ -1903,14 +1936,27 @@ pub struct TicketInternalNotesState {
 /// "company" tag, and `server.rs`'s demo customer Role scoped to its
 /// own company) - closing the cross-company half for all three
 /// projections, `tests/cross_company_projection_scoping.rs` proves it
-/// live. What that mechanism *doesn't* cover, because it's a tenancy
-/// dimension (which company) not a role dimension (staff or not): a
-/// customer scoped to their *own* company can still read this
+/// live.
+///
+/// `OWNER_TAG_KEY` alone left a second, different-axis gap open: a
+/// customer scoped to their *own* company could still read this
 /// projection for their own tickets, seeing staff-only notes the
-/// feature was built to keep from them regardless of company. Closing
-/// that needs a different tool (`sensitive_fields`/an encryption master
-/// key skilj-helpdesk has never provisioned, or a new skilj-side
-/// role-type gate) - a real follow-up, not attempted in this pass.
+/// feature was built to keep from them regardless of company - a role
+/// dimension (staff or not), not a tenancy one, which `scope` was never
+/// built to express. skilj 0.0.4 closes exactly that with
+/// `Projection::TEAM_ONLY` (`docs/architecture.md` §31-32 in the
+/// sibling `skilj` repo, Codeberg issue #17): a whole-projection gate,
+/// independent of and composed with `OWNER_TAG_KEY` rather than a
+/// refinement of it - a query must satisfy both, each failing on its
+/// own terms (`GrantScopeMismatch` vs. `NotOnRequiredTeam`). Adopted
+/// here as `TEAM_ONLY = Some("staff")` below, matched against
+/// `server.rs`'s staff Role(s), whose `Role.name` is literally `"staff"`
+/// for exactly this reason (no separate "team" field exists on `Role` -
+/// `name` doubles as the team identifier `TEAM_ONLY` compares against).
+/// No superadmin bypass, deliberately - see `Projection::TEAM_ONLY`'s
+/// own doc comment. `tests/cross_company_projection_scoping.rs` now
+/// proves this half live too: a company-A customer reading company A's
+/// *own* internal notes is rejected, not just company B's.
 pub struct TicketInternalNotes;
 
 #[auto_register(BOUNDED_CONTEXT)]
@@ -1919,6 +1965,7 @@ impl Projection for TicketInternalNotes {
     type Event = HelpdeskEvent;
     const NAME: &'static str = "TicketInternalNotes";
     const OWNER_TAG_KEY: Option<&'static str> = Some("company");
+    const TEAM_ONLY: Option<&'static str> = Some("staff");
     fn consumed_event_types() -> Vec<&'static str> {
         vec!["TicketInternalNoteAdded"]
     }

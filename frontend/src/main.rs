@@ -4,6 +4,7 @@ mod auth;
 mod config;
 mod model;
 mod pages;
+mod theme;
 
 use app::App;
 

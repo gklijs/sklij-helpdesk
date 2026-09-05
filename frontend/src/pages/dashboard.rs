@@ -1,6 +1,7 @@
 use crate::{
     api, auth, config,
     model::{TicketInternalNote, TicketListEntry},
+    theme::ThemeToggle,
 };
 use leptos::ev::SubmitEvent;
 use leptos::prelude::*;
@@ -127,8 +128,11 @@ pub fn Dashboard() -> impl IntoView {
     view! {
         <nav>
             <h1>"SkilJ Helpdesk"</h1>
-            <span>{if is_staff { "Staff view" } else { "Customer view" }} " — " {short_id(&my_sub)}</span>
-            <button on:click=log_out>"Log out"</button>
+            <div class="nav-right">
+                <span>{if is_staff { "Staff view" } else { "Customer view" }} " — " {short_id(&my_sub)}</span>
+                <ThemeToggle/>
+                <button on:click=log_out>"Log out"</button>
+            </div>
         </nav>
         <p class="error">{move || status.get()}</p>
 
