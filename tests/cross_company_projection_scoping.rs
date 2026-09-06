@@ -36,7 +36,8 @@
 
 mod support;
 
-use skilj_helpdesk::helpdesk::BOUNDED_CONTEXT;
+use skilj_core::access_control::AccessLevel;
+use skilj_helpdesk::helpdesk::{BOUNDED_CONTEXT, STAFF_TEAM};
 use support::{graphql_request, mint_command_token, seed_role, seed_scoped_mapping, setup_graphql, sign_jwt, test_db, trigger, unique_name};
 
 fn projection_query(name: &str, key: &str, graphql_type: &str, field: &str) -> String {
@@ -107,11 +108,11 @@ fn a_customer_scoped_to_one_company_cannot_read_another_companys_projections() {
         // bootstrap admin coincidentally.
         let customer_a = seed_role(&pool, "customer-a").await;
         let customer_a_jwt = sign_jwt(&customer_a.external_subject);
-        seed_scoped_mapping(&pool, &customer_a, Some(company_a.clone())).await;
+        seed_scoped_mapping(&pool, &customer_a, AccessLevel::Write, Some(company_a.clone())).await;
 
-        let staff = seed_role(&pool, "staff").await;
+        let staff = seed_role(&pool, STAFF_TEAM).await;
         let staff_jwt = sign_jwt(&staff.external_subject);
-        seed_scoped_mapping(&pool, &staff, None).await;
+        seed_scoped_mapping(&pool, &staff, AccessLevel::Write, None).await;
 
         // --- TicketSummary (keyed by ticket_id) ---
         let read_a = graphql_request(

@@ -42,6 +42,15 @@ use skilj_core::shared::{CommandDecision, EventSpec, PrivateField, PrivateFieldK
 
 pub const BOUNDED_CONTEXT: &str = "helpdesk";
 
+/// The one team name `TicketInternalNotes`'s own `TEAM_ONLY` and
+/// `AddInternalNote`/`TicketInternalNoteAdded`'s own `private_fields()`
+/// all compare `Role.name` against (see `TicketInternalNotes`'s own doc
+/// comment) - a shared constant rather than five independent string
+/// literals (this file, `server.rs`, both test files) so a future edit
+/// to one can't silently desync from the others and reopen exactly one
+/// of the two gates while the other still looks closed.
+pub const STAFF_TEAM: &str = "staff";
+
 fn company_tag() -> Vec<TagMapping> {
     vec![TagMapping {
         key: "company".into(),
@@ -445,6 +454,19 @@ pub struct TicketInternalNoteAdded;
 /// than tagging entries "internal" for the frontend to filter, is what
 /// actually keeps `CompanyTicketList`'s own "nothing here is customer-
 /// only data" claim true).
+///
+/// `private_fields()` below closes the same admin-tooling surface
+/// `AddInternalNote`'s own doc comment describes for the command side -
+/// skilj's generic `queryEvents`/`countEvents`/`inspectEvent`
+/// (`AdminAccess`-gated, `skilj-core::event_store::query_events`/
+/// `inspect_event`) check only `access_mapping.level == Admin`, never
+/// `event_read_allowed` (that flag only gates the *REST* feed's
+/// `EventReadToken` path - `fetch_events`/`consume_events` - a
+/// different function entirely). So even though this event type has no
+/// `event_read_allowed() = true` override and is therefore unreachable
+/// over REST, it was still fully readable in cleartext through the
+/// GraphQL admin surface without this declaration - found in review,
+/// not assumed from the REST-side block alone.
 #[auto_register(BOUNDED_CONTEXT)]
 impl EventType for TicketInternalNoteAdded {
     type Payload = TicketInternalNoteAddedPayload;
@@ -466,6 +488,22 @@ impl EventType for TicketInternalNoteAdded {
             TagMapping {
                 key: "company".into(),
                 field: "company_id".into(),
+            },
+        ]
+    }
+    fn private_fields() -> Vec<PrivateField> {
+        vec![
+            PrivateField {
+                field: "staff_id".into(),
+                kind: PrivateFieldKind::Team,
+                team: Some(STAFF_TEAM.into()),
+                addressee_field: None,
+            },
+            PrivateField {
+                field: "note".into(),
+                kind: PrivateFieldKind::Team,
+                team: Some(STAFF_TEAM.into()),
+                addressee_field: None,
             },
         ]
     }
@@ -1487,22 +1525,31 @@ pub struct AddInternalNote;
 /// including after close - a real audit trail doesn't stop just because
 /// the ticket did.
 ///
-/// `private_fields()` below is the one place `TEAM_ONLY = Some("staff")`
-/// on `TicketInternalNotes` (see that projection's own doc comment)
-/// doesn't reach: skilj's generic `CommandQuery`/`inspectCommand`
-/// (GraphQL, `AdminAccess`-gated - skilj-inspector/skilj-tui's own read
-/// path, not anything this crate builds itself) can show any command's
-/// raw payload to a superadmin-mapped Role regardless of `TEAM_ONLY`,
-/// which only gates `ProjectionQuery`. `staff_id`/`note` as
-/// `PrivateFieldKind::Team("staff")` closes that surface too, on the
-/// same terms - no superadmin bypass, `Role.name` must literally be
-/// `"staff"` (`docs/architecture.md`'s own private-field writeup in the
-/// sibling `skilj` repo). A deliberate choice, not a mechanical
-/// default: it means even this project's own platform operators can't
-/// read a ticket's internal notes through generic admin tooling without
-/// also holding a staff Role - accepted here since "staff-only" is
-/// this feature's entire point, not a boundary meant to stop only
-/// customers.
+/// `private_fields()` below is one of two places `TEAM_ONLY =
+/// Some(STAFF_TEAM)` on `TicketInternalNotes` (see that projection's
+/// own doc comment) doesn't reach - the other is `TicketInternalNoteAdded`'s
+/// own identical `private_fields()`, the event this command's own
+/// `decide()` emits. Both exist because skilj's generic
+/// `CommandQuery`/`EventQuery` (`fetchCommands`/`queryEvents`/
+/// `countEvents`/`inspectEvent` - GraphQL, `AdminAccess`-gated,
+/// skilj-inspector/skilj-tui's own read path, not anything this crate
+/// builds itself) can show any command or event's raw payload to a
+/// superadmin-mapped Role regardless of `TEAM_ONLY`, which only gates
+/// `ProjectionQuery` - confirmed by tracing `query_events`/
+/// `count_events`/`inspect_event` in the sibling `skilj` repo: none of
+/// them check `event_read_allowed` (only the REST feed's
+/// `fetch_events`/`consume_events` do), so `TicketInternalNoteAdded`
+/// having no `event_read_allowed() = true` override blocks the REST
+/// path but not this one - missed in the first pass, caught in review.
+/// `staff_id`/`note` as `PrivateFieldKind::Team(STAFF_TEAM)` on both
+/// closes it, on the same terms - no superadmin bypass, `Role.name`
+/// must literally be `STAFF_TEAM` (`docs/architecture.md`'s own
+/// private-field writeup in the sibling `skilj` repo). A deliberate
+/// choice, not a mechanical default: it means even this project's own
+/// platform operators can't read a ticket's internal notes through
+/// generic admin tooling without also holding a staff Role - accepted
+/// here since "staff-only" is this feature's entire point, not a
+/// boundary meant to stop only customers.
 #[auto_register(BOUNDED_CONTEXT)]
 impl CommandType for AddInternalNote {
     type Payload = AddInternalNotePayload;
@@ -1519,13 +1566,13 @@ impl CommandType for AddInternalNote {
             PrivateField {
                 field: "staff_id".into(),
                 kind: PrivateFieldKind::Team,
-                team: Some("staff".into()),
+                team: Some(STAFF_TEAM.into()),
                 addressee_field: None,
             },
             PrivateField {
                 field: "note".into(),
                 kind: PrivateFieldKind::Team,
-                team: Some("staff".into()),
+                team: Some(STAFF_TEAM.into()),
                 addressee_field: None,
             },
         ]
@@ -1949,10 +1996,16 @@ pub struct TicketInternalNotesState {
 /// independent of and composed with `OWNER_TAG_KEY` rather than a
 /// refinement of it - a query must satisfy both, each failing on its
 /// own terms (`GrantScopeMismatch` vs. `NotOnRequiredTeam`). Adopted
-/// here as `TEAM_ONLY = Some("staff")` below, matched against
-/// `server.rs`'s staff Role(s), whose `Role.name` is literally `"staff"`
-/// for exactly this reason (no separate "team" field exists on `Role` -
-/// `name` doubles as the team identifier `TEAM_ONLY` compares against).
+/// here as `TEAM_ONLY = Some(STAFF_TEAM)` below, matched against
+/// `server.rs`'s staff Role(s), whose `Role.name` is literally
+/// `STAFF_TEAM` for exactly this reason (no separate "team" field
+/// exists on `Role` - `name` doubles as the team identifier `TEAM_ONLY`
+/// compares against). `STAFF_TEAM` (this file's own top-level const) is
+/// the one place that string lives - `AddInternalNote`/
+/// `TicketInternalNoteAdded`'s own `private_fields()` and `server.rs`'s
+/// seeding both reference it rather than repeating the literal, found
+/// worth doing in review after the two independent gates almost drifted
+/// apart under separate literals.
 /// No superadmin bypass, deliberately - see `Projection::TEAM_ONLY`'s
 /// own doc comment. `tests/cross_company_projection_scoping.rs` now
 /// proves this half live too: a company-A customer reading company A's
@@ -1965,7 +2018,7 @@ impl Projection for TicketInternalNotes {
     type Event = HelpdeskEvent;
     const NAME: &'static str = "TicketInternalNotes";
     const OWNER_TAG_KEY: Option<&'static str> = Some("company");
-    const TEAM_ONLY: Option<&'static str> = Some("staff");
+    const TEAM_ONLY: Option<&'static str> = Some(STAFF_TEAM);
     fn consumed_event_types() -> Vec<&'static str> {
         vec!["TicketInternalNoteAdded"]
     }

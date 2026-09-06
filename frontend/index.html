@@ -23,81 +23,57 @@
       })();
     </script>
     <style>
-      /* Light palette (the default - no `prefers-color-scheme` support,
-         no stored override, is exactly this). Dark below redefines every
-         token here, never adds new ones. */
+      /*suppress inspection "CssUnusedSymbol" for whole file*/
+      /* Every selector below is built by a Leptos `view!` macro in
+         src/ (a Rust CSR app, not a static page) - an HTML/CSS
+         inspector has no way to see into that, so it flags every class
+         here as unused. Confirmed otherwise before suppressing: e.g.
+         `class="theme-toggle"` in src/theme.rs, `class="ticket-detail"`
+         in src/pages/dashboard.rs. */
+
+      /* Each token below is one `light-dark(light, dark)` pair rather
+         than a light block plus two separate dark ones (a system-preference
+         copy and an explicit-override copy) that a prior pass here kept
+         in lockstep by hand - found in review as a real duplication
+         risk (a tweak to one and not the others silently diverges).
+         `light-dark()` needs `color-scheme` to know which value of the
+         pair applies; `:root`'s own `light dark` means "follow the OS",
+         and the two `[data-theme]` rules below are the *only* other
+         thing needed for `<ThemeToggle/>`'s manual override - no
+         separate `@media` copy of the palette at all. (Chrome/Edge
+         123+, Firefox 120+, Safari 17.5+ - modern enough for a 2026
+         showcase; the no-flash bootstrap script above is unrelated to
+         this and still needed regardless, for the very first paint
+         before any CSS or WASM runs.) */
       :root {
-        --brand: #4f46e5;
-        --brand-dark: #3730a3;
-        --brand-light: #eef2ff;
-        --ink: #1e1b2e;
-        --muted: #6b7280;
-        --border: #e5e7eb;
-        --bg: #f9fafb;
-        --surface: #ffffff;
-        --surface-alt: #fcfcfe;
-        --strong-bg: #1e1b2e;
-        --strong-fg: #ffffff;
-        --danger: #dc2626;
-        --danger-bg: #fef2f2;
-        --warn: #b45309;
-        --warn-bg: #fffbeb;
-        --ok: #15803d;
-        --ok-bg: #f0fdf4;
-        --info: #1d4ed8;
-        --info-bg: #eff6ff;
+        color-scheme: light dark;
+        --brand: light-dark(#4f46e5, #6366f1);
+        --brand-dark: light-dark(#3730a3, #c7d2fe);
+        --brand-light: light-dark(#eef2ff, #312e81);
+        --ink: light-dark(#1e1b2e, #e5e7eb);
+        --muted: light-dark(#6b7280, #9ca3af);
+        --border: light-dark(#e5e7eb, #383d47);
+        --bg: light-dark(#f9fafb, #0f1115);
+        --surface: light-dark(#ffffff, #1a1d24);
+        --surface-alt: light-dark(#fcfcfe, #20242c);
+        --strong-bg: light-dark(#1e1b2e, #e5e7eb);
+        --strong-fg: light-dark(#ffffff, #0f1115);
+        --danger: light-dark(#dc2626, #f87171);
+        --danger-bg: light-dark(#fef2f2, #3f1d1d);
+        --warn: light-dark(#b45309, #fbbf24);
+        --warn-bg: light-dark(#fffbeb, #3f2d0a);
+        --ok: light-dark(#15803d, #4ade80);
+        --ok-bg: light-dark(#f0fdf4, #0f2e1c);
+        --info: light-dark(#1d4ed8, #60a5fa);
+        --info-bg: light-dark(#eff6ff, #17234a);
       }
 
-      /* System default (`data-theme` unset) - guarded by `:not([data-theme="light"])`
-         so an explicit light override still wins even on a dark system. */
-      @media (prefers-color-scheme: dark) {
-        :root:not([data-theme="light"]) {
-          --brand: #6366f1;
-          --brand-dark: #c7d2fe;
-          --brand-light: #312e81;
-          --ink: #e5e7eb;
-          --muted: #9ca3af;
-          --border: #383d47;
-          --bg: #0f1115;
-          --surface: #1a1d24;
-          --surface-alt: #20242c;
-          --strong-bg: #e5e7eb;
-          --strong-fg: #0f1115;
-          --danger: #f87171;
-          --danger-bg: #3f1d1d;
-          --warn: #fbbf24;
-          --warn-bg: #3f2d0a;
-          --ok: #4ade80;
-          --ok-bg: #0f2e1c;
-          --info: #60a5fa;
-          --info-bg: #17234a;
-        }
-      }
-
-      /* Explicit override (`<ThemeToggle/>`, or a stored preference the
-         bootstrap script above already applied before this rule even
-         matched) - wins regardless of system preference either way. */
-      :root[data-theme="dark"] {
-        --brand: #6366f1;
-        --brand-dark: #c7d2fe;
-        --brand-light: #312e81;
-        --ink: #e5e7eb;
-        --muted: #9ca3af;
-        --border: #383d47;
-        --bg: #0f1115;
-        --surface: #1a1d24;
-        --surface-alt: #20242c;
-        --strong-bg: #e5e7eb;
-        --strong-fg: #0f1115;
-        --danger: #f87171;
-        --danger-bg: #3f1d1d;
-        --warn: #fbbf24;
-        --warn-bg: #3f2d0a;
-        --ok: #4ade80;
-        --ok-bg: #0f2e1c;
-        --info: #60a5fa;
-        --info-bg: #17234a;
-      }
+      /* `<ThemeToggle/>`'s manual override (or a stored preference the
+         bootstrap script above already applied before first paint) -
+         forces `light-dark()` above to one branch regardless of the OS
+         setting, both directions. */
+      :root[data-theme="light"] { color-scheme: light; }
+      :root[data-theme="dark"] { color-scheme: dark; }
 
       * { box-sizing: border-box; }
 

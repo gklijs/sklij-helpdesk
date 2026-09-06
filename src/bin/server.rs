@@ -472,22 +472,55 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // support staff serve every company sharing this one bounded
         // context, not just one.
         //
-        // `name` is `"staff"`/`"customer"` rather than the older
-        // `"skilj-helpdesk demo {label}"` prose because `Role` has no
-        // separate "team" field - `TicketInternalNotes`'s own
-        // `Projection::TEAM_ONLY = Some("staff")` (see its doc comment
-        // in `src/helpdesk.rs`, skilj 0.0.4) compares against `name`
-        // directly, so the staff-lead Role's `name` must literally be
-        // `"staff"` for it to still read that projection.
+        // `name` is `"staff"`/`"customer"` (`helpdesk::STAFF_TEAM` for
+        // the former) rather than the older `"skilj-helpdesk demo
+        // {label}"` prose because `Role` has no separate "team" field -
+        // `TicketInternalNotes`'s own `Projection::TEAM_ONLY` and
+        // `AddInternalNote`/`TicketInternalNoteAdded`'s own
+        // `private_fields()` (see `src/helpdesk.rs`, skilj 0.0.4)
+        // compare against `name` directly, so the staff-lead Role's
+        // `name` must literally be `"staff"` for it to still read
+        // those. staff-lead stays unrestricted (`scope: None`) on
+        // purpose: real support staff serve every company sharing this
+        // one bounded context, not just one.
         for (label, sub, scope, name) in [
-            ("customer", DEMO_CUSTOMER_SUB, Some(DEMO_COMPANY_ID.to_string()), "customer"),
-            ("staff-lead", DEMO_STAFF_LEAD_SUB, None, "staff"),
+            (
+                "customer",
+                DEMO_CUSTOMER_SUB,
+                Some(DEMO_COMPANY_ID.to_string()),
+                "customer",
+            ),
+            (
+                "staff-lead",
+                DEMO_STAFF_LEAD_SUB,
+                None,
+                skilj_helpdesk::helpdesk::STAFF_TEAM,
+            ),
         ] {
-            if existing_roles
+            if let Some(existing) = existing_roles
                 .iter()
-                .any(|r| r.external_subject == sub && r.status == RoleStatus::Active)
+                .find(|r| r.external_subject == sub && r.status == RoleStatus::Active)
             {
-                println!("server: demo Role for {label} already exists (sub {sub:?})");
+                // A Role seeded by a server binary built before the
+                // `TEAM_ONLY`/`private_fields` gates above existed
+                // still carries the old `"skilj-helpdesk demo {label}"`
+                // prose - found in review: without this, `name` (and
+                // every gate comparing against it) would stay wrong
+                // forever on any database that already had this Role,
+                // silently violating this module's own "every run is
+                // safe to repeat" claim on exactly the upgrade path
+                // that claim exists for.
+                if existing.name != name {
+                    let mut renamed = existing.clone();
+                    renamed.name = name.to_string();
+                    db::update_role(&pool, &renamed).await?;
+                    println!(
+                        "server: renamed demo Role for {label} (sub {sub:?}) from {:?} to {name:?} - pre-existing Role from before TEAM_ONLY/private_fields",
+                        existing.name
+                    );
+                } else {
+                    println!("server: demo Role for {label} already exists (sub {sub:?})");
+                }
                 continue;
             }
             let demo_role = Role {

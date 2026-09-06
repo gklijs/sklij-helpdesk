@@ -220,13 +220,23 @@ pub async fn seed_superadmin(pool: &Pool) -> Role {
     role
 }
 
-/// Grants `role` a `Write`-level `RoleAccessMapping` on the helpdesk
-/// bounded context, restricted to `scope` (see `RoleAccessMapping.scope`'s
+/// Grants `role` a `RoleAccessMapping` on the helpdesk bounded context
+/// at `level`, restricted to `scope` (see `RoleAccessMapping.scope`'s
 /// own doc comment in the sibling `skilj` repo) - `seed_admin` grants
-/// the identical shape but always unscoped; this is the scoped
-/// counterpart `tests/cross_company_projection_scoping.rs` needs to
-/// stand up a "customer belonging to one specific company" caller.
-pub async fn seed_scoped_mapping(pool: &Pool, role: &Role, scope: Option<String>) -> RoleAccessMapping {
+/// the identical `Write`-level, unscoped shape via its own fixed
+/// "Test Admin" Role; this is the parameterised counterpart
+/// `tests/cross_company_projection_scoping.rs` (`Write`, scoped, a
+/// customer belonging to one specific company) and
+/// `tests/private_field_team_gating.rs` (`Admin`, unscoped, a caller
+/// that clears `require_admin_mapping` on its own, independent of
+/// `role.name` - `PrivateFieldKind::Team`'s own check runs separately,
+/// after this mapping already got the caller past that door) both need.
+pub async fn seed_scoped_mapping(
+    pool: &Pool,
+    role: &Role,
+    level: AccessLevel,
+    scope: Option<String>,
+) -> RoleAccessMapping {
     let bounded_context = db::get_bounded_context(pool, skilj_helpdesk::helpdesk::BOUNDED_CONTEXT)
         .await
         .unwrap()
@@ -234,35 +244,9 @@ pub async fn seed_scoped_mapping(pool: &Pool, role: &Role, scope: Option<String>
     let mapping = RoleAccessMapping {
         role: role.clone(),
         bounded_context,
-        level: AccessLevel::Write,
+        level,
         can_read_sensitive: false,
         scope,
-        status: RoleStatus::Active,
-        created_at: test_now(),
-        revoked_at: None,
-    };
-    db::insert_role_access_mapping(pool, &mapping).await.unwrap();
-    mapping
-}
-
-/// `seed_scoped_mapping`'s `AccessLevel::Admin` counterpart -
-/// `tests/private_field_team_gating.rs` needs a caller that clears
-/// `require_admin_mapping` (skilj-graphql's `CommandQuery`/`fetchCommands`
-/// gate) itself, independent of `role.name` - the `PrivateFieldKind::Team`
-/// check `AddInternalNote`'s own `private_fields()` declares runs
-/// entirely separately, after this mapping already got the caller past
-/// the door.
-pub async fn seed_admin_mapping(pool: &Pool, role: &Role) -> RoleAccessMapping {
-    let bounded_context = db::get_bounded_context(pool, skilj_helpdesk::helpdesk::BOUNDED_CONTEXT)
-        .await
-        .unwrap()
-        .expect("the helpdesk bounded context must already exist - call setup()/setup_graphql() first");
-    let mapping = RoleAccessMapping {
-        role: role.clone(),
-        bounded_context,
-        level: AccessLevel::Admin,
-        can_read_sensitive: false,
-        scope: None,
         status: RoleStatus::Active,
         created_at: test_now(),
         revoked_at: None,
