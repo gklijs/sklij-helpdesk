@@ -455,6 +455,13 @@ pub async fn mint_event_read_token(
         // `RoleAccessMapping`, which is what actually gates GraphQL's
         // `projection` query - see tests/cross_company_projection_scoping.rs).
         None,
+        // `None` - `EventReadStartPosition::Beginning`, matching every
+        // test in this crate's own prior behaviour from before this
+        // parameter existed (skilj 0.0.5): every test here signs up its
+        // own company/tickets after minting the token, but still wants
+        // to read from the true beginning, not skip anything minted
+        // between then and its own first `consume_auto` call.
+        None,
         test_now(),
     )
     .unwrap();

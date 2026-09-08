@@ -347,6 +347,12 @@ async fn mint_event_tokens(
             // one company) - the same reasoning `mapping`'s own `scope`
             // below gets for the same reason.
             None,
+            // `None` - `EventReadStartPosition::Beginning`, matching
+            // every one of these tokens' prior behaviour from before
+            // this parameter existed (skilj 0.0.5): every consumer here
+            // wants its own tenure to read the whole history, not just
+            // what's new from the moment it starts.
+            None,
             Utc::now(),
         )?;
         db::insert_event_read_token(pool, &token).await?;
