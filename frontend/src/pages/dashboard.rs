@@ -41,6 +41,22 @@ fn short_id(id: &str) -> String {
     }
 }
 
+/// Midnight UTC of "today" - `specs/activity.allium`'s own
+/// `DailyActivityRecorded.day` comment: calendar-day granularity, no
+/// dedicated Date primitive to reach for, caller-truncated. No `chrono`
+/// in this crate (see `Cargo.toml`'s own dependency list); `js_sys::Date::UTC`
+/// only takes `(year, month)` in this version, defaulting to the 1st of
+/// the month, not today - so this floors `Date::now()`'s own
+/// milliseconds-since-epoch to the current UTC day's own start instead,
+/// which is correct regardless of the browser's local timezone (epoch
+/// millis are UTC by definition).
+const MILLIS_PER_DAY: f64 = 86_400_000.0;
+
+fn today_midnight_utc() -> String {
+    let day_start_millis = (js_sys::Date::now() / MILLIS_PER_DAY).floor() * MILLIS_PER_DAY;
+    String::from(js_sys::Date::new(&day_start_millis.into()).to_iso_string())
+}
+
 #[component]
 pub fn Dashboard() -> impl IntoView {
     let Some((token, role)) = auth::current_session() else {
@@ -52,6 +68,37 @@ pub fn Dashboard() -> impl IntoView {
 
     let my_sub = auth::decode_jwt_sub(&token).unwrap_or_default();
     let is_staff = matches!(role, auth::Role::StaffLead);
+
+    // `specs/activity.allium`'s own `surface CustomerActivityPing`/
+    // `StaffActivityPing`: called unconditionally on every dashboard
+    // load, customer and staff alike, letting `decide()` do the
+    // once-per-company-per-person-per-day throttling
+    // (`already_recorded_today`) - not tied to `refresh` below, so this
+    // fires once per page load, not once per ticket action. A rejection
+    // here is the expected steady state after the first load of the
+    // day, not an error worth surfacing in `status`.
+    {
+        let token = token.clone();
+        let my_sub = my_sub.clone();
+        Effect::new(move |_| {
+            let payload = serde_json::json!({
+                "company_id": config::DEMO_COMPANY_ID,
+                "person_kind": if is_staff { "staff" } else { "customer" },
+                "person_subject": my_sub,
+                "day": today_midnight_utc(),
+            });
+            let token = token.clone();
+            spawn_local(async move {
+                let _ = api::submit_command(
+                    &token,
+                    config::ACTIVITY_BOUNDED_CONTEXT,
+                    "RecordDailyActivity",
+                    &payload,
+                )
+                .await;
+            });
+        });
+    }
 
     // `api::query_projection` already resolves down to the `tickets`
     // field's own inner JSON (a plain ticket_id -> entry map, per

@@ -13,6 +13,10 @@ pub const GRAPHQL_URL: &str = "http://localhost:8080/graphql";
 
 pub const BOUNDED_CONTEXT: &str = "helpdesk";
 
+/// `specs/activity.allium`'s own bounded context - `Dashboard`'s own
+/// once-per-load `RecordDailyActivity` ping goes here, not `helpdesk`.
+pub const ACTIVITY_BOUNDED_CONTEXT: &str = "activity";
+
 /// Every ticket in this showcase belongs to one demo company - matches
 /// `server.rs`'s own printed `curl` example (`company_id: "acme"`).
 /// Sign it up first (that example, or the GraphQL equivalent) before
