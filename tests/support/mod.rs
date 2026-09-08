@@ -137,6 +137,57 @@ async fn ensure_bounded_context(pool: &Pool) {
         .await;
 }
 
+/// Same idea as `ensure_bounded_context`, generalised to the two new
+/// bounded contexts `src/activity.rs`/`src/marketing.rs` implement (see
+/// specs/activity.allium/specs/marketing.allium for their own domain
+/// specs) - `setup_all_contexts` below reconciles both, on the same
+/// "just insert the row if it's not already there" idempotent shape
+/// `ensure_bounded_context` above already uses for `helpdesk`.
+static NEW_CONTEXTS_READY: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
+
+async fn ensure_activity_and_marketing_contexts(pool: &Pool) {
+    NEW_CONTEXTS_READY
+        .get_or_init(|| async {
+            for name in ["activity", "marketing"] {
+                if db::get_bounded_context(pool, name).await.unwrap().is_none() {
+                    db::insert_bounded_context(
+                        pool,
+                        &BoundedContext {
+                            name: name.to_string(),
+                            status: BoundedContextStatus::Active,
+                            created_at: test_now(),
+                            created_by: ContextCreator::SystemCreator,
+                            template: None,
+                        },
+                    )
+                    .await
+                    .unwrap();
+                }
+            }
+        })
+        .await;
+}
+
+/// `report.skipped_no_access` lists every `{bounded_context}/{type_name}`
+/// `auto_register()` found linked into this binary but couldn't grant
+/// the reconciliation role access to - since `auto_register()` finds
+/// every `#[auto_register]`-tagged type in the crate regardless of
+/// which bounded context it's in (see `lib.rs`'s own `register()` doc
+/// comment), a `setup()`/`setup_graphql()` caller that only grants
+/// helpdesk access now legitimately skips every `activity`/`marketing`
+/// type too - expected, not a bug. This asserts there's nothing *else*
+/// skipped, so a real access-grant mistake still fails loudly.
+fn assert_no_unexpected_skips(skipped_no_access: &[String]) {
+    let unexpected: Vec<&String> = skipped_no_access
+        .iter()
+        .filter(|s| !s.starts_with("activity/") && !s.starts_with("marketing/"))
+        .collect();
+    assert!(
+        unexpected.is_empty(),
+        "unexpected skipped_no_access entries (beyond the expected activity/marketing gap): {unexpected:?}"
+    );
+}
+
 /// A fresh admin `Role`, granted `Admin` access to the helpdesk context.
 /// Safe to call once per `#[test]` - each gets its own `Role`.
 pub async fn seed_admin(pool: &Pool) -> RoleAccessMapping {
@@ -255,6 +306,35 @@ pub async fn seed_scoped_mapping(
     mapping
 }
 
+/// Like `seed_scoped_mapping`, but against an arbitrary bounded context
+/// by name rather than the helpdesk one - for a `Role` (e.g.
+/// `seed_superadmin`'s) that needs `CommandToken`/`EventReadToken`
+/// access to one of the new activity/marketing contexts instead.
+pub async fn seed_mapping_for(
+    pool: &Pool,
+    role: &Role,
+    bounded_context_name: &str,
+    level: AccessLevel,
+    scope: Option<String>,
+) -> RoleAccessMapping {
+    let bounded_context = db::get_bounded_context(pool, bounded_context_name)
+        .await
+        .unwrap()
+        .unwrap_or_else(|| panic!("{bounded_context_name} bounded context must already exist - call setup_all_contexts() first"));
+    let mapping = RoleAccessMapping {
+        role: role.clone(),
+        bounded_context,
+        level,
+        can_read_sensitive: false,
+        scope,
+        status: RoleStatus::Active,
+        created_at: test_now(),
+        revoked_at: None,
+    };
+    db::insert_role_access_mapping(pool, &mapping).await.unwrap();
+    mapping
+}
+
 /// A fully-built `Skilj` with the helpdesk bounded context reconciled -
 /// a `#[test]` mints its own `CommandToken`s from the returned mapping.
 pub async fn setup() -> (Skilj, Pool, RoleAccessMapping) {
@@ -269,9 +349,59 @@ pub async fn setup() -> (Skilj, Pool, RoleAccessMapping) {
         .build()
         .await
         .unwrap();
-    assert_eq!(report.skipped_no_access, Vec::<String>::new());
+    assert_no_unexpected_skips(&report.skipped_no_access);
 
     (skilj, pool, mapping)
+}
+
+/// The `RoleAccessMapping` for each bounded context `setup_all_contexts`
+/// grants - one `Role`, three mappings, since `mint_command_token`/
+/// `mint_event_read_token` each need a mapping scoped to the specific
+/// bounded context they're minting a token against.
+pub struct AllContextMappings {
+    pub helpdesk: RoleAccessMapping,
+    pub activity: RoleAccessMapping,
+    pub marketing: RoleAccessMapping,
+}
+
+/// Like `setup()`, but also reconciles the two new bounded contexts
+/// tests/activity.rs and tests/marketing.rs need
+/// (`ensure_activity_and_marketing_contexts`) and grants one admin
+/// `Role` access to `helpdesk`, `activity` and `marketing` all at once -
+/// `skilj_helpdesk::register()`'s single `auto_register()` call finds
+/// every `#[auto_register]`-tagged type in the crate regardless of which
+/// module's `BOUNDED_CONTEXT` it uses, so `report.skipped_no_access`
+/// must stay empty across all three contexts here, the same requirement
+/// `setup()` already enforces for `helpdesk` alone.
+pub async fn setup_all_contexts() -> (Skilj, Pool, AllContextMappings) {
+    let (database_url, pool) = test_db()
+        .await
+        .expect("test_db() must be Some - caller already checked");
+    ensure_bounded_context(&pool).await;
+    ensure_activity_and_marketing_contexts(&pool).await;
+
+    let role = seed_role(&pool, "cross-context-admin").await;
+    let helpdesk = seed_mapping_for(&pool, &role, skilj_helpdesk::helpdesk::BOUNDED_CONTEXT, AccessLevel::Admin, None).await;
+    let activity = seed_mapping_for(&pool, &role, "activity", AccessLevel::Admin, None).await;
+    let marketing = seed_mapping_for(&pool, &role, "marketing", AccessLevel::Admin, None).await;
+
+    let external_subject = role.external_subject.clone();
+    let (skilj, report) = skilj_helpdesk::register(Skilj::builder(database_url))
+        .reconciliation_role(external_subject)
+        .build()
+        .await
+        .unwrap();
+    assert_eq!(report.skipped_no_access, Vec::<String>::new());
+
+    (
+        skilj,
+        pool,
+        AllContextMappings {
+            helpdesk,
+            activity,
+            marketing,
+        },
+    )
 }
 
 pub async fn mint_command_token(
@@ -509,7 +639,7 @@ pub async fn setup_graphql() -> (Skilj, Pool, RoleAccessMapping, String) {
         .build()
         .await
         .unwrap();
-    assert_eq!(report.skipped_no_access, Vec::<String>::new());
+    assert_no_unexpected_skips(&report.skipped_no_access);
 
     let jwt = sign_jwt(&external_subject);
     (skilj, pool, mapping, jwt)

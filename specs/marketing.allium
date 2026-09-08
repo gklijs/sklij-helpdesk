@@ -1,0 +1,161 @@
+-- allium: 3
+-- marketing.allium
+
+-- Scope: New bounded context recording "something worth a marketing
+--   follow-up happened" - no outreach automation, no paging (confirmed:
+--   not urgent enough for that). Staff-visible, no separate marketing
+--   role/login. The other of the two new bounded contexts (with
+--   activity.allium) built to showcase skilj 0.0.4's `CrossContextRoute` -
+--   see docs/activity-marketing-event-model.md.
+-- Includes:
+--   - A trial-lapse record, routed from helpdesk.CompanyExpired
+--   - A trial-conversion record, routed from helpdesk.CompanyActivated
+--   - An engagement-decline record, routed from
+--     activity.CompanyEngagementDeclined
+--   - A staff-facing surface listing all three, for a human to act on by
+--     hand
+-- Excludes:
+--   - Any actual outreach automation (email, CRM integration) -
+--     explicitly out of scope; this is a record for a human to act on.
+--   - This dashboard section's own look/interaction design - this file
+--     only names what data it needs, not how it's laid out.
+-- Dependencies: helpdesk/Company, helpdesk/StaffMember
+--   (skilj-helpdesk.allium); activity/CompanyEngagementDeclined
+--   (activity.allium). helpdesk is only ever a *source* of routed events
+--   here, never modified.
+
+use "./skilj-helpdesk.allium" as helpdesk
+use "./activity.allium" as activity
+
+------------------------------------------------------------
+-- Entities and Variants
+------------------------------------------------------------
+
+entity TrialLapsed {
+    company: helpdesk/Company
+    lapsed_at: Timestamp
+}
+
+entity TrialConverted {
+    company: helpdesk/Company
+    converted_at: Timestamp
+}
+
+entity EngagementDeclineFlagged {
+    company: helpdesk/Company
+    flagged_at: Timestamp
+}
+
+------------------------------------------------------------
+-- Rules
+------------------------------------------------------------
+
+-- Cross-context wiring. Allium has no `CrossContextRoute` construct of
+-- its own yet, so each route below is modeled as an ordinary pair of
+-- rules: one reacting to the source event and submitting this context's
+-- own command, one letting that command's own decide() (accept/reject)
+-- turn it into this context's own event - the same two-hop shape
+-- CrossContextRoute itself has, and the reason RecordTrialLapse etc.
+-- below are real commands with their own (currently unconditional)
+-- accept/reject boundary, not folded into a single rule. The real
+-- mechanism is skilj's routing infrastructure reacting to a committed
+-- event, not one decide() calling another directly - exact payload
+-- mapping is deliberately not named here, see open question below.
+
+rule TrialLapseIsRoutedFromHelpdesk {
+    when: company: helpdesk/Company.status transitions_to expired
+    ensures: RecordTrialLapse(company: company, lapsed_at: now)
+}
+
+rule TrialLapseIsRecorded {
+    when: RecordTrialLapse(company, lapsed_at)
+    -- Accepted always; rejected when: none identified yet - see the open
+    -- question on repeat lapses below.
+    ensures: TrialLapsed.created(company: company, lapsed_at: lapsed_at)
+}
+
+rule TrialConversionIsRoutedFromHelpdesk {
+    -- Fires on either edge into `active` (trialing -> active via
+    -- TrialPeriodEnds, or expired -> active via CompanySubscribes) -
+    -- `transitions_to` doesn't distinguish the source state, matching
+    -- helpdesk's own single CompanyActivated event covering both.
+    when: company: helpdesk/Company.status transitions_to active
+    ensures: RecordTrialConversion(company: company, converted_at: now)
+}
+
+rule TrialConversionIsRecorded {
+    when: RecordTrialConversion(company, converted_at)
+    -- Accepted always; rejected when: none identified yet - same open
+    -- question as TrialLapseIsRecorded.
+    ensures: TrialConverted.created(company: company, converted_at: converted_at)
+}
+
+rule EngagementDeclineIsRoutedFromActivity {
+    when: flag: activity/CompanyEngagementDeclined.created
+    ensures: RecordEngagementDecline(company: flag.company, flagged_at: flag.flagged_at)
+}
+
+-- marketing's own command - distinct type from activity's
+-- RecordEngagementDecline; they live in different bounded contexts so
+-- this isn't a real collision, just a naming note worth resolving before
+-- writing Rust (see open question below).
+rule EngagementDeclineIsFlagged {
+    when: RecordEngagementDecline(company, flagged_at)
+    ensures: EngagementDeclineFlagged.created(company: company, flagged_at: flagged_at)
+}
+
+------------------------------------------------------------
+-- Surfaces
+------------------------------------------------------------
+
+-- What "lands in the UI" needs: a plain record for staff to react to by
+-- hand, not a queue with its own workflow. Modeled as a surface's
+-- `exposes` clause rather than a formal entity `Projection`, because the
+-- three source entities don't share a base type or a declared
+-- relationship for a `where`-filtered projection to select from.
+surface MarketingOutreachSignals {
+    facing staff: helpdesk/StaffMember
+
+    exposes:
+        for signal in TrialLapseds:
+            signal.company
+            signal.lapsed_at
+        for signal in TrialConverteds:
+            signal.company
+            signal.converted_at
+        for signal in EngagementDeclineFlaggeds:
+            signal.company
+            signal.flagged_at
+}
+
+------------------------------------------------------------
+-- Open Questions
+------------------------------------------------------------
+
+-- Resolved: RecordTrialLapse/RecordTrialConversion recur per company -
+-- each real lapse/conversion cycle produces its own event, not
+-- once-ever like the engagement-decline flag. Unlike engagement
+-- decline, these mirror a helpdesk lifecycle transition that can
+-- legitimately repeat (a company can ReactivateCompany after expiring,
+-- then lapse again later) - `rule TrialLapseIsRecorded`/
+-- `TrialConversionIsRecorded` were never given a uniqueness guard for
+-- exactly this reason, confirmed correct rather than an oversight; only
+-- `rule EngagementDeclineIsFlagged`'s own source
+-- (`CompanyEngagementDeclined`) is itself once-ever in `activity`.
+
+-- Resolved: the activity/marketing naming collision
+-- (`RecordEngagementDecline` as a command name in both contexts,
+-- `CompanyEngagementDeclined` vs. `EngagementDeclineFlagged` as the
+-- event names) stays as is - genuinely not a collision (different
+-- bounded contexts, different Rust `CommandType`/`EventType` impls; see
+-- `src/activity.rs`/`src/marketing.rs`'s own `RecordEngagementDecline`
+-- doc comments), and renaming either side to avoid the visual similarity
+-- would cost more clarity than it buys.
+
+-- Resolved: exact CrossContextRoute payload mapping - see
+-- `src/marketing.rs`'s own `HelpdeskExpiryToTrialLapse`/
+-- `HelpdeskActivationToTrialConversion`/
+-- `ActivityEngagementDeclineToMarketingFlag` `route()` implementations.
+-- `lapsed_at`/`converted_at` are freshly stamped at route time (neither
+-- source event carries its own timestamp); `flagged_at` is carried
+-- through from the source event unchanged.

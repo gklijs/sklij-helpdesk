@@ -58,6 +58,10 @@ path = "src/bin/alerter.rs"
 name = "scheduler"
 path = "src/bin/scheduler.rs"
 
+[[bin]]
+name = "engagement-watcher"
+path = "src/bin/engagement-watcher.rs"
+
 [dependencies]
 skilj = { path = "../skilj/skilj" }
 skilj-core = { path = "../skilj/skilj-core" }

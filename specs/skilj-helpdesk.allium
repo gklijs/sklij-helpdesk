@@ -22,9 +22,10 @@
 -- Excludes:
 --   - Real payment processing: mocked, since this is a showcase, not a
 --     real billing product. Modelled as a black box (see
---     PaymentGateway.charge in TrialPeriodEnds/CompanySubscribes below);
---     the actual charge outcome is not this spec's concern beyond
---     "succeeded" or "failed"
+--     PaymentGateway.charge in TrialPeriodEnds below); the actual charge
+--     outcome is not this spec's concern beyond "succeeded" or "failed".
+--     CompanySubscribes doesn't call it at all - see that rule's own
+--     comment for why.
 --   - UI visual design, branding, layout: presentation-level, not domain
 --     behaviour
 --   - SkilJ's own library guarantees (bounded-context templating,
@@ -90,6 +91,15 @@ config {
 use "../../skilj/specs/skilj.allium" as skilj
 
 entity Company {
+    -- Caller-supplied, checked for uniqueness on signup (see rule
+    -- CompanySignsUp) - the same caller-supplied-identifier shape
+    -- Customer/StaffMember's own external_subject already is. Distinct
+    -- from this entity's own Allium identity, which stays implicit as
+    -- usual - this is the wire-level idempotency key a real caller
+    -- submits, caught missing from this entity during weeding (the
+    -- real decide() already keys on it).
+    company_id: String
+
     name: String
     contact_email: String
     status: trialing | active | expired
@@ -124,7 +134,11 @@ entity Company {
 -- superadmin-level credentials and provisions the tenant itself the
 -- moment the form is submitted - no manual/admin approval step.
 rule CompanySignsUp {
-    when: SignUpCompany(name, contact_email)
+    when: SignUpCompany(company_id, name, contact_email)
+    -- Rejected as `already_signed_up` when this company_id was already
+    -- used - caught during weeding: the real decide() has always
+    -- guarded this, just missing from this rule.
+    requires: not exists Company{company_id: company_id}
     let tenant = skilj/CreateBoundedContextFromTemplate(template: "helpdesk")
         -- Black box, same register as PaymentGateway.charge below: this
         -- app's own backend calls skilj's own rule of that name, with
@@ -132,6 +146,7 @@ rule CompanySignsUp {
         -- rule itself requires/guarantees is skilj.allium's concern, not
         -- re-specified here.
     ensures: Company.created(
+        company_id: company_id,
         name: name,
         contact_email: contact_email,
         status: trialing,
@@ -154,14 +169,22 @@ rule TrialPeriodEnds {
 
 -- Resolved: a company that lapsed (or never converted) can subscribe at
 -- any later point and regain full access immediately - no re-approval,
--- symmetric with signup itself being self-service.
+-- symmetric with signup itself being self-service. Trigger named
+-- `ReactivateCompany` to match the real command name (caught during
+-- weeding - this rule previously called it `Subscribe`). Unconditional,
+-- unlike `TrialPeriodEnds` above - caught during weeding: the real
+-- `ReactivateCompany::decide()` never calls `PaymentGateway.charge` or
+-- branches on its outcome at all ("a real payment retry-on-failure UX
+-- is presentation-level, out of this pass's scope" - its own doc
+-- comment); this rule previously modeled a `charged.succeeded` branch
+-- that was never implemented and has no `else`, so a rejected charge
+-- would have silently done nothing rather than reject the command -
+-- removed rather than implemented, since the code's own simplification
+-- is the one actually running.
 rule CompanySubscribes {
-    when: Subscribe(company)
+    when: ReactivateCompany(company)
     requires: company.status = expired
-    let charged = PaymentGateway.charge(company)
-    ensures:
-        if charged.succeeded:
-            company.status = active
+    ensures: company.status = active
 }
 
 -- Ticket system. Shaped after standard helpdesk convention (Zendesk,
@@ -413,14 +436,14 @@ rule StaffAddsInternalNote {
 
 surface CompanySignup {
     provides:
-        SignUpCompany(name, contact_email)
+        SignUpCompany(company_id, name, contact_email)
 }
 
 surface CompanyResubscription {
     facing staff: StaffMember
 
     provides:
-        Subscribe(staff.company)
+        ReactivateCompany(staff.company)
             when staff.company.status = expired
 }
 

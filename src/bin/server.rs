@@ -271,6 +271,51 @@ async fn shutdown_signal() {
     println!("server: shutdown signal received");
 }
 
+/// Ensures `bounded_context_name`'s own `BoundedContext` row exists
+/// (same idempotent "insert only if missing" shape `helpdesk`'s own
+/// bootstrap in `main()` uses), then grants `role` an unrestricted
+/// `Admin` mapping onto it. The generalised, reusable counterpart to
+/// that inline `helpdesk` bootstrap - extracted once a second and third
+/// bounded context (`activity`, `marketing`) needed the identical two
+/// steps, rather than a third copy-pasted block.
+async fn ensure_bounded_context_and_grant(
+    pool: &db::Pool,
+    role: &Role,
+    bounded_context_name: &str,
+) -> Result<RoleAccessMapping, Box<dyn std::error::Error>> {
+    if db::get_bounded_context(pool, bounded_context_name).await?.is_none() {
+        db::insert_bounded_context(
+            pool,
+            &BoundedContext {
+                name: bounded_context_name.to_string(),
+                status: BoundedContextStatus::Active,
+                created_at: Utc::now(),
+                created_by: ContextCreator::SystemCreator,
+                template: None,
+            },
+        )
+        .await?;
+        println!("server: created bounded context {bounded_context_name:?}");
+    }
+    let bounded_context = db::get_bounded_context(pool, bounded_context_name)
+        .await?
+        .expect("just ensured it exists above");
+    let mapping = RoleAccessMapping {
+        role: role.clone(),
+        bounded_context,
+        level: AccessLevel::Admin,
+        can_read_sensitive: false,
+        // Unrestricted - same reasoning as the helpdesk bootstrap
+        // mapping's own `None` scope in `main()`.
+        scope: None,
+        status: RoleStatus::Active,
+        created_at: Utc::now(),
+        revoked_at: None,
+    };
+    db::insert_role_access_mapping(pool, &mapping).await?;
+    Ok(mapping)
+}
+
 /// Mints one fresh `EventReadToken` per `event_type_name`, printing each
 /// as it goes (`send as authorization: Bearer <id>.<secret>` to
 /// `/v1/events/consume`) - called once per consumer
@@ -281,14 +326,15 @@ async fn shutdown_signal() {
 async fn mint_event_tokens(
     pool: &db::Pool,
     mapping: &RoleAccessMapping,
+    bounded_context: &str,
     event_type_names: &[&'static str],
 ) -> Result<HashMap<&'static str, String>, Box<dyn std::error::Error>> {
     let mut tokens = HashMap::new();
     for event_type_name in event_type_names {
-        let event_type = db::get_event_type(pool, BOUNDED_CONTEXT, event_type_name)
+        let event_type = db::get_event_type(pool, bounded_context, event_type_name)
             .await?
             .unwrap_or_else(|| {
-                panic!("{BOUNDED_CONTEXT}/{event_type_name} should have just been registered")
+                panic!("{bounded_context}/{event_type_name} should have just been registered")
             });
         let token = access_control::create_event_read_token(
             mapping,
@@ -307,6 +353,42 @@ async fn mint_event_tokens(
         let credential = format!("{}.{}", token.id, token.secret);
         println!("  {event_type_name}: {credential}");
         tokens.insert(*event_type_name, credential);
+    }
+    Ok(tokens)
+}
+
+/// Mints one fresh `CommandToken` per `command_type_name` - the same
+/// shape `mint_event_tokens` above is, and the generalised counterpart
+/// to what used to be an inline loop in `main()` scoped to `helpdesk`
+/// alone (`COMMAND_TYPES`, below), now shared with `engagement-watcher`'s
+/// own `RecordEngagementDecline` token against `activity`.
+async fn mint_command_tokens(
+    pool: &db::Pool,
+    mapping: &RoleAccessMapping,
+    bounded_context: &str,
+    command_type_names: &[&'static str],
+) -> Result<HashMap<&'static str, String>, Box<dyn std::error::Error>> {
+    let mut tokens = HashMap::new();
+    for command_type_name in command_type_names {
+        let command_type = db::get_command_type(pool, bounded_context, command_type_name)
+            .await?
+            .unwrap_or_else(|| {
+                panic!("{bounded_context}/{command_type_name} should have just been registered")
+            });
+        let token = access_control::create_command_token(
+            mapping,
+            &command_type,
+            generate_token_id(),
+            generate_token_secret(),
+            // Unrestricted - same reasoning as mint_event_tokens' own
+            // `None` scope above.
+            None,
+            Utc::now(),
+        )?;
+        db::insert_command_token(pool, &token).await?;
+        let credential = format!("{}.{}", token.id, token.secret);
+        println!("  {command_type_name}: {credential}");
+        tokens.insert(*command_type_name, credential);
     }
     Ok(tokens)
 }
@@ -433,6 +515,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         revoked_at: None,
     };
     db::insert_role_access_mapping(&pool, &mapping).await?;
+
+    // The same bootstrap admin Role, granted a second and third mapping
+    // onto the "activity"/"marketing" bounded contexts -
+    // src/activity.rs's/src/marketing.rs's own command/event types live
+    // there, not in `helpdesk`, so engagement-watcher's own tokens below
+    // (and the three `CrossContextRoute`s lib.rs's own `register()`
+    // wires in) need a mapping scoped to each. Without the `marketing`
+    // grant specifically, `report.skipped_no_access` below would list
+    // every `marketing/*` type and the routes would silently skip every
+    // occurrence forever (`target CommandType isn't registered`) -
+    // caught by actually running this binary and watching the route's
+    // own background task log a warning, not assumed from reading the
+    // code. Each bounded context's own type registration happens
+    // automatically via `register()`'s `auto_register()` (see lib.rs's
+    // own doc comment); only the bounded context row and this grant are
+    // this file's own job, the same two steps `helpdesk`'s own bootstrap
+    // just did above.
+    let activity_mapping = ensure_bounded_context_and_grant(
+        &pool,
+        &role,
+        skilj_helpdesk::activity::BOUNDED_CONTEXT,
+    )
+    .await?;
+    let _marketing_mapping = ensure_bounded_context_and_grant(
+        &pool,
+        &role,
+        skilj_helpdesk::marketing::BOUNDED_CONTEXT,
+    )
+    .await?;
 
     // Real IdP when OIDC_ISSUER_URL is set (a running Dex instance - see
     // this file's own module doc comment), the local JWKS/JWT shortcut
@@ -574,49 +685,57 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     println!("\ncommand tokens (send as `authorization: Bearer <id>.<secret>` to /v1/commands/trigger):");
-    let mut command_tokens = HashMap::new();
-    for command_type_name in COMMAND_TYPES {
-        let command_type = db::get_command_type(&pool, BOUNDED_CONTEXT, command_type_name)
-            .await?
-            .unwrap_or_else(|| {
-                panic!("{BOUNDED_CONTEXT}/{command_type_name} should have just been registered")
-            });
-        let token = access_control::create_command_token(
-            &mapping,
-            &command_type,
-            generate_token_id(),
-            generate_token_secret(),
-            // Unrestricted - these are this file's own bootstrap
-            // command tokens (printed for the demo curl example, and
-            // handed to demo_seed's own fake traffic), not scoped to
-            // any one company, same reasoning as every other `None`
-            // scope in this file.
-            None,
-            Utc::now(),
-        )?;
-        db::insert_command_token(&pool, &token).await?;
-        let credential = format!("{}.{}", token.id, token.secret);
-        println!("  {command_type_name}: {credential}");
-        command_tokens.insert(*command_type_name, credential);
-    }
+    let command_tokens = mint_command_tokens(&pool, &mapping, BOUNDED_CONTEXT, COMMAND_TYPES).await?;
 
     // Two independent mints, not one shared list - see
     // `ALERTER_EVENT_TYPES`'s own doc comment for why alerter and
     // scheduler can't share a token for the event types they both read.
     println!("\nalerter's own event read tokens:");
-    let alerter_event_tokens = mint_event_tokens(&pool, &mapping, ALERTER_EVENT_TYPES).await?;
+    let alerter_event_tokens =
+        mint_event_tokens(&pool, &mapping, BOUNDED_CONTEXT, ALERTER_EVENT_TYPES).await?;
     println!("\nscheduler's own event read tokens:");
-    let scheduler_event_tokens = mint_event_tokens(&pool, &mapping, SCHEDULER_EVENT_TYPES).await?;
+    let scheduler_event_tokens =
+        mint_event_tokens(&pool, &mapping, BOUNDED_CONTEXT, SCHEDULER_EVENT_TYPES).await?;
 
     // Only if telemetry is actually configured - see
     // run_csat_metrics_loop's own doc comment for why a token and a
     // poll loop otherwise have nothing to record into.
     let csat_metrics_token = if telemetry.is_some() {
         println!("\nCSAT metrics' own event read token:");
-        Some(mint_event_tokens(&pool, &mapping, &["TicketRated"]).await?["TicketRated"].clone())
+        Some(
+            mint_event_tokens(&pool, &mapping, BOUNDED_CONTEXT, &["TicketRated"]).await?
+                ["TicketRated"]
+                .clone(),
+        )
     } else {
         None
     };
+
+    // engagement-watcher's own tokens - against `activity`, via
+    // `activity_mapping` (see this file's own bootstrap above), not
+    // `helpdesk`/`mapping`.
+    println!("\nengagement-watcher's own event read token:");
+    let activity_event_tokens = mint_event_tokens(
+        &pool,
+        &activity_mapping,
+        skilj_helpdesk::activity::BOUNDED_CONTEXT,
+        &["DailyActivityRecorded"],
+    )
+    .await?;
+    // `RecordDailyActivity` too, not just engagement-watcher's own
+    // `RecordEngagementDecline` - same "every rest_trigger_allowed
+    // command type gets a demo token" convention `COMMAND_TYPES` above
+    // already follows for `helpdesk`; `CustomerActivityPing`/
+    // `StaffActivityPing` are real surfaces too, just not yet backed by
+    // frontend/.
+    println!("\nactivity's own command tokens:");
+    let activity_command_tokens = mint_command_tokens(
+        &pool,
+        &activity_mapping,
+        skilj_helpdesk::activity::BOUNDED_CONTEXT,
+        &["RecordDailyActivity", "RecordEngagementDecline"],
+    )
+    .await?;
 
     // Ready-to-paste env vars for the other two binaries this session
     // built - closes the loop between all three.
@@ -644,6 +763,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  export EXPIRE_COMPANY_TRIAL_TOKEN={}", command_tokens["ExpireCompanyTrial"]);
     println!("  export CLOSE_TICKET_TOKEN={}", command_tokens["CloseTicket"]);
     println!("  cargo run --bin scheduler");
+
+    println!("\nto run engagement-watcher against this server:");
+    println!("  export SKILJ_BASE_URL=http://localhost:{port}");
+    println!(
+        "  export DAILY_ACTIVITY_RECORDED_TOKEN={}",
+        activity_event_tokens["DailyActivityRecorded"]
+    );
+    println!(
+        "  export RECORD_ENGAGEMENT_DECLINE_TOKEN={}",
+        activity_command_tokens["RecordEngagementDecline"]
+    );
+    println!("  cargo run --bin engagement-watcher");
 
     let rest = skilj.rest_router();
     let graphql = skilj.graphql_router().await?;

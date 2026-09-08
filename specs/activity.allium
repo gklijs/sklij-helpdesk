@@ -1,0 +1,195 @@
+-- allium: 3
+-- activity.allium
+
+-- Scope: New bounded context tracking who's actually using the product,
+--   per company, per day - and, from that, whether a company's own
+--   customers have gone quiet. One of two new bounded contexts (with
+--   marketing.allium) built to showcase skilj 0.0.4's `CrossContextRoute`
+--   (a single-hop reaction: an EventType commits in one bounded context,
+--   a CommandType's payload gets submitted into a different one, through
+--   that command's real decide()) - see
+--   docs/activity-marketing-event-model.md.
+-- Includes:
+--   - Recording that a specific customer or staff member was active on a
+--     given day, once per company+person+day
+--   - Flagging a company whose customers have gone quiet, once ever, for
+--     marketing.allium to pick up via CrossContextRoute
+-- Excludes:
+--   - The actual sweep that walks every company and decides who's gone
+--     quiet - `config.quiet_after`'s own threshold check is
+--     `engagement-watcher`'s decision logic (the same kind of thing
+--     helpdesk's own scheduling.rs already is for TrialPeriodEnds/
+--     TicketAutoCloses), not an event/command shape question, and not
+--     yet built - see the resolved notes near the bottom of this file
+--     for what's decided versus what's still to implement.
+--   - Any UI for staff-side activity: staff DailyActivityRecorded events
+--     are modeled because there's real value in them (unique daily users,
+--     support-coverage visibility), but nothing reads them yet.
+-- Dependencies: helpdesk/Company, helpdesk/Customer, helpdesk/StaffMember
+--   (skilj-helpdesk.allium) - this context never modifies them, only
+--   reads/references them; skilj/Role (skilj.allium) for the scheduled
+--   binary's own system identity.
+
+use "./skilj-helpdesk.allium" as helpdesk
+use "../../skilj/specs/skilj.allium" as skilj
+
+------------------------------------------------------------
+-- Enumerations
+------------------------------------------------------------
+
+enum PersonKind { customer | staff }
+
+------------------------------------------------------------
+-- Entities and Variants
+------------------------------------------------------------
+
+entity DailyActivityRecorded {
+    company: helpdesk/Company
+    person_kind: PersonKind
+
+    -- The one identifier common to both Customer and StaffMember - they
+    -- aren't a shared sum type in skilj-helpdesk.allium (different sides
+    -- of the surface boundary), so this stores whichever one's own
+    -- `external_subject` (see skilj.allium's Role) submitted the ping,
+    -- rather than an entity reference typed to only one of the two.
+    person_subject: String
+
+    -- Calendar-day granularity, not an instant: Allium has no dedicated
+    -- Date primitive, so the caller is expected to submit a timestamp
+    -- truncated to that day's start. The uniqueness guard below only
+    -- dedupes when callers are consistent about that truncation.
+    day: Timestamp
+}
+
+entity CompanyEngagementDeclined {
+    company: helpdesk/Company
+    flagged_at: Timestamp
+}
+
+------------------------------------------------------------
+-- Config
+------------------------------------------------------------
+
+config {
+    -- Resolved: a company counts as "gone quiet" when it has zero
+    -- customer-kind DailyActivityRecorded events in the trailing window
+    -- this names - engagement-watcher's own sweep, not modeled as a
+    -- rule here (same register as config.unhandled_alert_after/
+    -- auto_close_after in skilj-helpdesk.allium). Two weeks: a common
+    -- churn-signal window or engagement-monitoring tooling, roughly
+    -- double helpdesk's own auto_close_after - a first-pass default to
+    -- react to, not a researched figure. Staff activity and helpdesk's
+    -- own TicketCreated/TicketCustomerResponded feed are deliberately
+    -- excluded from this check (see the resolved notes below).
+    quiet_after: Duration = 14.days
+}
+
+------------------------------------------------------------
+-- Rules
+------------------------------------------------------------
+
+rule DailyActivityIsRecorded {
+    when: RecordDailyActivity(company, person_kind, person_subject, day)
+    -- Rejected as `already_recorded_today` when this exact
+    -- company+person+day was already recorded - the frontend can call
+    -- this unconditionally on every dashboard load (customer and staff
+    -- alike) and let this rule do the throttling, the same
+    -- idempotent-by-rejection convention SignUpCompany already uses for
+    -- a duplicate signup.
+    requires: not exists DailyActivityRecorded{company, person_subject, day}
+    ensures: DailyActivityRecorded.created(
+        company: company, person_kind: person_kind,
+        person_subject: person_subject, day: day
+    )
+}
+
+rule EngagementDeclineIsRecorded {
+    when: RecordEngagementDecline(company, flagged_at)
+    -- Rejected as `already_flagged` when this company was already flagged
+    -- once before - confirmed: fires once, not once per check while the
+    -- condition holds.
+    requires: not exists CompanyEngagementDeclined{company}
+    ensures: CompanyEngagementDeclined.created(company: company, flagged_at: flagged_at)
+}
+
+------------------------------------------------------------
+-- Actor Declarations
+------------------------------------------------------------
+
+-- Not a person: the new scheduled binary, resolved as `engagement-
+-- watcher` (see the resolved note near the bottom of this file), the
+-- same "external process, not decide() itself, makes the call" shape
+-- helpdesk's own alerter.rs/scheduler.rs already use for urgent-ticket
+-- paging and trial-deadline/auto-close. It operates across every
+-- company, not one tenant, so it authenticates as a superadmin skilj
+-- Role rather than a per-company StaffMember/Customer.
+actor EngagementWatcher {
+    identified_by: skilj/Role where superadmin = true
+}
+
+------------------------------------------------------------
+-- Surfaces
+------------------------------------------------------------
+
+surface CustomerActivityPing {
+    facing person: helpdesk/Customer
+
+    provides:
+        RecordDailyActivity(person.company, customer, person.external_subject, day)
+}
+
+surface StaffActivityPing {
+    facing person: helpdesk/StaffMember
+
+    provides:
+        RecordDailyActivity(person.company, staff, person.external_subject, day)
+}
+
+surface EngagementDeclineDetection {
+    facing watcher: EngagementWatcher
+
+    -- `watcher` goes unreferenced in the body below (flagged as an
+    -- allium.surface.unusedBinding warning) - `identified_by` is the
+    -- whole gate here, the minimal-actor pattern the language reference
+    -- itself recommends for integration surfaces where the caller is
+    -- code, not a person; no field of the caller's own identity feeds
+    -- the payload.
+    provides:
+        RecordEngagementDecline(company, flagged_at)
+
+    @guidance
+        -- What counts as "gone quiet" is config.quiet_after's own
+        -- threshold, checked by engagement-watcher's own sweep - not
+        -- modeled as a rule here (see the resolved note near the bottom
+        -- of this file). This surface only says an already-decided
+        -- company+timestamp can be submitted.
+}
+
+------------------------------------------------------------
+-- Open Questions
+------------------------------------------------------------
+
+-- Resolved: a company counts as "gone quiet" when it has zero
+-- customer-kind DailyActivityRecorded events in the trailing
+-- config.quiet_after window (see Config above) - a fixed-threshold
+-- sweep, the same shape scheduling.rs's own trial-duration/auto-close
+-- checks already are. Not modeled as an Allium rule here, for the same
+-- reason those aren't: this is a scheduled binary's own decision logic
+-- over data it has already read, not a decide()-shaped accept/reject
+-- question.
+
+-- Resolved: staff activity, and helpdesk's own TicketCreated/
+-- TicketCustomerResponded feed, are both excluded from what counts as
+-- "active" for this check - customer-kind DailyActivityRecorded alone,
+-- for a first pass. Matches this showcase's own established pattern of
+-- deferring real-world completeness (see e.g. the multi-tenancy note in
+-- skilj-helpdesk.allium's own Dependencies) rather than a considered
+-- product judgement that ticket replies never signal engagement.
+
+-- Resolved: the new scheduled binary is called `engagement-watcher`,
+-- named and structured the same way `alerter.rs`/`scheduler.rs` already
+-- are - its own printed EventReadTokens (DAILY_ACTIVITY_RECORDED_TOKEN)
+-- and CommandToken (RECORD_ENGAGEMENT_DECLINE_TOKEN), the same
+-- env-var-configuration style scheduler.rs's own doc comment describes.
+-- Not yet implemented - the config/actor/surface shape above is ready
+-- for it, but no src/bin/engagement-watcher.rs exists yet.
