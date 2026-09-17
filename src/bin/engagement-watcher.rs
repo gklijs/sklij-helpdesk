@@ -2,8 +2,11 @@
 //! own resolved note names - sweeps for companies whose customers have
 //! gone quiet (`rule EngagementDeclineIsRecorded`'s own external
 //! stimulus), the same "external process, not decide() itself, makes
-//! the call" shape `src/bin/alerter.rs`/`src/bin/scheduler.rs` already
-//! use for urgent-ticket paging and trial-deadline/auto-close.
+//! the call" shape `src/bin/alerter.rs` already uses for urgent-ticket
+//! paging (`helpdesk.rs`'s own trial-deadline/auto-close rules moved off
+//! this shape onto skilj's native `ScheduleDeadline` in 0.0.7 - see
+//! `src/activity_scheduling.rs`'s own doc comment for why "gone quiet"
+//! doesn't fit that mechanism the same way).
 //!
 //! Tracks, per company, the most recent customer-kind
 //! `DailyActivityRecorded` this binary has read (keyed on that event's
@@ -17,17 +20,16 @@
 //! `CompanyEngagementDeclined` only ever fires once per company (see
 //! `rule EngagementDeclineIsRecorded`'s own `already_flagged` guard), so
 //! there's nothing further to watch for once flagged - the same "stop
-//! tracking once terminal" fix `scheduler.rs`'s own
-//! `resolved_tickets`/`TicketsMerged` handling already established.
+//! tracking once terminal" fix `src/bin/alerter.rs`'s own
+//! `unhandled`/`TicketsMerged` handling already established.
 //!
 //! **Restart safety**: see `alerter.rs`'s own doc comment - the exact
 //! same in-memory-state-plus-non-replayable-`mode=auto`-cursor gap
 //! applies here, fixed the identical way (`load_state`/`save_state`
-//! below, byte-for-byte the same shape as `alerter.rs`/`scheduler.rs`'s
-//! own).
+//! below, byte-for-byte the same shape as `alerter.rs`'s own).
 //!
-//! Configuration (env vars, same minimal style `alerter.rs`/
-//! `scheduler.rs` already use):
+//! Configuration (env vars, same minimal style `alerter.rs` already
+//! uses):
 //!   SKILJ_BASE_URL                     - default "http://localhost:3000"
 //!   QUIET_AFTER_DAYS                   - default 14 (matches
 //!                                         specs/activity.allium's own
@@ -45,10 +47,9 @@
 //!   Both printed by `src/bin/server.rs` on every run - see that file's
 //!   own "to run engagement-watcher against this server" block.
 //!
-//! Not exercised by `cargo test`, for the same reason `alerter.rs`/
-//! `scheduler.rs` aren't - the pure deadline logic is
-//! `src/activity_scheduling.rs`'s own, tested there without any HTTP or
-//! Postgres involved.
+//! Not exercised by `cargo test`, for the same reason `alerter.rs` isn't:
+//! the pure "gone quiet" logic is `src/activity_scheduling.rs`'s own,
+//! tested there without any HTTP or Postgres involved.
 //!
 //! Telemetry: `skilj_helpdesk::telemetry::init` as service
 //! `"skilj-helpdesk-engagement-watcher"` - see `alerter.rs`'s own doc
@@ -139,8 +140,8 @@ async fn main() {
     }
 }
 
-/// Byte-for-byte the same shape as `alerter.rs`/`scheduler.rs`'s own
-/// `load_state` - see either one's doc comment.
+/// Byte-for-byte the same shape as `alerter.rs`'s own `load_state` -
+/// see its doc comment.
 fn load_state(path: &std::path::Path) -> State {
     match std::fs::read_to_string(path) {
         Ok(contents) => match serde_json::from_str(&contents) {
@@ -160,8 +161,8 @@ fn load_state(path: &std::path::Path) -> State {
     }
 }
 
-/// Byte-for-byte the same shape as `alerter.rs`/`scheduler.rs`'s own
-/// `save_state` - see either one's doc comment.
+/// Byte-for-byte the same shape as `alerter.rs`'s own `save_state` -
+/// see its doc comment.
 fn save_state(path: &std::path::Path, state: &State) {
     let tmp = path.with_extension("json.tmp");
     let write = std::fs::write(&tmp, serde_json::to_vec(state).expect("State always serializes"))
@@ -235,9 +236,9 @@ async fn tick(
 }
 
 /// One `GET /v1/events/consume?mode=auto` call - byte-for-byte the same
-/// shape `scheduler.rs`'s own `consume` is, duplicated rather than
-/// shared for the same no-common-library-boundary reason every other
-/// binary's own copy already is.
+/// shape `alerter.rs`'s own `consume` is, duplicated rather than shared
+/// for the same no-common-library-boundary reason every other binary's
+/// own copy already is.
 async fn consume(
     client: &reqwest::Client,
     base_url: &str,
@@ -276,7 +277,7 @@ async fn consume(
 }
 
 /// One `POST /v1/commands/trigger` call - byte-for-byte the same shape
-/// `scheduler.rs`'s own `submit_command` is.
+/// `alerter.rs`'s own `submit_command` is.
 async fn submit_command(
     client: &reqwest::Client,
     base_url: &str,

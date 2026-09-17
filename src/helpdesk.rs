@@ -35,10 +35,14 @@
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use skilj::{auto_register, CommandType, EventType, Projection};
+use skilj::{auto_register, CommandType, EventType, Projection, ScheduleDeadline};
 use skilj_core::event_store::Event;
-use skilj_core::plugin::BoundedContextEvent;
-use skilj_core::shared::{CommandDecision, EventSpec, PrivateField, PrivateFieldKind, TagMapping};
+use skilj_core::plugin::{BoundedContextEvent, DeadlinePollStartFrom, DeadlineSpec};
+use skilj_core::shared::{
+    CommandDecision, EventSpec, PrivateField, PrivateFieldKind, Tag, TagMapping,
+};
+
+use crate::scheduling;
 
 pub const BOUNDED_CONTEXT: &str = "helpdesk";
 
@@ -65,6 +69,27 @@ fn ticket_tag() -> Vec<TagMapping> {
     }]
 }
 
+/// `company_tag()`'s own counterpart for `ScheduleDeadline`/
+/// `CancelDeadline` below, which tag a `DeadlineSpec` with real `Tag`
+/// values (a key *and* the entity's own id) rather than a `TagMapping`
+/// (a key and which payload field to read it from) - the same
+/// consistency-boundary tag, computed the other direction.
+fn company_tag_value(company_id: &str) -> Tag {
+    Tag {
+        key: "company".into(),
+        value: Some(company_id.to_string()),
+    }
+}
+
+/// `ticket_tag()`'s own counterpart - see `company_tag_value`'s doc
+/// comment.
+fn ticket_tag_value(ticket_id: &str) -> Tag {
+    Tag {
+        key: "ticket".into(),
+        value: Some(ticket_id.to_string()),
+    }
+}
+
 // --- events ---
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -83,15 +108,6 @@ impl EventType for CompanySignedUp {
     fn tag_mappings() -> Vec<TagMapping> {
         company_tag()
     }
-    /// `src/bin/scheduler.rs` reads this via an `EventReadToken` to
-    /// discover companies and their trial-start time - `EventType`'s
-    /// own default (`false`) would 403 that read (docs/architecture.md
-    /// §7.5): a type must opt in explicitly. Found the hard way, over a
-    /// real REST request, once a real embedded Postgres was available
-    /// in this sandbox to run against - see `tests/alerting_feed.rs`.
-    fn event_read_allowed() -> bool {
-        true
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -105,22 +121,16 @@ pub struct CompanyActivated;
 /// TrialPeriodEnds`'s success branch (`trialing -> active`) and `rule
 /// CompanySubscribes`'s success branch (`expired -> active`) - the spec
 /// keeps them as two rules because they're two different triggers (a
-/// scheduler tick vs. a company choosing to pay), but the resulting
-/// domain fact is identical ("this company is now active"), so one
-/// event type covers both here, the same simplification `CreateTicket`
-/// already makes for its own two triggering rules.
+/// trial deadline firing vs. a company choosing to pay), but the
+/// resulting domain fact is identical ("this company is now active"), so
+/// one event type covers both here, the same simplification
+/// `CreateTicket` already makes for its own two triggering rules.
 #[auto_register(BOUNDED_CONTEXT)]
 impl EventType for CompanyActivated {
     type Payload = CompanyActivatedPayload;
     const NAME: &'static str = "CompanyActivated";
     fn tag_mappings() -> Vec<TagMapping> {
         company_tag()
-    }
-    /// See `CompanySignedUp::event_read_allowed`'s own doc comment -
-    /// `src/bin/scheduler.rs` reads this too, to stop tracking a
-    /// company once it's converted.
-    fn event_read_allowed() -> bool {
-        true
     }
 }
 
@@ -139,12 +149,6 @@ impl EventType for CompanyExpired {
     const NAME: &'static str = "CompanyExpired";
     fn tag_mappings() -> Vec<TagMapping> {
         company_tag()
-    }
-    /// See `CompanySignedUp::event_read_allowed`'s own doc comment -
-    /// `src/bin/scheduler.rs` reads this too, to stop tracking a
-    /// company once it's expired.
-    fn event_read_allowed() -> bool {
-        true
     }
 }
 
@@ -191,9 +195,12 @@ impl EventType for TicketCreated {
             },
         ]
     }
-    /// `src/bin/alerter.rs` reads this - see
-    /// `CompanySignedUp::event_read_allowed`'s own doc comment for why
-    /// this default needs an explicit override.
+    /// `src/bin/alerter.rs` reads this via an `EventReadToken` to track
+    /// unhandled tickets - `EventType`'s own default (`false`) would
+    /// 403 that read (docs/architecture.md §7.5): a type must opt in
+    /// explicitly. Found the hard way, over a real REST request, once a
+    /// real embedded Postgres was available in this sandbox to run
+    /// against - see `tests/alerting_feed.rs`.
     fn event_read_allowed() -> bool {
         true
     }
@@ -232,9 +239,8 @@ impl EventType for TicketResolved {
     fn tag_mappings() -> Vec<TagMapping> {
         ticket_tag()
     }
-    /// `src/bin/scheduler.rs` reads this to start tracking a ticket for
-    /// auto-close - see `CompanySignedUp::event_read_allowed`'s own doc
-    /// comment.
+    /// `src/bin/alerter.rs` reads this too - see
+    /// `TicketCreated::event_read_allowed`'s own doc comment.
     fn event_read_allowed() -> bool {
         true
     }
@@ -255,9 +261,8 @@ impl EventType for TicketReopened {
     fn tag_mappings() -> Vec<TagMapping> {
         ticket_tag()
     }
-    /// `src/bin/scheduler.rs` reads this to stop tracking a ticket for
-    /// auto-close once it's reopened - see
-    /// `CompanySignedUp::event_read_allowed`'s own doc comment.
+    /// `src/bin/alerter.rs` reads this too - see
+    /// `TicketCreated::event_read_allowed`'s own doc comment.
     fn event_read_allowed() -> bool {
         true
     }
@@ -317,9 +322,10 @@ pub struct TicketClosed;
 /// closed`. "Auto" in the spec's own name refers to *who* decides
 /// (nobody - a sweep, not a person), not to *how* the resulting state
 /// change reaches skilj: `CloseTicket` below is an ordinary command, the
-/// same as every other mutation in this file, submitted by
-/// `src/bin/scheduler.rs` rather than a customer or staff member. See
-/// that file's own doc comment for why.
+/// same as every other mutation in this file, submitted by skilj's own
+/// native per-entity deadline mechanism (`ScheduleTicketAutoClose`
+/// below, docs/architecture.md §46) rather than a customer or staff
+/// member. See that reactor's own doc comment for why.
 #[auto_register(BOUNDED_CONTEXT)]
 impl EventType for TicketClosed {
     type Payload = TicketClosedPayload;
@@ -327,9 +333,8 @@ impl EventType for TicketClosed {
     fn tag_mappings() -> Vec<TagMapping> {
         ticket_tag()
     }
-    /// `src/bin/scheduler.rs` reads this defensively (stop tracking a
-    /// ticket that's already closed) - see
-    /// `CompanySignedUp::event_read_allowed`'s own doc comment.
+    /// `src/bin/alerter.rs` reads this too - see
+    /// `TicketCreated::event_read_allowed`'s own doc comment.
     fn event_read_allowed() -> bool {
         true
     }
@@ -350,8 +355,9 @@ pub struct TicketEscalated;
 /// note for why this pass turns "page a lead" into a real persisted
 /// priority bump, not just a console alert. Submitted by
 /// `src/bin/alerter.rs`'s own overdue sweep, the same "a background
-/// binary submits an ordinary command" treatment `TicketClosed`/
-/// `CompanyActivated` already get from `scheduler.rs`.
+/// binary submits an ordinary command" treatment `TicketClosed` gets
+/// from `ScheduleTicketAutoClose` (below) and `CompanyActivated` gets
+/// from `ScheduleCompanyTrialConversion`.
 #[auto_register(BOUNDED_CONTEXT)]
 impl EventType for TicketEscalated {
     type Payload = TicketEscalatedPayload;
@@ -362,7 +368,7 @@ impl EventType for TicketEscalated {
     /// `src/bin/alerter.rs` reads this itself (own output, consumed back)
     /// to stop re-submitting `EscalateTicket` for a ticket it (or another
     /// alerter instance) already escalated - see
-    /// `CompanySignedUp::event_read_allowed`'s own doc comment for the
+    /// `TicketCreated::event_read_allowed`'s own doc comment for the
     /// general pattern.
     fn event_read_allowed() -> bool {
         true
@@ -402,7 +408,7 @@ impl EventType for TicketsMerged {
     }
     /// `src/bin/alerter.rs` reads this to stop tracking the duplicate
     /// ticket as unhandled once merged away - see
-    /// `CompanySignedUp::event_read_allowed`'s own doc comment.
+    /// `TicketCreated::event_read_allowed`'s own doc comment.
     fn event_read_allowed() -> bool {
         true
     }
@@ -429,7 +435,7 @@ impl EventType for TicketRated {
     }
     /// `src/csat_metrics.rs` reads this via an `EventReadToken` to
     /// record the rating *value* as a real metric - see
-    /// `CompanySignedUp::event_read_allowed`'s own doc comment for why
+    /// `TicketCreated::event_read_allowed`'s own doc comment for why
     /// this default needs an explicit override. Everything else about
     /// a rating (who gave it, the comment) still only ever goes through
     /// GraphQL/`get_projection_state`, same as before this existed.
@@ -757,13 +763,13 @@ pub struct ConvertCompanyTrialPayload {
 pub struct ConvertCompanyTrial;
 
 /// `specs/skilj-helpdesk.allium`'s `rule TrialPeriodEnds`'s success
-/// branch: `trialing -> active`. Submitted by `src/bin/scheduler.rs`,
-/// not a person - see that file's own doc comment for why this pass
-/// implements the *state change* as an ordinary command rather than
-/// skilj's `system_triggered` scheduling (a global-cron mechanism, not
-/// suited to a per-company deadline like this one) plus a mocked
-/// `PaymentGateway.charge` outcome the scheduler decides before
-/// submitting either this or `ExpireCompanyTrial`.
+/// branch: `trialing -> active`. Submitted by skilj's own native
+/// per-entity deadline mechanism (`ScheduleCompanyTrialConversion`
+/// below, docs/architecture.md §46), not a person - see that reactor's
+/// own doc comment for why this pass implements the *state change* as
+/// an ordinary command rather than skilj's `system_triggered`
+/// scheduling (a global-cron mechanism, not suited to a per-company
+/// deadline like this one).
 #[auto_register(BOUNDED_CONTEXT)]
 impl CommandType for ConvertCompanyTrial {
     type Payload = ConvertCompanyTrialPayload;
@@ -807,8 +813,9 @@ pub struct ExpireCompanyTrial;
 
 /// `specs/skilj-helpdesk.allium`'s `rule TrialPeriodEnds`'s failure
 /// branch: `trialing -> expired`. Same submitter and reasoning as
-/// `ConvertCompanyTrial` above - the scheduler picks one or the other
-/// per company, based on its own mocked charge outcome.
+/// `ConvertCompanyTrial` above - `ScheduleCompanyTrialExpiry` below
+/// schedules this one instead, whenever the mocked charge outcome says
+/// to.
 #[auto_register(BOUNDED_CONTEXT)]
 impl CommandType for ExpireCompanyTrial {
     type Payload = ExpireCompanyTrialPayload;
@@ -843,6 +850,102 @@ impl CommandType for ExpireCompanyTrial {
     }
 }
 
+/// `specs/skilj-helpdesk.allium`'s `rule TrialPeriodEnds`, ported off
+/// `src/bin/scheduler.rs`'s own hand-rolled polling loop onto skilj
+/// 0.0.7's native per-entity deadline (`ScheduleDeadline`/
+/// `CancelDeadline`, docs/architecture.md §46) - exactly the gap that
+/// binary's own doc comment named before this feature existed ("neither
+/// of which skilj's own `system_triggered` scheduling fits ... a
+/// per-company deadline like this one").
+///
+/// The mocked `PaymentGateway.charge` outcome (`scheduling::mock_charge_succeeds`)
+/// is decided here, at schedule time (when `CompanySignedUp` commits),
+/// rather than at fire time inside `ConvertCompanyTrial::decide()` -
+/// `ScheduleDeadline::Target` is one fixed command per schedule, so the
+/// two outcomes need two independently-deciding schedules (this one and
+/// `ScheduleCompanyTrialExpiry` below) rather than one branching inside
+/// `decide()`. Harmless since the mock is deterministic (always `true` -
+/// see its own doc comment); a real gateway integration would need the
+/// charge attempt moved to fire time instead, inside the target
+/// command's own `decide()` - exactly what docs/architecture.md §46
+/// means by "whether a deadline is still relevant is a decision
+/// `Target::decide()` gets to make against *current* state at fire
+/// time, not one baked in back when the timer was scheduled."
+///
+/// `fire_at` uses `Utc::now()` rather than `CompanySignedUp`'s own
+/// commit time, since `schedule()` only ever receives the event's
+/// payload, never its metadata (unlike old `scheduler.rs`, which read
+/// `metadata.createdAt` off the REST feed directly). Accurate as long
+/// as this runs close to when the event actually committed - true for
+/// real-time operation (background poll default 500ms) and every test
+/// in this suite (each signs a company up and waits on its own next
+/// tick) - which is also why `START_FROM` is `Latest`, not the
+/// `Beginning` default: backfilling pre-existing `CompanySignedUp`
+/// history on a fresh deploy would stamp every older signup with
+/// today's date instead of its real one, worse than not scheduling it
+/// at all.
+///
+/// No `CancelDeadline` counterpart, deliberately - see
+/// `ScheduleTicketAutoClose`'s own doc comment for why a stale pending
+/// row is a non-issue here too: `ConvertCompanyTrial`/`ExpireCompanyTrial`
+/// both already reject gracefully ("not trialing") against a company
+/// that converted, expired, or reactivated by some other path before its
+/// own deadline came due.
+pub struct ScheduleCompanyTrialConversion;
+
+impl ScheduleDeadline for ScheduleCompanyTrialConversion {
+    type Source = CompanySignedUp;
+    type Target = ConvertCompanyTrial;
+    const NAME: &'static str = "ScheduleCompanyTrialConversion";
+    const START_FROM: DeadlinePollStartFrom = DeadlinePollStartFrom::Latest;
+    fn schedule(
+        source_payload: &CompanySignedUpPayload,
+    ) -> Option<DeadlineSpec<ConvertCompanyTrialPayload>> {
+        if !scheduling::mock_charge_succeeds() {
+            return None;
+        }
+        Some(DeadlineSpec {
+            fire_at: chrono::Utc::now() + scheduling::trial_duration(),
+            tags: vec![company_tag_value(&source_payload.company_id)],
+            payload: ConvertCompanyTrialPayload {
+                company_id: source_payload.company_id.clone(),
+            },
+        })
+    }
+}
+
+/// `rule TrialPeriodEnds`'s failure branch - see
+/// `ScheduleCompanyTrialConversion`'s own doc comment for why this is a
+/// second, independently-deciding schedule rather than a branch inside
+/// one. Never actually fires in this showcase (`mock_charge_succeeds`
+/// always returns `true`) - kept anyway so `ExpireCompanyTrial` stays
+/// reachable the way it always has, both directly
+/// (`rest_trigger_allowed`, used by this crate's own tests to force a
+/// company into `expired` without waiting on a deadline) and as the
+/// intended path once a real gateway integration flips the mock.
+pub struct ScheduleCompanyTrialExpiry;
+
+impl ScheduleDeadline for ScheduleCompanyTrialExpiry {
+    type Source = CompanySignedUp;
+    type Target = ExpireCompanyTrial;
+    const NAME: &'static str = "ScheduleCompanyTrialExpiry";
+    const START_FROM: DeadlinePollStartFrom = DeadlinePollStartFrom::Latest;
+    fn schedule(
+        source_payload: &CompanySignedUpPayload,
+    ) -> Option<DeadlineSpec<ExpireCompanyTrialPayload>> {
+        if scheduling::mock_charge_succeeds() {
+            return None;
+        }
+        Some(DeadlineSpec {
+            fire_at: chrono::Utc::now() + scheduling::trial_duration(),
+            tags: vec![company_tag_value(&source_payload.company_id)],
+            payload: ExpireCompanyTrialPayload {
+                company_id: source_payload.company_id.clone(),
+            },
+        })
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ReactivateCompanyPayload {
     pub company_id: String,
@@ -854,7 +957,7 @@ pub struct ReactivateCompany;
 /// active`. Unlike `ConvertCompanyTrial`/`ExpireCompanyTrial`, this one
 /// really is person-submitted (an expired company choosing to pay) -
 /// still a mocked `PaymentGateway.charge`, but the caller is a real
-/// customer-facing surface, not the scheduler. Kept unconditionally
+/// customer-facing surface, not a deadline reactor. Kept unconditionally
 /// successful here (no `charged.succeeded` branch) since a real payment
 /// retry-on-failure UX is presentation-level, out of this pass's scope.
 #[auto_register(BOUNDED_CONTEXT)]
@@ -1227,8 +1330,8 @@ pub struct CloseTicketPayload {
 pub struct CloseTicket;
 
 /// `specs/skilj-helpdesk.allium`'s `rule TicketAutoCloses`: `requires:
-/// ticket.status = resolved`. Submitted by `src/bin/scheduler.rs` - see
-/// `TicketClosed`'s own doc comment.
+/// ticket.status = resolved`. Submitted by `ScheduleTicketAutoClose`
+/// below - see `TicketClosed`'s own doc comment.
 #[auto_register(BOUNDED_CONTEXT)]
 impl CommandType for CloseTicket {
     type Payload = CloseTicketPayload;
@@ -1267,6 +1370,43 @@ impl CommandType for CloseTicket {
     }
 }
 
+/// `specs/skilj-helpdesk.allium`'s `rule TicketAutoCloses`, ported the
+/// same way `ScheduleCompanyTrialConversion` above is - see that one's
+/// doc comment for the `fire_at`/`START_FROM` reasoning, identical here.
+///
+/// No `CancelDeadline` counterpart, deliberately: a resolved-then-
+/// reopened (or closed, or merged-away) ticket whose deadline still
+/// fires just gets rejected by `CloseTicket::decide()` itself ("not
+/// resolved - only a resolved ticket auto-closes") - a legitimate
+/// one-shot outcome, not a bug to guard against (docs/architecture.md
+/// §46: "a `Target` command that ... gets rejected by its own `decide()`
+/// is marked `fired` too"). The old `scheduler.rs`'s own
+/// `resolved_tickets` bookkeeping had to actively remove entries on
+/// `TicketReopened`/`TicketClosed`/`TicketsMerged` to stop *every
+/// 30-second poll tick* from resubmitting `CloseTicket` for the same
+/// stale ticket forever - a real bug that file found and fixed. That
+/// failure mode can't happen here: each deadline row fires exactly once,
+/// ever.
+pub struct ScheduleTicketAutoClose;
+
+impl ScheduleDeadline for ScheduleTicketAutoClose {
+    type Source = TicketResolved;
+    type Target = CloseTicket;
+    const NAME: &'static str = "ScheduleTicketAutoClose";
+    const START_FROM: DeadlinePollStartFrom = DeadlinePollStartFrom::Latest;
+    fn schedule(
+        source_payload: &TicketResolvedPayload,
+    ) -> Option<DeadlineSpec<CloseTicketPayload>> {
+        Some(DeadlineSpec {
+            fire_at: chrono::Utc::now() + scheduling::auto_close_after(),
+            tags: vec![ticket_tag_value(&source_payload.ticket_id)],
+            payload: CloseTicketPayload {
+                ticket_id: source_payload.ticket_id.clone(),
+            },
+        })
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct EscalateTicketPayload {
     pub ticket_id: String,
@@ -1277,9 +1417,10 @@ pub struct EscalateTicket;
 /// Not in the original spec - see `TicketEscalated`'s own doc comment,
 /// and `specs/skilj-helpdesk.allium`'s updated `rule
 /// TicketBecomesOverdue`. Submitted by `src/bin/alerter.rs`'s own
-/// overdue sweep, never by a person - same "a background binary submits
-/// an ordinary command" treatment `CloseTicket`/`ConvertCompanyTrial`
-/// already get from `scheduler.rs`.
+/// overdue sweep, never by a person - same "a background reactor submits
+/// an ordinary command" treatment `CloseTicket` gets from
+/// `ScheduleTicketAutoClose` and `ConvertCompanyTrial` gets from
+/// `ScheduleCompanyTrialConversion`.
 #[auto_register(BOUNDED_CONTEXT)]
 impl CommandType for EscalateTicket {
     type Payload = EscalateTicketPayload;

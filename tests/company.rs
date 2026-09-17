@@ -116,7 +116,9 @@ fn tickets_can_be_created_during_the_trial_without_converting_first() {
 }
 
 /// `rule TrialPeriodEnds`'s success branch, submitted the way
-/// `src/bin/scheduler.rs` really submits it.
+/// `ScheduleCompanyTrialConversion` really submits it (see
+/// `tests/native_deadlines.rs` for the real thing firing on its own,
+/// with no manual `ConvertCompanyTrial` at all).
 #[test]
 fn converting_a_trialing_company_activates_it() {
     runtime().block_on(async {

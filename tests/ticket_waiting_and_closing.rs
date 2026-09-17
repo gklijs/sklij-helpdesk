@@ -165,7 +165,7 @@ fn customer_responding_when_nothing_was_asked_is_rejected() {
     });
 }
 
-// --- rule TicketAutoCloses, submitted the way src/bin/scheduler.rs really submits it ---
+// --- rule TicketAutoCloses, submitted the way ScheduleTicketAutoClose really submits it ---
 
 #[test]
 fn closing_a_resolved_ticket_succeeds_and_closing_twice_is_rejected() {

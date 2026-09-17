@@ -462,6 +462,11 @@ pub async fn mint_event_read_token(
         // to read from the true beginning, not skip anything minted
         // between then and its own first `consume_auto` call.
         None,
+        // `start_at_sequence`/`start_at_time` (skilj 0.0.6): both `None`
+        // - only meaningful alongside `AtSequence`/`AtTime` above,
+        // neither of which this helper ever passes.
+        None,
+        None,
         test_now(),
     )
     .unwrap();
@@ -705,11 +710,11 @@ pub fn graphql_accepted(response: &serde_json::Value) -> bool {
 
 /// Binds a real ephemeral-port `TcpListener` and serves `router` on it
 /// in the background (`tokio::spawn` - never awaited, so the caller's
-/// own test keeps running) - what the real `alerter`/`scheduler`
-/// binaries need that `trigger()`'s in-process `.oneshot()` doesn't
-/// provide: an actual socket a real `reqwest` client (running in a
-/// real child process) can connect to. Returns the base URL to give
-/// that child process as `SKILJ_BASE_URL`.
+/// own test keeps running) - what the real `alerter` binary needs that
+/// `trigger()`'s in-process `.oneshot()` doesn't provide: an actual
+/// socket a real `reqwest` client (running in a real child process) can
+/// connect to. Returns the base URL to give that child process as
+/// `SKILJ_BASE_URL`.
 pub async fn serve_for_real(router: axum::Router) -> String {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await

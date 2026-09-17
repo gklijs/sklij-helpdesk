@@ -41,9 +41,12 @@ simplifications (see "What's not built" below).
   via a separately-deployable consumer of skilj's own REST event feed,
   not anything built into skilj itself.
 - **Two deadline-driven rules** (trial conversion, ticket auto-close)
-  are driven by another separately-deployable consumer, for the same
-  reason: skilj's own scheduling primitive fires on a shared cron, not
-  per-entity deadlines.
+  run through skilj's own native per-entity deadline mechanism
+  (`ScheduleDeadline`) - no separate process needed, unlike alerting:
+  skilj's cron-based scheduling primitive fires on a shared schedule for
+  a whole event type, not per-entity deadlines, but 0.0.7 added a
+  one-shot timer scoped to a single entity's own tags, purpose-built for
+  exactly this.
 - **Three more flows beyond the original spec** — ticket merging (a real
   showcase of skilj's own DCB model reading two tickets' own histories
   in one command, no aggregate boundary needed), CSAT ratings, and
@@ -62,12 +65,12 @@ simplifications (see "What's not built" below).
 |---|---|
 | `specs/skilj-helpdesk.allium` | The domain spec |
 | `src/helpdesk.rs` | Every `EventType`/`CommandType`/`Projection` — the actual domain logic |
-| `src/alerting.rs`, `src/scheduling.rs` | Pure decision logic the two background binaries drive |
+| `src/alerting.rs` | Pure decision logic `src/bin/alerter.rs` drives |
+| `src/scheduling.rs` | Env-driven durations + the mocked payment call `src/helpdesk.rs`'s own deadline reactors (`ScheduleCompanyTrialConversion`/`ScheduleTicketAutoClose`) use |
 | `src/telemetry.rs` | Shared OTel wiring all three binaries call into (see "Telemetry & dashboards" below) |
 | `src/demo_seed.rs` | Pure decision logic behind the optional fake-traffic loop (`SEED_DEMO_TRAFFIC=1`) |
 | `src/bin/server.rs` | The runnable server (REST + GraphQL) |
 | `src/bin/alerter.rs` | Consumes the event feed, pages a lead on urgent tickets and escalates ones nobody's handled in time |
-| `src/bin/scheduler.rs` | Consumes the event feed, converts/expires trials and auto-closes tickets |
 | `tests/` | Integration tests (real HTTP, real Postgres) — split into several files by concern; see `tests/company.rs`'s own doc comment for why |
 | `dex/config.yaml` | The real OIDC provider's config (two demo logins) |
 | `frontend/` | The Leptos (WASM) web app |
@@ -105,9 +108,10 @@ DATABASE_URL=postgres://... OIDC_ISSUER_URL=http://127.0.0.1:5556/dex \
 ```
 
 It prints every credential the rest of this needs, and the exact
-commands to run `alerter`/`scheduler` against it. Sign up the demo
-company it references (`curl` example included in its own output)
-before there's anything to see.
+command to run `alerter` against it (trial conversion and ticket
+auto-close run in-process, via skilj's own native per-entity deadlines
+- no separate binary). Sign up the demo company it references (`curl`
+example included in its own output) before there's anything to see.
 
 **3. Run the frontend**:
 
@@ -119,12 +123,11 @@ Open `http://127.0.0.1:8081`. Log in as `customer@acme.example` /
 `customer-demo-pw` (customer view) or `lead@acme.example` /
 `staff-demo-pw` (staff view) — see `dex/config.yaml`.
 
-**4. Optionally, the two background binaries** — each prints its own
-required env vars when `server` starts:
+**4. Optionally, the alerter** — prints its own required env vars when
+`server` starts:
 
 ```sh
 cargo run --bin alerter    # pages a lead on urgent/overdue tickets
-cargo run --bin scheduler  # converts/expires trials, auto-closes tickets
 ```
 
 `alerter`'s own paging is console-only by default; set `SLACK_WEBHOOK_URL`
@@ -165,7 +168,7 @@ docker compose -f observability/docker-compose.yml up -d
 
 ```sh
 export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318
-cargo run --bin server      # and, in their own terminals, alerter/scheduler
+cargo run --bin server      # and, in its own terminal, alerter
 ```
 
 **3. Open Grafana** at <http://localhost:3000> (no login needed locally
@@ -206,11 +209,12 @@ panels moving hard, e.g.:
 SEED_DEMO_TRAFFIC=1 SEED_DEMO_CONCURRENCY=10 SEED_DEMO_INTERVAL_MS=200 cargo run --bin server
 ```
 
-Run `scheduler` alongside it with short deadlines
+Start `server` itself with short deadlines
 (`TRIAL_DURATION_DAYS=0 AUTO_CLOSE_AFTER_DAYS=0 cargo run --bin
-scheduler` — both already-supported env vars, just unused until now) to
-see trial-conversion and auto-close traffic immediately too, instead of
-after real days.
+server` — both env vars `ScheduleCompanyTrialConversion`/
+`ScheduleTicketAutoClose` read directly, no separate process to start)
+to see trial-conversion and auto-close traffic immediately too, instead
+of after real days.
 
 **All in one command**: `scripts/dev.sh` does steps 1-2 for you when
 `OTEL=1` is set, and passes `SEED_DEMO_TRAFFIC` straight through:
@@ -244,8 +248,9 @@ silently absent:
   projection state. What that test's own doc comment leaves open — the
   real migration this pass doesn't attempt — is what `SignUpCompany`
   would have to become (a real cross-context orchestration, not one
-  command), and what `alerter.rs`/`scheduler.rs` watching *every*
-  tenant's own event feed would even mean.
+  command), and what `alerter.rs` watching *every* tenant's own event
+  feed (or `helpdesk.rs`'s deadline reactors registering against every
+  tenant's own bounded context) would even mean.
 - **A backend-for-frontend / GraphQL schema beyond what's registered**
   — the frontend talks to skilj-graphql's own auto-generated schema
   directly; there's no hand-written GraphQL layer.

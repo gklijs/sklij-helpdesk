@@ -9,8 +9,8 @@ The one role-based web frontend for skilj-helpdesk (customer portal and
 staff dashboard in a single app, per the chosen shape - see this repo's
 own notes). A separate crate from the backend on purpose: this targets
 wasm32-unknown-unknown and pulls in an entirely different dependency
-tree (Leptos, web-sys) that the server/alerter/scheduler binaries have
-no business depending on - same crate-separation reasoning skilj-tui
+tree (Leptos, web-sys) that the server/alerter/engagement-watcher
+binaries have no business depending on - same crate-separation reasoning skilj-tui
 gets in the main skilj repo. Not part of any Cargo workspace with the
 backend crate either, for the same reason.
 
@@ -24,7 +24,7 @@ WASM shipped to a browser).
 Run: `trunk serve` (dev server, defaults to port 8081 - see Trunk.toml).
 Needs a skilj-helpdesk server running with OIDC_ISSUER_URL set to a
 running Dex instance (see ../src/bin/server.rs's own doc comment) - the
-two are separate processes, same as alerter/scheduler are.
+two are separate processes, same as alerter/engagement-watcher are.
 """
 
 [dependencies]

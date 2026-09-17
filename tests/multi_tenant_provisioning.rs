@@ -24,12 +24,17 @@
 //!     across two bounded contexts (an admin one calling
 //!     `createBoundedContextFromTemplate`, superadmin-gated, and the
 //!     new tenant itself), not a single command anymore.
-//!   - `alerter.rs`/`scheduler.rs` read *one* set of `EventReadToken`s
-//!     today, each scoped to one bounded context. Watching every
-//!     tenant's own event feed - or paging a lead the moment a *new*
-//!     tenant is provisioned - has no answer here: N tenants means N
-//!     token sets, minted and rotated somehow, which is a real design
-//!     question of its own, not a detail.
+//!   - `alerter.rs` reads *one* set of `EventReadToken`s today, each
+//!     scoped to one bounded context. Watching every tenant's own event
+//!     feed, or paging a lead the moment a *new* tenant is provisioned,
+//!     has no answer here: N tenants means N token sets, minted and
+//!     rotated somehow, which is a real design question of its own, not
+//!     a detail. The trial/auto-close deadline reactors
+//!     (`helpdesk.rs`'s own `ScheduleDeadline`s) sidestep the token half
+//!     of this, reading through skilj's internal poller rather than a
+//!     minted `EventReadToken`, but registering a plugin trait per
+//!     bounded context still means N tenants means N registrations,
+//!     the same open question in a different shape.
 //!   - The frontend's `DEMO_COMPANY_ID` (a key inside one shared
 //!     context) would become "which tenant does this login belong to,"
 //!     an actual routing decision, not a constant.

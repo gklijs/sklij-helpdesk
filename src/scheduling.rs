@@ -1,34 +1,41 @@
-//! The pure decision logic behind `src/bin/scheduler.rs` - the two
-//! rules that mutate real domain state on a deadline
-//! (`specs/skilj-helpdesk.allium`'s `rule TrialPeriodEnds`/
-//! `TicketAutoCloses`), split out the same way `src/alerting.rs` splits
-//! from `src/bin/alerter.rs`: the deadline check and the mocked payment
-//! outcome are pure and tested here; the actual event-stream tracking
-//! and command submission live in the binary.
+//! The pure/env-driven bits behind `src/helpdesk.rs`'s two deadline
+//! reactors (`ScheduleCompanyTrialConversion`/`ScheduleCompanyTrialExpiry`/
+//! `ScheduleTicketAutoClose`) - `specs/skilj-helpdesk.allium`'s `rule
+//! TrialPeriodEnds`/`TicketAutoCloses`. Used to also hold the deadline
+//! *comparison* itself (`trial_period_has_ended`/`should_auto_close`)
+//! back when `src/bin/scheduler.rs` polled for due entities by hand;
+//! skilj 0.0.7's native per-entity deadline mechanism
+//! (docs/architecture.md §46) now does that comparison internally
+//! (`fire_at <= now()`), so all that's left here is *how long* each
+//! deadline runs and the one mocked business call both reactors need.
 
-use chrono::{DateTime, Duration, Utc};
+use chrono::Duration;
 
-/// `rule TrialPeriodEnds`'s own trigger condition: `Company.
-/// trial_started_at + config.trial_duration <= now`. `trial_started_at`
-/// itself is never a payload field this crate stores (see
-/// `scheduler.rs`'s own doc comment) - it's read off `CompanySignedUp`'s
-/// own event metadata, which skilj stamps itself.
-pub fn trial_period_has_ended(
-    signed_up_at: DateTime<Utc>,
-    now: DateTime<Utc>,
-    trial_duration: Duration,
-) -> bool {
-    signed_up_at + trial_duration <= now
+/// How long a company's free trial runs before `ScheduleCompanyTrialConversion`/
+/// `ScheduleCompanyTrialExpiry` fire - `specs/skilj-helpdesk.allium`'s own
+/// `config.trial_duration = 1.month`, overridable the same way
+/// `scheduler.rs`'s own `TRIAL_DURATION_DAYS` env var used to be (handy
+/// for demoing a short trial live - see README.md's own "Want more
+/// load?" section).
+pub fn trial_duration() -> Duration {
+    let days = std::env::var("TRIAL_DURATION_DAYS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(30);
+    Duration::days(days)
 }
 
-/// `rule TicketAutoCloses`'s own trigger condition: `Ticket.resolved_at
-/// + config.auto_close_after <= now`.
-pub fn should_auto_close(
-    resolved_at: DateTime<Utc>,
-    now: DateTime<Utc>,
-    auto_close_after: Duration,
-) -> bool {
-    resolved_at + auto_close_after <= now
+/// How long a resolved ticket waits before `ScheduleTicketAutoClose`
+/// fires - `specs/skilj-helpdesk.allium`'s own `config.auto_close_after`,
+/// same overridable-via-env-var treatment as `trial_duration` above
+/// (`AUTO_CLOSE_AFTER_DAYS`, matching `scheduler.rs`'s own former
+/// default of 7).
+pub fn auto_close_after() -> Duration {
+    let days = std::env::var("AUTO_CLOSE_AFTER_DAYS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(7);
+    Duration::days(days)
 }
 
 /// The one mocked call in this whole path -
@@ -36,44 +43,8 @@ pub fn should_auto_close(
 /// box (see `TrialPeriodEnds`/`CompanySubscribes` in the spec). Always
 /// succeeds: this is a showcase, not a real billing integration - swap
 /// this one function for a real gateway call and nothing else in
-/// `scheduler.rs` needs to change.
+/// `ScheduleCompanyTrialConversion`/`ScheduleCompanyTrialExpiry` needs
+/// to change.
 pub fn mock_charge_succeeds() -> bool {
     true
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn trial_ends_at_exactly_the_configured_duration() {
-        let signed_up_at = Utc::now() - Duration::days(30);
-        assert!(trial_period_has_ended(
-            signed_up_at,
-            Utc::now(),
-            Duration::days(30)
-        ));
-    }
-
-    #[test]
-    fn trial_has_not_ended_before_the_duration() {
-        let signed_up_at = Utc::now() - Duration::days(29);
-        assert!(!trial_period_has_ended(
-            signed_up_at,
-            Utc::now(),
-            Duration::days(30)
-        ));
-    }
-
-    #[test]
-    fn ticket_auto_closes_after_the_configured_duration() {
-        let resolved_at = Utc::now() - Duration::days(7);
-        assert!(should_auto_close(resolved_at, Utc::now(), Duration::days(7)));
-    }
-
-    #[test]
-    fn ticket_does_not_auto_close_before_the_duration() {
-        let resolved_at = Utc::now() - Duration::days(6);
-        assert!(!should_auto_close(resolved_at, Utc::now(), Duration::days(7)));
-    }
 }

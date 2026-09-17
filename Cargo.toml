@@ -11,18 +11,24 @@ helpdesk.rs. Every rule in the spec now has a real skilj
 CommandType/EventType/Projection implementation: company signup and its
 full trial/active/expired lifecycle, the full ticket lifecycle
 (create/assign/resolve/reopen/waiting-on-customer/close), and both
-alerting rules - plus two real separately-deployable binaries
-(src/bin/alerter.rs, src/bin/scheduler.rs) that are what actually submit
-the alerting and deadline-driven commands, consuming skilj's own REST
-event feed rather than anything built into skilj itself. Real integration-test suite (tests/company.rs,
+alerting rules - plus a real separately-deployable binary
+(src/bin/alerter.rs) that submits the alerting commands, consuming
+skilj's own REST event feed rather than anything built into skilj
+itself. The two deadline-driven rules (trial conversion, ticket
+auto-close) instead run through skilj 0.0.7's own native per-entity
+deadline mechanism (`ScheduleDeadline`, docs/architecture.md §46 in the
+skilj repo) - see helpdesk.rs's own `ScheduleCompanyTrialConversion`/
+`ScheduleTicketAutoClose` doc comments; no separate binary needed for
+those anymore. Real integration-test suite (tests/company.rs,
 tests/ticket_create_assign_resolve.rs, tests/ticket_waiting_and_closing.rs,
 tests/alerting_feed.rs - split by concern rather than one file, same
 reason skilj-demo splits banking/courses/graphql_auth/snapshot: each
 tests/*.rs is its own binary with its own embedded-Postgres instance,
 and enough accumulated per-test Skilj/pool instances sharing one
 instance eventually exhausts it - see tests/company.rs's own doc
-comment) plus pure unit tests for the decision logic each binary drives
-(src/alerting.rs, src/scheduling.rs). tests/graphql.rs proves the
+comment) plus pure unit tests for the decision logic behind alerter.rs
+and the deadline reactors (src/alerting.rs, src/scheduling.rs).
+tests/graphql.rs proves the
 GraphQL surface end to end too - real JWT auth against a local JWKS
 server (adapted from skilj-demo's own tests/graphql_auth.rs),
 submitCommand, and querying a Projection back (helpdesk_TicketSummary) -
@@ -31,14 +37,14 @@ auto-builds it from whatever's registered. All 28 tests verified against
 a real (not just embedded-then-skipped) Postgres in this environment,
 which is also how two real bugs got caught and fixed: CreateTicket's
 guard originally blocked ticket creation during the entire free trial
-(a spec bug), and every EventType here needed an explicit
-event_read_allowed() = true override skilj defaults to false on -
-without it, src/bin/alerter.rs's and src/bin/scheduler.rs's own
+(a spec bug), and every EventType a background consumer reads over
+REST needed an explicit event_read_allowed() = true override skilj
+defaults to false on - without it, src/bin/alerter.rs's own
 EventReadTokens would 403 in real use, not just in a test.
 src/bin/server.rs is a real, runnable server (`cargo run --bin server`,
-modelled on skilj-demo's own) - prints every credential alerter/
-scheduler need as ready-to-export env vars, so `cargo run --bin server`
-then the two printed commands brings up the whole system. Verified for
+modelled on skilj-demo's own) - prints every credential alerter needs
+as ready-to-export env vars, so `cargo run --bin server` then the
+printed command brings up the whole system. Verified for
 real: signed up a company and created a ticket over REST, queried it
 back over GraphQL, and had a real alerter process pick up the resulting
 event and print an alert - all against a real (not embedded) local
@@ -53,10 +59,6 @@ path = "src/bin/server.rs"
 [[bin]]
 name = "alerter"
 path = "src/bin/alerter.rs"
-
-[[bin]]
-name = "scheduler"
-path = "src/bin/scheduler.rs"
 
 [[bin]]
 name = "engagement-watcher"

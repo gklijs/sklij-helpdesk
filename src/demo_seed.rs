@@ -1,10 +1,10 @@
 //! Pure decision logic behind `src/bin/server.rs`'s optional demo-traffic
 //! loop (`SEED_DEMO_TRAFFIC=1`) - the same pure-logic/binary split
-//! `alerting.rs`/`src/bin/alerter.rs` and `scheduling.rs`/
-//! `src/bin/scheduler.rs` already use: this module decides *what* fake
-//! REST call to make next and how the crate's own tracked idea of each
-//! fake ticket's status should change once the real server has answered;
-//! `server.rs` is the only place that actually performs any I/O.
+//! `alerting.rs`/`src/bin/alerter.rs` already uses: this module decides
+//! *what* fake REST call to make next and how the crate's own tracked
+//! idea of each fake ticket's status should change once the real server
+//! has answered; `server.rs` is the only place that actually performs
+//! any I/O.
 //!
 //! The point of this whole module is cosmetic - giving a freshly booted
 //! demo something moving to look at in a dashboard without a person

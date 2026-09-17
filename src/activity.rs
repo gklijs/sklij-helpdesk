@@ -107,10 +107,10 @@ impl EventType for CompanyEngagementDeclined {
     /// Needed for two independent readers: `tests/activity.rs`'s own
     /// `EventReadToken`-based assertions, and (in a real deployment)
     /// whatever reads this bounded context's feed the way
-    /// `alerter.rs`/`scheduler.rs` read helpdesk's - the
-    /// `CrossContextRoute`'s own background poll task in `marketing.rs`
-    /// goes through skilj's internal event-store access instead, not
-    /// this flag, so this is about external readers, not the route.
+    /// `alerter.rs` reads helpdesk's - the `CrossContextRoute`'s own
+    /// background poll task in `marketing.rs` goes through skilj's
+    /// internal event-store access instead, not this flag, so this is
+    /// about external readers, not the route.
     fn event_read_allowed() -> bool {
         true
     }

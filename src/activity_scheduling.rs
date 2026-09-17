@@ -1,9 +1,15 @@
 //! The pure decision logic behind `src/bin/engagement-watcher.rs` -
 //! `specs/activity.allium`'s own resolved "gone quiet" rule
-//! (`config.quiet_after`), split out the same way `src/scheduling.rs`
-//! splits from `src/bin/scheduler.rs`: the deadline check is pure and
+//! (`config.quiet_after`), split out the same way `src/alerting.rs`
+//! splits from `src/bin/alerter.rs`: the deadline check is pure and
 //! tested here; the actual event-stream tracking and command submission
-//! live in the binary.
+//! live in the binary. Unlike `src/helpdesk.rs`'s own trial/auto-close
+//! deadlines (`scheduling.rs`, ported onto skilj's native
+//! `ScheduleDeadline`, see `ScheduleCompanyTrialConversion`'s own doc
+//! comment), "gone quiet" doesn't fit that one-shot-per-triggering-event
+//! shape: it's a rolling window that resets on every new activity, not
+//! a deadline scheduled once from a single source event, so it stays a
+//! hand-rolled polling binary.
 
 use chrono::{DateTime, Duration, Utc};
 

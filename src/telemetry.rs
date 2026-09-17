@@ -14,7 +14,7 @@
 //! call sites needed anywhere in this crate's own `helpdesk.rs` for any
 //! of the three.
 //!
-//! Shared across all three binaries (`server`/`alerter`/`scheduler`),
+//! Shared across all three binaries (`server`/`alerter`/`engagement-watcher`),
 //! each passing its own `service_name` - so they show up as three
 //! distinct services in whatever OTLP backend is on the other end,
 //! rather than one undifferentiated blob. `cargo run` works with no

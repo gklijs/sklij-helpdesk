@@ -24,9 +24,13 @@
 //! `skilj_helpdesk::helpdesk::TicketEscalated`'s own doc comment for why
 //! this now submits a real `EscalateTicket` command (a documented,
 //! deliberate extension of the spec, not just the original console-only
-//! trigger) - `tick` below tracks each unhandled ticket's own age the
-//! same tracked-state-plus-sweep shape `scheduler.rs` already uses for
-//! its own two deadline rules.
+//! trigger) - `tick` below tracks each unhandled ticket's own age via a
+//! tracked-state-plus-sweep shape, the same one `engagement-watcher.rs`
+//! independently needs for its own "gone quiet" rule (a rolling window,
+//! not a one-shot deadline - see `src/activity_scheduling.rs`'s own doc
+//! comment for why that one still needs hand-rolled polling rather than
+//! skilj's native `ScheduleDeadline`, unlike `helpdesk.rs`'s own trial/
+//! auto-close reactors).
 //!
 //! **Restart safety.** `mode=auto`'s cursor is server-tracked and
 //! non-replayable (docs/architecture.md §7.4) - once an event's been
@@ -45,8 +49,8 @@
 //! local JSON file after every tick (cheap - it's a handful of ticket
 //! ids), and reloaded on startup if present, so a restart resumes
 //! within one `POLL_INTERVAL` of where it left off instead of forgetting
-//! everything. `scheduler.rs` has the identical fix, for the identical
-//! reason, over its own two deadline rules.
+//! everything. `engagement-watcher.rs` has the identical fix, for the
+//! identical reason, over its own "gone quiet" sweep.
 //!
 //! Configuration (env vars, deliberately minimal - no config-loading
 //! crate, matching skilj's own §2.4 choice):
@@ -63,9 +67,8 @@
 //!                                  redeploy) - set to an empty string
 //!                                  to disable checkpointing entirely
 //!                                  and go back to pure in-memory state.
-//!   Six EventReadTokens ("id.secret"), each this binary's *own* -
-//!   never shared with `scheduler.rs`'s tokens for the same event types,
-//!   see `server.rs`'s own `ALERTER_EVENT_TYPES` doc comment for why:
+//!   Six EventReadTokens ("id.secret"), each this binary's own - see
+//!   `server.rs`'s own `ALERTER_EVENT_TYPES` doc comment:
 //!     TICKET_CREATED_TOKEN, TICKET_RESOLVED_TOKEN, TICKET_REOPENED_TOKEN,
 //!     TICKET_CLOSED_TOKEN, TICKET_ESCALATED_TOKEN, TICKETS_MERGED_TOKEN
 //!   One CommandToken:
@@ -157,9 +160,10 @@ impl Config {
 
 #[derive(Default, Serialize, Deserialize)]
 struct State {
-    /// ticket_id -> its own original `TicketCreated` timestamp (skilj's
-    /// own event metadata, not a payload field - see `scheduler.rs`'s
-    /// identical reasoning for `trial_started_at`). Kept forever, even
+    /// ticket_id -> its own original `TicketCreated` timestamp - read
+    /// off skilj's own event metadata, not a payload field, since
+    /// `TicketCreatedPayload` carries no timestamp of its own. Kept
+    /// forever, even
     /// past resolution: a reopened ticket's age is still measured from
     /// its own original creation, never reset.
     created_at: HashMap<String, DateTime<Utc>>,
@@ -351,11 +355,11 @@ async fn tick(
 /// One `GET /v1/events/consume?mode=auto` call for one token, decoded
 /// down to what this binary needs: each event's type name (unused by
 /// most call sites - each token is already scoped to one event type -
-/// kept for parity with `scheduler.rs`'s identical helper), payload, and
-/// when skilj itself recorded it. Identical to `scheduler.rs`'s own
-/// `consume` - not shared between the two binaries since each is its own
-/// deployable unit with no common library boundary between them worth
-/// introducing for one helper.
+/// kept for parity with `engagement-watcher.rs`'s identical helper),
+/// payload, and when skilj itself recorded it. Byte-for-byte the same
+/// shape as `engagement-watcher.rs`'s own `consume` - not shared between
+/// the two binaries since each is its own deployable unit with no common
+/// library boundary between them worth introducing for one helper.
 async fn consume(
     client: &reqwest::Client,
     base_url: &str,
@@ -395,7 +399,7 @@ async fn consume(
 
 /// One `POST /v1/commands/trigger` call - identical shape and "a
 /// rejection is logged by the caller, not a transport error" contract as
-/// `scheduler.rs`'s own `submit_command`.
+/// `engagement-watcher.rs`'s own `submit_command`.
 async fn submit_command(
     client: &reqwest::Client,
     base_url: &str,

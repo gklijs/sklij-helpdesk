@@ -1,7 +1,8 @@
 //! A real, runnable server for `skilj_helpdesk::helpdesk` - `cargo run
 //! --bin server`. Not a test: boots an actual `axum` process serving
-//! both REST and GraphQL, prints every credential `alerter`/`scheduler`
-//! need as ready-to-export env vars, then serves until killed. Modelled
+//! both REST and GraphQL, prints every credential `alerter`/
+//! `engagement-watcher` need as ready-to-export env vars, then serves
+//! until killed. Modelled
 //! closely on `skilj-demo/src/bin/server.rs`, including its telemetry
 //! wiring now (`skilj_helpdesk::telemetry::init` - this crate's own copy
 //! of that file's `init_telemetry`; see the module's own doc comment)
@@ -219,32 +220,22 @@ const COMMAND_TYPES: &[&str] = &[
     "AddInternalNote",
 ];
 
-/// `src/bin/alerter.rs`'s own event types - `TicketResolved`/
-/// `TicketReopened`/`TicketClosed` overlap with `SCHEDULER_EVENT_TYPES`
-/// below on purpose: `skilj-rest`'s `mode=auto` cursor is tracked
-/// per-token (`db::get_read_cursor`), so alerter and scheduler each need
-/// their *own* token for a type both read - sharing one would have each
-/// steal the other's cursor position. That's why event-token minting
-/// below is two separate loops, not one list shared by both binaries.
+/// `src/bin/alerter.rs`'s own event types - the trial-conversion/
+/// auto-close rules used to read `TicketResolved`/`TicketReopened`/
+/// `TicketClosed` too, via `src/bin/scheduler.rs`'s own separate token
+/// set (`skilj-rest`'s `mode=auto` cursor is tracked per-token, so two
+/// independent readers of the same type each needed their own token to
+/// avoid stealing each other's cursor position) - that binary's gone
+/// now, replaced by skilj's native per-entity deadline mechanism
+/// (`helpdesk.rs`'s own `ScheduleTicketAutoClose` etc.), which reads
+/// events through its own internal poller, not a minted `EventReadToken`
+/// at all.
 const ALERTER_EVENT_TYPES: &[&str] = &[
     "TicketCreated",
     "TicketResolved",
     "TicketReopened",
     "TicketClosed",
     "TicketEscalated",
-    "TicketsMerged",
-];
-
-/// `src/bin/scheduler.rs`'s own event types - see `ALERTER_EVENT_TYPES`'s
-/// own doc comment for why this is a separate list rather than a shared
-/// one, despite the overlap.
-const SCHEDULER_EVENT_TYPES: &[&str] = &[
-    "CompanySignedUp",
-    "CompanyActivated",
-    "CompanyExpired",
-    "TicketResolved",
-    "TicketReopened",
-    "TicketClosed",
     "TicketsMerged",
 ];
 
@@ -341,17 +332,21 @@ async fn mint_event_tokens(
             &event_type,
             generate_token_id(),
             generate_token_secret(),
-            // Unrestricted: alerter/scheduler are operational consumers
-            // watching every company's own events by design (paging a
-            // lead, auto-closing a ticket - neither is "acting as" any
-            // one company) - the same reasoning `mapping`'s own `scope`
-            // below gets for the same reason.
+            // Unrestricted: alerter is an operational consumer watching
+            // every company's own events by design (paging a lead -
+            // not "acting as" any one company) - the same reasoning
+            // `mapping`'s own `scope` below gets for the same reason.
             None,
             // `None` - `EventReadStartPosition::Beginning`, matching
             // every one of these tokens' prior behaviour from before
             // this parameter existed (skilj 0.0.5): every consumer here
             // wants its own tenure to read the whole history, not just
             // what's new from the moment it starts.
+            None,
+            // `start_at_sequence`/`start_at_time` (skilj 0.0.6): both
+            // `None` - only meaningful alongside `AtSequence`/`AtTime`
+            // above, neither of which this call ever passes.
+            None,
             None,
             Utc::now(),
         )?;
@@ -693,15 +688,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\ncommand tokens (send as `authorization: Bearer <id>.<secret>` to /v1/commands/trigger):");
     let command_tokens = mint_command_tokens(&pool, &mapping, BOUNDED_CONTEXT, COMMAND_TYPES).await?;
 
-    // Two independent mints, not one shared list - see
-    // `ALERTER_EVENT_TYPES`'s own doc comment for why alerter and
-    // scheduler can't share a token for the event types they both read.
     println!("\nalerter's own event read tokens:");
     let alerter_event_tokens =
         mint_event_tokens(&pool, &mapping, BOUNDED_CONTEXT, ALERTER_EVENT_TYPES).await?;
-    println!("\nscheduler's own event read tokens:");
-    let scheduler_event_tokens =
-        mint_event_tokens(&pool, &mapping, BOUNDED_CONTEXT, SCHEDULER_EVENT_TYPES).await?;
 
     // Only if telemetry is actually configured - see
     // run_csat_metrics_loop's own doc comment for why a token and a
@@ -756,19 +745,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  export ESCALATE_TICKET_TOKEN={}", command_tokens["EscalateTicket"]);
     println!("  cargo run --bin alerter");
 
-    println!("\nto run the scheduler against this server:");
-    println!("  export SKILJ_BASE_URL=http://localhost:{port}");
-    println!("  export COMPANY_SIGNED_UP_TOKEN={}", scheduler_event_tokens["CompanySignedUp"]);
-    println!("  export COMPANY_ACTIVATED_TOKEN={}", scheduler_event_tokens["CompanyActivated"]);
-    println!("  export COMPANY_EXPIRED_TOKEN={}", scheduler_event_tokens["CompanyExpired"]);
-    println!("  export TICKET_RESOLVED_TOKEN={}", scheduler_event_tokens["TicketResolved"]);
-    println!("  export TICKET_REOPENED_TOKEN={}", scheduler_event_tokens["TicketReopened"]);
-    println!("  export TICKET_CLOSED_TOKEN={}", scheduler_event_tokens["TicketClosed"]);
-    println!("  export TICKETS_MERGED_TOKEN={}", scheduler_event_tokens["TicketsMerged"]);
-    println!("  export CONVERT_COMPANY_TRIAL_TOKEN={}", command_tokens["ConvertCompanyTrial"]);
-    println!("  export EXPIRE_COMPANY_TRIAL_TOKEN={}", command_tokens["ExpireCompanyTrial"]);
-    println!("  export CLOSE_TICKET_TOKEN={}", command_tokens["CloseTicket"]);
-    println!("  cargo run --bin scheduler");
+    println!(
+        "\ntrial conversion/expiry and ticket auto-close run in-process now (skilj's own native \
+         per-entity deadlines, docs/architecture.md §46) - no separate binary or tokens needed. \
+         TRIAL_DURATION_DAYS/AUTO_CLOSE_AFTER_DAYS still override the default 30/7-day windows."
+    );
 
     println!("\nto run engagement-watcher against this server:");
     println!("  export SKILJ_BASE_URL=http://localhost:{port}");
@@ -904,7 +885,8 @@ async fn sign_up_demo_companies(base_url: &str, command_tokens: &HashMap<&'stati
 /// `SeedState::new`'s own doc comment for why two workers must never
 /// share one). Never returns; `tokio::spawn` just leaks it for the
 /// process's lifetime, the same "runs until killed" treatment
-/// `alerter`/`scheduler` already get as whole separate processes.
+/// `alerter`/`engagement-watcher` already get as whole separate
+/// processes.
 async fn run_demo_seed_loop(
     worker_index: usize,
     base_url: String,
