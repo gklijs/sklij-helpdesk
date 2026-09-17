@@ -93,6 +93,12 @@ jsonwebtoken = "9"
 # Found the hard way: a real browser (frontend/, a different origin
 # from the server) blocks the response outright without this.
 tower-http = { version = "0.6", features = ["cors"] }
+# src/bin/server.rs only - concurrency-limit + load-shed on the merged
+# router, same "consuming application's call" reasoning as tower-http
+# above: once the DB pool (skilj_core::db) is saturated, this is what
+# makes the server fail fast (503) instead of queuing unboundedly many
+# in-flight requests in memory (see docs/load-test-report-2026-09-17.md).
+tower = { version = "0.5", features = ["limit", "load-shed"] }
 # Telemetry (src/telemetry.rs, used by all three binaries) - versions
 # pinned to match ../skilj/Cargo.toml exactly. skilj-core/skilj-rest/
 # skilj only ever call opentelemetry::global::meter()/global tracer -

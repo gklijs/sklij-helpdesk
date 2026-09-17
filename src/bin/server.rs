@@ -469,7 +469,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .and_then(|p| p.parse().ok())
         .unwrap_or(8080);
 
-    let pool = db::connect(&database_url).await?;
+    // db::connect's bare default (sqlx's own PgPoolOptions::new(), a
+    // 10-connection cap) turned out to be the actual ceiling on this
+    // server's throughput, not anything in the app's own logic - see
+    // docs/load-test-report-2026-09-17.md. DATABASE_MAX_CONNECTIONS lets
+    // that be sized for real load instead of silently inheriting
+    // whatever sqlx ships with. 90, not just "well above 10": this same
+    // pool is also shared by every background loop skilj spawns
+    // (cross_context_route_tick, async_projection_tick, scheduler_tick)
+    // plus `/v1/events/consume` (which holds its connection for a whole
+    // open transaction, not just one query - see skilj-rest's own
+    // get_events_consume doc comment on why a concurrent call for the
+    // same token genuinely blocks there) - all of that competes with
+    // foreground request traffic for the same budget, so sizing this to
+    // just the expected foreground concurrency undercounts real demand.
+    // 90 leaves headroom under Postgres's own default server-side
+    // max_connections (100) for `alerter`/`engagement-watcher`/manual
+    // `psql` alongside this pool.
+    let db_max_connections: u32 = std::env::var("DATABASE_MAX_CONNECTIONS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(90);
+    let pool = db::connect_with(&database_url, db::PgPoolOptions::new().max_connections(db_max_connections))
+        .await?;
     db::migrate(&pool).await?;
 
     if db::get_bounded_context(&pool, BOUNDED_CONTEXT).await?.is_none() {
@@ -772,7 +794,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // permissive CORS opens up here the way it would for cookie-based
     // auth. A real deployment would still want this restricted to its
     // own known frontend origin(s) rather than left permissive.
-    let app = rest.merge(graphql).layer(tower_http::cors::CorsLayer::permissive());
+    // Load-shed + concurrency-limit: the other half of the
+    // docs/load-test-report-2026-09-17.md fix, alongside
+    // DATABASE_MAX_CONNECTIONS above. Even with a right-sized DB pool,
+    // nothing previously capped how many requests axum would accept and
+    // hold in memory at once while waiting on that pool - a genuine
+    // overload just grew unboundedly (measured: 54MB -> 487MB server RSS
+    // in 4 minutes) instead of failing fast. Once more than
+    // HTTP_MAX_IN_FLIGHT_REQUESTS are already in flight, load_shed()
+    // makes any further request fail immediately (503) rather than queue.
+    // Deliberately below db_max_connections, not just "some big number":
+    // this needs to shed load *before* every pool connection is spoken
+    // for, or it never fires and requests still pile up waiting on
+    // sqlx's own 30s acquire_timeout instead of getting a fast 503 - the
+    // gap between this and db_max_connections is the pool budget left
+    // for the background loops/long-poll consumers noted above, which
+    // this limit doesn't (and shouldn't) count against.
+    let http_max_in_flight: usize = std::env::var("HTTP_MAX_IN_FLIGHT_REQUESTS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(70);
+    let app = rest
+        .merge(graphql)
+        .layer(tower_http::cors::CorsLayer::permissive())
+        .layer(
+            tower::ServiceBuilder::new()
+                .layer(axum::error_handling::HandleErrorLayer::new(|_: tower::BoxError| async {
+                    (
+                        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                        "overloaded - too many in-flight requests, try again shortly",
+                    )
+                }))
+                .load_shed()
+                .concurrency_limit(http_max_in_flight),
+        );
 
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", port)).await?;
     println!("\nskilj-helpdesk listening on http://localhost:{port} (REST under /v1/..., GraphQL at /graphql)");
