@@ -218,7 +218,16 @@ const COMMAND_TYPES: &[&str] = &[
     "MergeTickets",
     "RateTicket",
     "AddInternalNote",
+    "RecordCompanyTenant",
 ];
+
+/// `src/bin/provisioner.rs`'s own event type - one `CompanySignedUp` per
+/// company, reacted to by calling `createBoundedContextFromTemplate`
+/// and reporting the result back via `RecordCompanyTenant` (in
+/// `COMMAND_TYPES` above). Its own token set, same "each consumer gets
+/// its own cursor" reasoning `ALERTER_EVENT_TYPES`'s own doc comment
+/// gives - nothing else currently reads `CompanySignedUp`.
+const PROVISIONER_EVENT_TYPES: &[&str] = &["CompanySignedUp"];
 
 /// `src/bin/alerter.rs`'s own event types - the trial-conversion/
 /// auto-close rules used to read `TicketResolved`/`TicketReopened`/
@@ -514,7 +523,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         id: generate_token_id(),
         external_subject: external_subject.clone(),
         name: "skilj-helpdesk admin".into(),
-        superadmin: false,
+        // `true`, not `false`: this is now the identity
+        // `src/bin/provisioner.rs` signs its own JWTs for (see this
+        // role's own JWT print below) to call skilj's
+        // `createBoundedContextFromTemplate` mutation, which is gated on
+        // `Role.superadmin` directly, never a `RoleAccessMapping` (see
+        // `tests/support::seed_superadmin`'s own doc comment in the
+        // sibling test crate) - this is still the one operator-controlled
+        // bootstrap identity for this whole deployment, so granting it
+        // superadmin too (rather than minting a second Role) keeps this
+        // server's own "one admin identity" shape rather than doubling it.
+        superadmin: true,
         status: RoleStatus::Active,
         created_at: Utc::now(),
         revoked_at: None,
@@ -714,6 +733,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let alerter_event_tokens =
         mint_event_tokens(&pool, &mapping, BOUNDED_CONTEXT, ALERTER_EVENT_TYPES).await?;
 
+    println!("\nprovisioner's own event read token:");
+    let provisioner_event_tokens =
+        mint_event_tokens(&pool, &mapping, BOUNDED_CONTEXT, PROVISIONER_EVENT_TYPES).await?;
+
     // Only if telemetry is actually configured - see
     // run_csat_metrics_loop's own doc comment for why a token and a
     // poll loop otherwise have nothing to record into.
@@ -766,6 +789,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  export TICKETS_MERGED_TOKEN={}", alerter_event_tokens["TicketsMerged"]);
     println!("  export ESCALATE_TICKET_TOKEN={}", command_tokens["EscalateTicket"]);
     println!("  cargo run --bin alerter");
+
+    println!("\nto run the provisioner against this server:");
+    println!("  export SKILJ_BASE_URL=http://localhost:{port}");
+    println!(
+        "  export COMPANY_SIGNED_UP_TOKEN={}",
+        provisioner_event_tokens["CompanySignedUp"]
+    );
+    println!(
+        "  export RECORD_COMPANY_TENANT_TOKEN={}",
+        command_tokens["RecordCompanyTenant"]
+    );
+    println!("  export PROVISIONER_SUPERADMIN_SUBJECT={external_subject}");
+    println!("  export PROVISIONER_TENANT_ADMIN_ROLE_ID={}", role.id);
+    if oidc_issuer_url.is_some() {
+        println!(
+            "  (provisioner signs its own short-lived JWTs against the local JWKS shortcut's \
+             own test key - see provisioner.rs's own doc comment; it can't get a real superadmin \
+             JWT out of a real Dex issuer, so it won't work against this OIDC_ISSUER_URL run)"
+        );
+    }
+    println!("  cargo run --bin provisioner");
 
     println!(
         "\ntrial conversion/expiry and ticket auto-close run in-process now (skilj's own native \

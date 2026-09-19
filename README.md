@@ -235,22 +235,29 @@ silently absent:
 
 - **Real payment processing** — mocked on purpose; this is a showcase,
   not a billing product.
-- **Multi-tenant provisioning** — the spec calls for each company to be
-  its own skilj tenant (bounded context), stamped from a template via
-  `CreateBoundedContextFromTemplate`. This pass keeps one shared
-  bounded context instead, to prove the domain logic without also
-  building the tenancy mechanism around it. The mechanism itself is
-  proven, though, not just assumed: `tests/multi_tenant_provisioning.rs`
-  stamps a real second bounded context from the shared `helpdesk`
-  context as its template, grants a role access to it in the same call,
-  runs `SignUpCompany`/`CreateTicket` against it independently, and
-  confirms the result never leaks into the shared context's own
-  projection state. What that test's own doc comment leaves open — the
-  real migration this pass doesn't attempt — is what `SignUpCompany`
-  would have to become (a real cross-context orchestration, not one
-  command), and what `alerter.rs` watching *every* tenant's own event
-  feed (or `helpdesk.rs`'s deadline reactors registering against every
-  tenant's own bounded context) would even mean.
+- **Real tenant provisioning, Ticket routing still deferred** — the
+  spec calls for each company to be its own skilj tenant (bounded
+  context), stamped from a template via
+  `CreateBoundedContextFromTemplate`. That mechanism was first proven in
+  isolation by `tests/multi_tenant_provisioning.rs` (stamps a real
+  second bounded context from the shared `helpdesk` context as its
+  template, grants a role access to it in the same call, runs
+  `SignUpCompany`/`CreateTicket` against it independently, and confirms
+  the result never leaks into the shared context's own projection
+  state), and is now a real production side effect: `SignUpCompany`
+  emits `CompanySignedUp`, `src/bin/provisioner.rs` reacts to it by
+  calling `createBoundedContextFromTemplate` for real, and reports the
+  result back via `RecordCompanyTenant` so every company's own tenant is
+  durably recorded (`helpdesk.rs`'s own `company_tenant`). What's still
+  deferred: nothing yet routes Ticket commands or queries into the
+  tenant just created — every company's tickets still run in the shared
+  `helpdesk` context. That needs `CreateTicket` et al.'s own
+  `company_status` guard read (today one same-context DCB query) to
+  reach across two bounded contexts instead of one - real cross-context
+  query design work, not a follow-up detail - and, separately, what
+  `alerter.rs` watching *every* tenant's own event feed (or
+  `helpdesk.rs`'s deadline reactors registering against every tenant's
+  own bounded context) would even mean.
 - **A backend-for-frontend / GraphQL schema beyond what's registered**
   — the frontend talks to skilj-graphql's own auto-generated schema
   directly; there's no hand-written GraphQL layer.

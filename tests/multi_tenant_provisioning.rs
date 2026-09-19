@@ -1,29 +1,28 @@
-//! Proof of concept for real per-company multi-tenancy, the biggest
-//! item `README.md`'s own "What's not built" section names: the spec
-//! calls for each company to be its own skilj tenant, provisioned via
-//! `CreateBoundedContextFromTemplate`, but this project's actual build
-//! keeps every company inside one shared `helpdesk` bounded context
-//! instead (a `company_id` field, not a real boundary).
+//! Proof of concept for real per-company multi-tenancy, first written
+//! when `README.md`'s own "What's not built" section still named this
+//! its biggest gap. It no longer is: `src/bin/provisioner.rs` now runs
+//! the exact mechanism this file proves - `createBoundedContextFromTemplate`
+//! from the shared `helpdesk` context as the template - for real, as a
+//! production reaction to every `SignUpCompany`. This file stays, kept
+//! deliberately independent of that binary: it drives the same GraphQL
+//! mutation directly and synchronously, in-process, so this crate's
+//! test suite can assert on the mechanism itself (isolation, the
+//! access-grant side effect) without spinning up a real HTTP server and
+//! polling an async reactor for it to notice a REST event feed - see
+//! `alerter.rs`'s own module doc comment for why that same tradeoff
+//! already keeps *that* binary out of `cargo test`.
 //!
-//! This file proves the mechanism itself works end to end against this
-//! crate's own real domain (the shared `helpdesk` context as the
-//! template, `SignUpCompany`/`CreateTicket` as the copied-over command
-//! types) - a brand-new bounded context, stamped from `helpdesk`,
-//! genuinely runs the same business logic independently and in
-//! isolation from it. It is deliberately **not** a migration: nothing
-//! here changes what `SignUpCompany` means, how `server.rs` boots, or
-//! how any other test in this crate runs - the shared `helpdesk`
-//! context this project already ships stays exactly as it is,
-//! untouched, alongside the one tenant this test provisions and then
-//! discards.
-//!
-//! What a *real* migration would still need to answer, deliberately
-//! left open here rather than glossed over:
-//!   - `SignUpCompany` would need to become "provision a tenant," not
-//!     "insert a row in the shared context" - a real orchestration
-//!     across two bounded contexts (an admin one calling
-//!     `createBoundedContextFromTemplate`, superadmin-gated, and the
-//!     new tenant itself), not a single command anymore.
+//! What's still open, deliberately left that way rather than glossed
+//! over (see `helpdesk.rs`'s own module doc comment and
+//! `RecordCompanyTenant`'s own doc comment for the same list from the
+//! production side):
+//!   - Nothing yet routes a `CreateTicket` (or any other Ticket command/
+//!     query) for a signed-up company into the tenant `provisioner.rs`
+//!     just provisioned for it - every company's tickets still run in
+//!     the shared `helpdesk` context. `CreateTicket` et al.'s own
+//!     `company_status` guard read is one same-context DCB query today;
+//!     making it reach across two bounded contexts instead is real
+//!     cross-context query design work, not a detail.
 //!   - `alerter.rs` reads *one* set of `EventReadToken`s today, each
 //!     scoped to one bounded context. Watching every tenant's own event
 //!     feed, or paging a lead the moment a *new* tenant is provisioned,

@@ -115,6 +115,62 @@ fn tickets_can_be_created_during_the_trial_without_converting_first() {
     });
 }
 
+/// `RecordCompanyTenant`'s own two guards - see that command's doc
+/// comment in `helpdesk.rs`. `src/bin/provisioner.rs` is what submits
+/// this for real, reacting to `CompanySignedUp` over skilj's REST event
+/// feed (not exercised by `cargo test` - see that binary's own doc
+/// comment, and `alerter.rs`'s identical reasoning); this drives the
+/// same command directly instead, the same "prove the command, not the
+/// reactor loop around it" split every other command here gets.
+#[test]
+fn recording_a_companys_tenant_requires_signup_first_and_is_idempotent() {
+    runtime().block_on(async {
+        if test_db().await.is_none() {
+            return;
+        }
+        let (skilj, pool, mapping) = setup().await;
+        let router = skilj.rest_router();
+        let sign_up = token(&pool, &mapping, "SignUpCompany").await;
+        let record_tenant = token(&pool, &mapping, "RecordCompanyTenant").await;
+        let company_id = unique_name("company");
+        let tenant_name = format!("company-{company_id}");
+
+        // Guard one: no signup yet, so there's nothing to attach a
+        // tenant to.
+        let response = trigger(
+            &router,
+            &record_tenant,
+            serde_json::json!({ "company_id": company_id, "tenant_name": tenant_name }),
+        )
+        .await;
+        assert!(!accepted(&response), "recording a tenant before signup should be rejected: {response:?}");
+        assert_eq!(rejection_kind(&response), "company_not_found");
+
+        trigger(&router, &sign_up, serde_json::json!({ "company_id": company_id, "name": "Acme", "contact_email": "a@acme.example" })).await;
+
+        let response = trigger(
+            &router,
+            &record_tenant,
+            serde_json::json!({ "company_id": company_id, "tenant_name": tenant_name }),
+        )
+        .await;
+        assert!(accepted(&response), "recording a signed-up company's tenant should succeed: {response:?}");
+
+        // Guard two: already recorded - a redelivered `CompanySignedUp`
+        // (provisioner.rs's own doc comment: skilj's REST feed can, in
+        // principle, redeliver on a crash mid-tick) must not silently
+        // overwrite it with a second tenant name.
+        let response = trigger(
+            &router,
+            &record_tenant,
+            serde_json::json!({ "company_id": company_id, "tenant_name": tenant_name }),
+        )
+        .await;
+        assert!(!accepted(&response), "recording a second tenant for the same company should be rejected: {response:?}");
+        assert_eq!(rejection_kind(&response), "tenant_already_provisioned");
+    });
+}
+
 /// `rule TrialPeriodEnds`'s success branch, submitted the way
 /// `ScheduleCompanyTrialConversion` really submits it (see
 /// `tests/native_deadlines.rs` for the real thing firing on its own,

@@ -3,14 +3,24 @@
 //! that file for the full domain spec, and this crate's `Cargo.toml`
 //! doc comment for exactly what this pass covers vs. defers.
 //!
-//! One bounded context, not the two the spec's Dependencies section
+//! One bounded context still runs the real decide() logic for both
+//! Company and Ticket - not the two the spec's Dependencies section
 //! implies (a shared "billing" context for Company, a per-company
-//! tenant "helpdesk" context for Ticket, stamped via skilj's own
-//! `CreateBoundedContextFromTemplate`): real multi-tenant provisioning
-//! is deferred along with the temporal/alerting pieces (see
-//! `Cargo.toml`), so this pass keeps Company and Ticket events side by
-//! side in one context, tagged apart by "company"/"ticket" - enough to
-//! prove the real `decide()` logic, not the tenancy mechanism around it.
+//! tenant "helpdesk" context for Ticket). What's no longer deferred:
+//! `SignUpCompany` now has a real per-company tenant provisioned for it
+//! (`RecordCompanyTenant`/`CompanyTenantProvisioned` below,
+//! `src/bin/provisioner.rs` the reactor that calls skilj's own
+//! `CreateBoundedContextFromTemplate` and reports back), proven first as
+//! a standalone mechanism in `tests/multi_tenant_provisioning.rs`, now a
+//! real production side effect of every signup. What's still deferred:
+//! the new tenant is provisioned and recorded, but Ticket commands
+//!/queries for that company still run against this shared context, not
+//! the tenant just created for it - routing Ticket traffic into
+//! per-company tenants needs Company's own guard reads
+//! (`company_status` below, read by `CreateTicket` et al. via a single
+//! same-context DCB query) to work across two bounded contexts instead
+//! of one, which is real cross-context query work, not a follow-up
+//! detail - see `RecordCompanyTenant`'s own doc comment.
 //!
 //! Every id (`company_id`, `ticket_id`) is caller-supplied, same
 //! convention as `skilj-demo`'s own `account_id`/`course_id` - never
@@ -105,6 +115,31 @@ pub struct CompanySignedUp;
 impl EventType for CompanySignedUp {
     type Payload = CompanySignedUpPayload;
     const NAME: &'static str = "CompanySignedUp";
+    fn tag_mappings() -> Vec<TagMapping> {
+        company_tag()
+    }
+    /// `src/bin/provisioner.rs` reads this via an `EventReadToken` to
+    /// provision each new company's own tenant - see
+    /// `TicketCreated::event_read_allowed`'s own doc comment for why
+    /// this override exists at all.
+    fn event_read_allowed() -> bool {
+        true
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct CompanyTenantProvisionedPayload {
+    pub company_id: String,
+    pub tenant_name: String,
+}
+
+pub struct CompanyTenantProvisioned;
+
+/// `RecordCompanyTenant`'s own outcome - see that command's doc comment.
+#[auto_register(BOUNDED_CONTEXT)]
+impl EventType for CompanyTenantProvisioned {
+    type Payload = CompanyTenantProvisionedPayload;
+    const NAME: &'static str = "CompanyTenantProvisioned";
     fn tag_mappings() -> Vec<TagMapping> {
         company_tag()
     }
@@ -522,6 +557,7 @@ pub enum HelpdeskEvent {
     CompanySignedUp(CompanySignedUpPayload),
     CompanyActivated(CompanyActivatedPayload),
     CompanyExpired(CompanyExpiredPayload),
+    CompanyTenantProvisioned(CompanyTenantProvisionedPayload),
     TicketCreated(TicketCreatedPayload),
     TicketAssigned(TicketAssignedPayload),
     TicketResolved(TicketResolvedPayload),
@@ -547,6 +583,9 @@ impl BoundedContextEvent for HelpdeskEvent {
             "CompanyExpired" => {
                 Some(serde_json::from_str(&event.payload).map(HelpdeskEvent::CompanyExpired))
             }
+            "CompanyTenantProvisioned" => Some(
+                serde_json::from_str(&event.payload).map(HelpdeskEvent::CompanyTenantProvisioned),
+            ),
             "TicketCreated" => {
                 Some(serde_json::from_str(&event.payload).map(HelpdeskEvent::TicketCreated))
             }
@@ -689,6 +728,21 @@ fn company_status(matching_events: &[HelpdeskEvent], company_id: &str) -> Option
     status
 }
 
+/// This company's own provisioned tenant name, if `RecordCompanyTenant`
+/// has already recorded one - `None` covers both "hasn't signed up yet"
+/// and "signed up but the provisioner hasn't reacted yet", same
+/// approach as `company_status`'s own single `Option` for two not-yet
+/// states; `RecordCompanyTenant::decide` below tells them apart itself
+/// via `company_status`.
+fn company_tenant(matching_events: &[HelpdeskEvent], company_id: &str) -> Option<String> {
+    matching_events.iter().find_map(|event| match event {
+        HelpdeskEvent::CompanyTenantProvisioned(p) if p.company_id == company_id => {
+            Some(p.tenant_name.clone())
+        }
+        _ => None,
+    })
+}
+
 /// The company a ticket belongs to, read off its own `TicketCreated`
 /// (always present in `matching_events` for any ticket-tagged command:
 /// `TicketCreated` carries both the "ticket" and "company" tags - see
@@ -720,10 +774,11 @@ pub struct SignUpCompany;
 
 /// `specs/skilj-helpdesk.allium`'s `rule CompanySignsUp`. What the spec
 /// also does here - provisioning the company's own skilj tenant via
-/// `CreateBoundedContextFromTemplate` - is exactly the piece this pass
-/// defers (see `Cargo.toml`); a real implementation would call that as
-/// a side effect alongside this command, not from inside `decide()`
-/// (pure and I/O-free by contract).
+/// `CreateBoundedContextFromTemplate` - stays out of `decide()` (pure
+/// and I/O-free by contract), but is no longer skipped: it now happens
+/// as a real side effect, driven by `src/bin/provisioner.rs` reacting to
+/// the `CompanySignedUp` this emits and reporting back via
+/// `RecordCompanyTenant` below.
 #[auto_register(BOUNDED_CONTEXT)]
 impl CommandType for SignUpCompany {
     type Payload = SignUpCompanyPayload;
@@ -749,6 +804,80 @@ impl CommandType for SignUpCompany {
                     "company_id": payload.company_id,
                     "name": payload.name,
                     "contact_email": payload.contact_email,
+                }),
+            }],
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct RecordCompanyTenantPayload {
+    pub company_id: String,
+    pub tenant_name: String,
+}
+
+pub struct RecordCompanyTenant;
+
+/// The real side effect `SignUpCompany`'s own doc comment above
+/// describes, reported back: `src/bin/provisioner.rs` reads
+/// `CompanySignedUp` off skilj's REST event feed, calls skilj's own
+/// `createBoundedContextFromTemplate` GraphQL mutation (superadmin-gated
+/// - see `tests/multi_tenant_provisioning.rs`, which proves this exact
+/// mechanism first) to stamp a brand-new tenant from this `helpdesk`
+/// context as the template, then submits this command to make the
+/// result durable - the same "I/O happens outside decide(), a pure
+/// command records the outcome" split `ScheduleCompanyTrialConversion`'s
+/// own mocked `PaymentGateway.charge` uses, just with a real skilj call
+/// in place of a mock.
+///
+/// This is one company's tenant coming into real existence, not a
+/// no-op: `provisioner`'s own doc comment and this crate's `README.md`
+/// are explicit that Ticket commands/queries for that company still run
+/// against this shared context, not the tenant just created for it -
+/// promoting those too needs `CreateTicket` et al.'s own `company_status`
+/// read (currently one same-context DCB query) to reach across two
+/// bounded contexts instead, which is real cross-context query design
+/// work this pass doesn't do.
+///
+/// Idempotent by construction, same shape as `EscalateTicket`'s own
+/// `already_escalated` guard: a redelivered `CompanySignedUp` (the REST
+/// feed's own accepted "occasional missed/redelivered events" tradeoff -
+/// see `specs/skilj-helpdesk.allium`'s resolved alerting design note,
+/// which `provisioner.rs` accepts for the identical reason) would
+/// otherwise record two conflicting tenant names for one company.
+#[auto_register(BOUNDED_CONTEXT)]
+impl CommandType for RecordCompanyTenant {
+    type Payload = RecordCompanyTenantPayload;
+    type Event = HelpdeskEvent;
+    const NAME: &'static str = "RecordCompanyTenant";
+    fn tag_mappings() -> Vec<TagMapping> {
+        company_tag()
+    }
+    fn rest_trigger_allowed() -> bool {
+        true
+    }
+    fn decide(payload: &Self::Payload, matching_events: &[Self::Event]) -> CommandDecision {
+        if company_status(matching_events, &payload.company_id).is_none() {
+            return CommandDecision::Rejected {
+                reason: format!("company {} hasn't signed up", payload.company_id),
+                kind: "company_not_found".into(),
+            };
+        }
+        if let Some(existing) = company_tenant(matching_events, &payload.company_id) {
+            return CommandDecision::Rejected {
+                reason: format!(
+                    "company {} already has tenant {existing:?} recorded",
+                    payload.company_id
+                ),
+                kind: "tenant_already_provisioned".into(),
+            };
+        }
+        CommandDecision::Accepted {
+            events: vec![EventSpec {
+                event_type: "CompanyTenantProvisioned".into(),
+                payload: serde_json::json!({
+                    "company_id": payload.company_id,
+                    "tenant_name": payload.tenant_name,
                 }),
             }],
         }
@@ -1824,6 +1953,7 @@ impl Projection for TicketSummary {
             HelpdeskEvent::CompanySignedUp(_)
             | HelpdeskEvent::CompanyActivated(_)
             | HelpdeskEvent::CompanyExpired(_)
+            | HelpdeskEvent::CompanyTenantProvisioned(_)
             // Deliberately absent from `consumed_event_types()` above
             // (see that event's own doc comment) - listed here only
             // because `keys`/`project` take `&HelpdeskEvent`
@@ -1853,6 +1983,7 @@ impl Projection for TicketSummary {
             HelpdeskEvent::CompanySignedUp(_)
             | HelpdeskEvent::CompanyActivated(_)
             | HelpdeskEvent::CompanyExpired(_)
+            | HelpdeskEvent::CompanyTenantProvisioned(_)
             | HelpdeskEvent::TicketInternalNoteAdded(_) => {}
             HelpdeskEvent::TicketCreated(p) => {
                 state.status = Some("open".into());
@@ -1977,6 +2108,7 @@ impl Projection for CompanyTicketList {
             HelpdeskEvent::CompanySignedUp(_)
             | HelpdeskEvent::CompanyActivated(_)
             | HelpdeskEvent::CompanyExpired(_)
+            | HelpdeskEvent::CompanyTenantProvisioned(_)
             // Deliberately absent from `consumed_event_types()` above -
             // see that event's own doc comment, and `TicketSummary::keys`'s
             // own identical comment for why the match still needs this
@@ -2010,6 +2142,7 @@ impl Projection for CompanyTicketList {
             HelpdeskEvent::CompanySignedUp(_)
             | HelpdeskEvent::CompanyActivated(_)
             | HelpdeskEvent::CompanyExpired(_)
+            | HelpdeskEvent::CompanyTenantProvisioned(_)
             | HelpdeskEvent::TicketInternalNoteAdded(_) => {}
             HelpdeskEvent::TicketCreated(p) => {
                 state.tickets.insert(
