@@ -67,8 +67,10 @@ use skilj_core::event_store::{BoundedContext, BoundedContextStatus};
 use skilj_core::shared::{generate_token_id, generate_token_secret};
 use skilj_helpdesk::demo_seed::{self, Rng, SeedAction, SeedState, DEMO_COMPANIES};
 use skilj_helpdesk::helpdesk::BOUNDED_CONTEXT;
+use skilj_helpdesk::routing::RoutingMode;
+use skilj_helpdesk::routing_guard::{self, GuardState};
 use std::collections::HashMap;
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 // --- CSAT metric - see run_csat_metrics_loop's own doc comment ---
@@ -447,6 +449,29 @@ async fn mint_command_tokens(
 /// installed, `TICKET_RATINGS` already records into a harmless no-op
 /// meter, but there is no reason to keep a poll loop and its own token
 /// alive for that.
+/// One pass of the tenant-access reconciler, on an interval.
+///
+/// Runs unconditionally, including while the cutover is off, because it
+/// is pure preparation: it makes a tenant's grants match the shared
+/// context whether or not anything is being routed there yet. Turning it
+/// off would only save a couple of index reads per company, and would
+/// mean the cutover itself starts from a cold cache - the one moment
+/// where a company's first routed command could arrive before its
+/// reconciler pass.
+///
+/// Interval is short-ish (5s, same as the CSAT loop) because the failure
+/// this guards against is a *rejected customer command*: a Role granted
+/// after provisioning is denied at the tenant until the next pass, and
+/// the window is user-visible. The cost when everything is already in
+/// sync is two indexed reads and a comparison per company per tick.
+async fn run_tenant_access_reconciler(pool: skilj_core::db::Pool, ops_role: Role) {
+    const POLL_INTERVAL: Duration = Duration::from_secs(5);
+    loop {
+        skilj_helpdesk::tenant_access::reconcile_all_tenants(&pool, &ops_role).await;
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
+}
+
 async fn run_csat_metrics_loop(client: &reqwest::Client, base_url: &str, token: &str) {
     const POLL_INTERVAL: Duration = Duration::from_secs(5);
     loop {
@@ -952,6 +977,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(70);
+    // Ticket-routing enforcement, in front of the GraphQL router only.
+    // The frontend resolves each company's tenant and names it; this
+    // refuses ticket traffic that names the shared `helpdesk` context
+    // instead, so a client that resolved no tenant - or one deliberately
+    // naming shared - can't split a company's history across two
+    // contexts. REST needs no equivalent: `skilj-rest` derives its
+    // destination from the command token rather than from a body field.
+    //
+    // A `from_fn_with_state` layer on the GraphQL router rather than on
+    // the merged `app`, so it cannot slow down or interfere with the
+    // REST surface or anything else merged in later. With the cutover
+    // off (the default) it short-circuits without buffering the body at
+    // all - see `routing_guard::enforce_graphql_routing`.
+    let routing_mode = routing_guard::mode_from_env();
+    let graphql = if routing_mode == RoutingMode::Tenant {
+        println!(
+            "\nticket routing is ON (TICKET_ROUTING=tenant): each company's Ticket traffic is \
+             served from that company's own tenant, and GraphQL traffic naming the shared \
+             {BOUNDED_CONTEXT:?} context for a company that has a tenant is refused. Company \
+             lifecycle traffic stays shared."
+        );
+        let guard_state = Arc::new(GuardState {
+            pool: pool.clone(),
+            mode: routing_mode,
+        });
+        graphql.layer(axum::middleware::from_fn_with_state(
+            guard_state,
+            routing_guard::enforce_graphql_routing,
+        ))
+    } else {
+        graphql
+    };
     let app = rest
         .merge(graphql)
         .layer(tower_http::cors::CorsLayer::permissive())
@@ -985,6 +1042,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let client = reqwest::Client::new();
         tokio::spawn(async move { run_csat_metrics_loop(&client, &base_url, &token).await });
     }
+
+    // Keep each company's access grants mirrored into its own tenant -
+    // `src/tenant_access.rs`'s own module doc comment for why this has to
+    // exist before any traffic is routed there (skilj-graphql's
+    // `submitCommand` authorizes against the caller's mapping on the
+    // *named* context, so a tenant with no grant simply rejects
+    // everything).
+    //
+    // Runs on an interval rather than once at startup because a Role's
+    // grant can be added or revoked long after its tenant was
+    // provisioned - `SignUpCompany` creates no Roles at all, so at
+    // provisioning time there is usually nothing yet to mirror, and the
+    // first real grant arrives afterwards.
+    let reconciler_pool = pool.clone();
+    let reconciler_role = role.clone();
+    tokio::spawn(
+        async move { run_tenant_access_reconciler(reconciler_pool, reconciler_role).await },
+    );
 
     // Optional fake traffic - see this file's own module doc comment.
     // Reuses the exact CommandTokens just minted/printed above, so this

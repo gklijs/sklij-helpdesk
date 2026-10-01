@@ -266,19 +266,74 @@ silently absent:
   are minted on demand through skilj's own `createCommandToken`, since
   no single token spans every tenant.
 
-  Still deferred, deliberately: **no Ticket command or query is actually
-  *routed* at a tenant yet** — every company's tickets still run in the
-  shared `helpdesk` context, so none of this is load-bearing in
-  production. Cutting over is the remaining step, and it's the point of
-  no return for existing companies' ticket history, which is also why the
-  per-tenant-vs-segment-sharding question (each tenant is its own
-  `bc_<name>` schema, so this trades sequence contention for
-  schema-count pressure) is worth settling *before* it. Also still open:
-  what `alerter.rs` watching *every* tenant's own event feed would even
-  mean, and the fact that `staff-lead`'s unrestricted (`scope: None`)
-  cross-company visibility only works while everything shares one
-  context — after a cutover it needs a mapping per tenant, and no single
-  query can span tenants.
+  Ticket traffic is now *routed* at tenants, end to end, with reads and
+  writes moving together:
+  - **Routing decision** (`src/routing.rs`): pure, unit-tested, opt-in
+    via `TICKET_ROUTING=tenant`. Ticket traffic follows a company into
+    its tenant; lifecycle commands never do; a company with no tenant
+    falls back to the shared context.
+  - **Access reconciliation** (`src/tenant_access.rs`, run on an
+    interval by `server.rs`): projects each company's *company-scoped*
+    `RoleAccessMapping`s from the shared context into its tenant, in both
+    directions — a grant added later appears, and a grant revoked on the
+    authority is revoked in the tenant too, so revoking someone actually
+    takes effect. Without this, `submitCommand` at a tenant is refused
+    `grant_not_active`, because it authorizes against the caller's
+    mapping on the *named* context and never consults the shared one.
+    `tests/tenant_access_reconciliation.rs` proves that end to end.
+  - **Client-side resolution** (`frontend/src/routing.rs`): the frontend
+    resolves `company_id -> tenant` once per session from the shared
+    `TenantDirectory` projection, and every ticket call uses it — the four
+    writes and both reads. Resolving once is the point: reads and writes
+    have to agree, or a dashboard reads empty from one context while its
+    tickets went to another. Starts as `Resolving`, and every ticket
+    action is gated on it, so a write can't slip out against an unknown
+    context.
+  - **Server-side enforcement** (`src/routing_guard.rs`, mounted on the
+    GraphQL router only when `TICKET_ROUTING=tenant`): the client half is
+    not trusted, because `skilj-graphql` takes `boundedContext` as a
+    caller-supplied argument. The guard *refuses* ticket traffic naming
+    the shared context for a company that has a tenant, rather than
+    rewriting it, with a `ticket_routing_error` code and a message that
+    says it is a routing error and not an authorization one (the caller
+    does hold a valid shared-context mapping). REST needs no equivalent —
+    `skilj-rest` derives its destination from the command token, so a REST
+    caller cannot name a context at all. `tests/ticket_routing_enforcement.rs`
+    proves the refusal, and equally that correctly-routed traffic,
+    lifecycle traffic, `TenantDirectory` itself, and a company with no
+    tenant all still pass.
+
+  Two deliberate properties of the guard, both tested:
+  - It **fails open** on a body it cannot parse. A guard that
+    intermittently refused valid traffic would be one people disable, and
+    authorisation still applies per context either way — evading the
+    extractor buys a misrouted write, never an unauthorised one.
+  - `TicketInternalNotes` and `TicketSummary` are keyed by `ticket_id`, so
+    a request for them names no company. They are refused rather than
+    guessed at, which means a company with no tenant can still file
+    tickets and read its company-keyed list, but not its ticket-keyed
+    notes until it is provisioned. Rewriting instead of refusing would
+    need a `ticket_id -> tenant` index that does not exist; the client
+    already knows its tenant, so it can name it.
+
+  Also fixed along the way, and worth calling out because it was silent:
+  the provisioner derived tenant names as `company-{company_id}`, but a
+  bounded context name must match `[a-z][a-z0-9_]{0,39}` and `company_id`
+  is caller-supplied and unvalidated. A company id with a dash, an
+  uppercase letter, or more than 32 characters produced a name skilj
+  rejected — the provisioner logged the failure and moved on, and that
+  company silently kept running in the shared context with no isolation
+  and no error. `routing::tenant_name_for` now derives a legal, collision-
+  resistant name instead; already-provisioned tenants are untouched
+  because nothing re-derives a recorded tenant's name.
+
+  Still open: what `alerter.rs` watching *every* tenant's own event feed
+  would even mean, and the fact that `staff-lead`'s unrestricted
+  (`scope: None`) cross-company visibility only works while everything
+  shares one context — after a cutover it needs a mapping per tenant, and
+  no single query can span tenants. The reconciler deliberately leaves
+  `scope: None` grants alone rather than quietly narrowing a
+  cross-company staff grant to one company.
 - **A backend-for-frontend / GraphQL schema beyond what's registered**
   — the frontend talks to skilj-graphql's own auto-generated schema
   directly; there's no hand-written GraphQL layer.
