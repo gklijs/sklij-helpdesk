@@ -235,8 +235,8 @@ silently absent:
 
 - **Real payment processing** — mocked on purpose; this is a showcase,
   not a billing product.
-- **Real tenant provisioning, Ticket routing still deferred** — the
-  spec calls for each company to be its own skilj tenant (bounded
+- **Ticket routing into tenants: the guard is solved, the cutover isn't**
+  — the spec calls for each company to be its own skilj tenant (bounded
   context), stamped from a template via
   `CreateBoundedContextFromTemplate`. That mechanism was first proven in
   isolation by `tests/multi_tenant_provisioning.rs` (stamps a real
@@ -244,20 +244,41 @@ silently absent:
   template, grants a role access to it in the same call, runs
   `SignUpCompany`/`CreateTicket` against it independently, and confirms
   the result never leaks into the shared context's own projection
-  state), and is now a real production side effect: `SignUpCompany`
-  emits `CompanySignedUp`, `src/bin/provisioner.rs` reacts to it by
-  calling `createBoundedContextFromTemplate` for real, and reports the
-  result back via `RecordCompanyTenant` so every company's own tenant is
-  durably recorded (`helpdesk.rs`'s own `company_tenant`). What's still
-  deferred: nothing yet routes Ticket commands or queries into the
-  tenant just created — every company's tickets still run in the shared
-  `helpdesk` context. That needs `CreateTicket` et al.'s own
-  `company_status` guard read (today one same-context DCB query) to
-  reach across two bounded contexts instead of one - real cross-context
-  query design work, not a follow-up detail - and, separately, what
-  `alerter.rs` watching *every* tenant's own event feed (or
-  `helpdesk.rs`'s deadline reactors registering against every tenant's
-  own bounded context) would even mean.
+  state), and is a real production side effect: `SignUpCompany` emits
+  `CompanySignedUp`, `src/bin/provisioner.rs` reacts to it by calling
+  `createBoundedContextFromTemplate` for real, and reports the result
+  back via `RecordCompanyTenant` so every company's own tenant is durably
+  recorded — now also queryable as a routing lookup, via the new
+  `TenantDirectory` projection.
+
+  The blocker that used to be listed here is resolved. `CreateTicket` et
+  al.'s `company_status` guard is a *same-context* DCB read, so a tenant
+  — whose own history never saw the company's signup — used to reject
+  every command `company_not_found`. `src/bin/lifecycle-replicator.rs`
+  now mirrors each company's lifecycle into its own tenant
+  (`RecordTenantLifecycle` -> `CompanyLifecycleMirrored`), which is what
+  those guards read; `tests/tenant_lifecycle_mirroring.rs` proves the
+  before/after against a real tenant. It does this the way it must: the
+  fan-out can't be a `CrossContextRoute` (a route's `Target` bounded
+  context is a compile-time const, and the route list is read once at
+  startup, so a route can name a context but never the set created at
+  runtime), so it runs in application code. Per-tenant `CommandToken`s
+  are minted on demand through skilj's own `createCommandToken`, since
+  no single token spans every tenant.
+
+  Still deferred, deliberately: **no Ticket command or query is actually
+  *routed* at a tenant yet** — every company's tickets still run in the
+  shared `helpdesk` context, so none of this is load-bearing in
+  production. Cutting over is the remaining step, and it's the point of
+  no return for existing companies' ticket history, which is also why the
+  per-tenant-vs-segment-sharding question (each tenant is its own
+  `bc_<name>` schema, so this trades sequence contention for
+  schema-count pressure) is worth settling *before* it. Also still open:
+  what `alerter.rs` watching *every* tenant's own event feed would even
+  mean, and the fact that `staff-lead`'s unrestricted (`scope: None`)
+  cross-company visibility only works while everything shares one
+  context — after a cutover it needs a mapping per tenant, and no single
+  query can span tenants.
 - **A backend-for-frontend / GraphQL schema beyond what's registered**
   — the frontend talks to skilj-graphql's own auto-generated schema
   directly; there's no hand-written GraphQL layer.

@@ -262,6 +262,19 @@ const ALERTER_EVENT_TYPES: &[&str] = &[
     "TicketsMerged",
 ];
 
+/// `src/bin/lifecycle-replicator.rs`'s own event types - the three
+/// company lifecycle facts it mirrors into each company's tenant, so a
+/// Ticket command routed there passes the same `company_status` guard it
+/// would pass in the shared context (see `helpdesk.rs`'s
+/// `CompanyLifecycleMirrored` doc comment for why that mirror is needed
+/// at all). Its own token set, one per event type, for the same
+/// "each consumer gets its own cursor" reason `PROVISIONER_EVENT_TYPES`
+/// above gives - three independent feeds, three independent read
+/// positions, and no ordering *between* them, which is exactly why
+/// `RecordTenantLifecycle`'s own guard has to refuse backwards
+/// transitions rather than relying on arrival order.
+const REPLICATOR_EVENT_TYPES: &[&str] = &["CompanySignedUp", "CompanyActivated", "CompanyExpired"];
+
 async fn shutdown_signal() {
     let ctrl_c = async {
         tokio::signal::ctrl_c()
@@ -772,6 +785,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let provisioner_event_tokens =
         mint_event_tokens(&pool, &mapping, BOUNDED_CONTEXT, PROVISIONER_EVENT_TYPES).await?;
 
+    println!("\nlifecycle-replicator's own event read tokens:");
+    let replicator_event_tokens =
+        mint_event_tokens(&pool, &mapping, BOUNDED_CONTEXT, REPLICATOR_EVENT_TYPES).await?;
+
     // Only if telemetry is actually configured - see
     // run_csat_metrics_loop's own doc comment for why a token and a
     // poll loop otherwise have nothing to record into.
@@ -866,6 +883,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
     println!("  cargo run --bin provisioner");
+
+    println!(
+        "\nto run the lifecycle-replicator against this server (mirrors each company's \
+         lifecycle into its own tenant, so ticket commands routed there pass the same \
+         company_status guard):"
+    );
+    println!("  export SKILJ_BASE_URL=http://localhost:{port}");
+    for event_type in REPLICATOR_EVENT_TYPES {
+        println!(
+            "  export {}_TOKEN={}",
+            event_type.to_uppercase(),
+            replicator_event_tokens[*event_type]
+        );
+    }
+    // Deliberately the *same* subject the provisioner was configured with
+    // below, and not the provisioner's role id: `createCommandToken`
+    // derives its authority from the caller's own RoleAccessMapping on
+    // the named context, and this binary only has one on each tenant if
+    // it authenticates as the identity that was granted it.
+    println!("  export REPLICATOR_SUPERADMIN_SUBJECT={external_subject}");
+    println!("  cargo run --bin lifecycle-replicator");
 
     println!(
         "\ntrial conversion/expiry and ticket auto-close run in-process now (skilj's own native \

@@ -13,22 +13,26 @@
 //! already keeps *that* binary out of `cargo test`.
 //!
 //! What's still open, deliberately left that way rather than glossed
-//! over (see `helpdesk.rs`'s own module doc comment and
-//! `RecordCompanyTenant`'s own doc comment for the same list from the
-//! production side):
+//! over (see `helpdesk.rs`'s own module doc comment and this crate's
+//! `README.md` for the same list from the production side):
 //!   - Nothing yet routes a `CreateTicket` (or any other Ticket command/
 //!     query) for a signed-up company into the tenant `provisioner.rs`
 //!     just provisioned for it - every company's tickets still run in
-//!     the shared `helpdesk` context. `CreateTicket` et al.'s own
-//!     `company_status` guard read is one same-context DCB query today;
-//!     making it reach across two bounded contexts instead is real
-//!     cross-context query design work, not a detail.
+//!     the shared `helpdesk` context. The guard read that used to make
+//!     that impossible (`company_status`, one same-context DCB query) is
+//!     now solvable - see `tests/tenant_lifecycle_mirroring.rs` and
+//!     `src/bin/lifecycle-replicator.rs` - but the cutover itself, and
+//!     its consequences for existing companies' ticket history, are
+//!     still ahead.
 //!   - `alerter.rs` reads *one* set of `EventReadToken`s today, each
 //!     scoped to one bounded context. Watching every tenant's own event
-//!     feed, or paging a lead the moment a *new* tenant is provisioned,
-//!     has no answer here: N tenants means N token sets, minted and
+//!     feed has no answer here: N tenants means N token sets, minted and
 //!     rotated somehow, which is a real design question of its own, not
-//!     a detail. The trial/auto-close deadline reactors
+//!     a detail. (`src/bin/lifecycle-replicator.rs` solves the same
+//!     problem for its own much narrower job - three event types, and
+//!     only ever writing - by minting a per-tenant `CommandToken` on
+//!     demand and caching it, which is a hint at one answer and not yet
+//!     a general one.) The trial/auto-close deadline reactors
 //!     (`helpdesk.rs`'s own `ScheduleDeadline`s) sidestep the token half
 //!     of this, reading through skilj's internal poller rather than a
 //!     minted `EventReadToken`, but registering a plugin trait per

@@ -12,15 +12,30 @@
 //! `src/bin/provisioner.rs` the reactor that calls skilj's own
 //! `CreateBoundedContextFromTemplate` and reports back), proven first as
 //! a standalone mechanism in `tests/multi_tenant_provisioning.rs`, now a
-//! real production side effect of every signup. What's still deferred:
-//! the new tenant is provisioned and recorded, but Ticket commands
-//!/queries for that company still run against this shared context, not
-//! the tenant just created for it - routing Ticket traffic into
-//! per-company tenants needs Company's own guard reads
-//! (`company_status` below, read by `CreateTicket` et al. via a single
-//! same-context DCB query) to work across two bounded contexts instead
-//! of one, which is real cross-context query work, not a follow-up
-//! detail - see `RecordCompanyTenant`'s own doc comment.
+//! real production side effect of every signup.
+//!
+//! The cross-context guard read that used to block routing Ticket
+//! traffic into those tenants is now solved too, and how is worth
+//! recording because the obvious answers don't work: `company_status`
+//! below is a *same-context* DCB query, so a tenant cannot simply ask
+//! the shared context what its company's status is, and skilj's own
+//! `CrossContextRoute` cannot fan one event out to a runtime-created set
+//! of contexts (a route's `Target` bounded context is a compile-time
+//! const, and the route list is read once at startup - see
+//! `CompanyLifecycleMirrored`'s own doc comment for the full
+//! reasoning). So the shared context stays the single authority for
+//! lifecycle, and `src/bin/lifecycle-replicator.rs` *mirrors* each
+//! company's status into its own tenant
+//! (`RecordTenantLifecycle`/`CompanyLifecycleMirrored`), which is what
+//! those guards then read. `company_status` folds both sources in one
+//! pass, so a mixed history resolves by recency with no special-casing.
+//!
+//! Still deferred: no Ticket command or query is actually *routed* at a
+//! tenant yet - every company's tickets still run in this shared
+//! context, so none of the above is load-bearing yet. Cutting over is
+//! the remaining step, and the open questions that come with it (per-
+//! tenant vs. segment sharding, `staff-lead`'s cross-company access
+//! after the split) are called out in this crate's `README.md`.
 //!
 //! Every id (`company_id`, `ticket_id`) is caller-supplied, same
 //! convention as `skilj-demo`'s own `account_id`/`course_id` - never
@@ -64,6 +79,19 @@ pub const BOUNDED_CONTEXT: &str = "helpdesk";
 /// to one can't silently desync from the others and reopen exactly one
 /// of the two gates while the other still looks closed.
 pub const STAFF_TEAM: &str = "staff";
+
+/// `RecordTenantLifecycle::NAME`, as a plain `const` rather than reached
+/// for through the trait.
+///
+/// Only `src/bin/lifecycle-replicator.rs`'s own GraphQL token mint needs
+/// the name as a *string* (a `CommandToken` is minted by type name, not
+/// by Rust type), and it reaches this over a process boundary where
+/// `<RecordTenantLifecycle as CommandType>::NAME` can't be written
+/// without importing the trait there. One place the literal lives, so
+/// the mint can't drift from the registration the way a second inline
+/// `"RecordTenantLifecycle"` in that binary could - the same reasoning
+/// `STAFF_TEAM` above exists for.
+pub const RECORD_TENANT_LIFECYCLE_COMMAND: &str = "RecordTenantLifecycle";
 
 fn company_tag() -> Vec<TagMapping> {
     vec![TagMapping {
@@ -182,6 +210,88 @@ pub struct CompanyExpired;
 impl EventType for CompanyExpired {
     type Payload = CompanyExpiredPayload;
     const NAME: &'static str = "CompanyExpired";
+    fn tag_mappings() -> Vec<TagMapping> {
+        company_tag()
+    }
+    /// `src/bin/lifecycle-replicator.rs` reads this to mirror a
+    /// company's `trialing -> expired` transition into its own tenant -
+    /// see `CompanySignedUp::event_read_allowed`'s own doc comment for
+    /// why the override exists at all.
+    fn event_read_allowed() -> bool {
+        true
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct CompanyLifecycleMirroredPayload {
+    pub company_id: String,
+    /// `CompanyStatus` needs the serde/schemars derives `TicketPriority`
+    /// above already carries (and `rename_all = "snake_case"`, so the
+    /// wire values are `"trialing"`/`"active"`/`"expired"` rather than
+    /// Rust's default PascalCase) - this payload is what makes it a
+    /// value that can cross a process boundary at all. Before this pass
+    /// `CompanyStatus` was a pure in-process `decide()` fold result and
+    /// needed no derives; that stopped being true the moment a tenant's
+    /// own history has to record one.
+    pub status: CompanyStatus,
+    /// The name of the shared-context event this fact was derived from
+    /// (`"CompanySignedUp"`/`"CompanyActivated"`/`"CompanyExpired"`),
+    /// recorded rather than inferred so an operator reading a tenant's
+    /// own event log can tell a replayed lifecycle fact from a locally
+    /// originated one. Never a routing input - `company_status` below
+    /// folds `status` only, so this field is provenance, not behaviour.
+    pub source_event_type: String,
+}
+
+pub struct CompanyLifecycleMirrored;
+
+/// A company's lifecycle state, **mirrored** into its own tenant - not
+/// a lifecycle transition that happened there.
+///
+/// **Why this event exists at all.** `CreateTicket` and every other
+/// Ticket command opens with a `company_status` guard read, and that
+/// read is one *same-context* DCB query: skilj hands `decide()` only
+/// the events carrying the command's own tags, read from that bounded
+/// context's own `bc_<name>` schema. A tenant's own history therefore
+/// contains nothing about its company's lifecycle, because signup
+/// happens in the shared `helpdesk` context, so a `CreateTicket` routed
+/// at a tenant would be rejected `company_not_found` for a company that
+/// demonstrably exists.
+///
+/// **The alternative, and why it isn't this.** skilj's own
+/// `CrossContextRoute` cannot express "fan this one event out to every
+/// tenant": `Target: CommandType` is a single type whose
+/// `BOUNDED_CONTEXT` is a compile-time const
+/// (`skilj_core::plugin::CrossContextRoute`'s own doc comment), and the
+/// background route loop reads its route list *once at startup*
+/// (`skilj::Skilj`'s `cross_context_routes` loop), with no runtime
+/// registration surface for a newly-created tenant. Deadlines have the
+/// dynamic fan-out `routes` lack (`deadline_fire_tick` re-lists bounded
+/// contexts every tick), but no `ScheduleDeadline` fires off another
+/// bounded context's events either - both source types are static consts
+/// too.
+///
+/// So the fan-out has to happen in application code, which is what
+/// `src/bin/lifecycle-replicator.rs` is: it reads lifecycle events off
+/// the REST event feed and submits `RecordTenantLifecycle` below into
+/// the right tenant, following the same "I/O happens outside `decide()`
+/// in its own binary reacting to the event feed" split
+/// `provisioner.rs`'s own module doc comment describes for tenant
+/// creation. This event is what such a submission commits.
+///
+/// **Why it is safe to trust.** It is not a general "write anything you
+/// like into a tenant" door: `RecordTenantLifecycle::decide` below
+/// accepts only the three real lifecycle states, and (more importantly)
+/// the *shared* `helpdesk` context stays the single authority for
+/// lifecycle transitions - nothing in a tenant can move a company
+/// between states on its own, so a compromised or buggy tenant client
+/// can at worst make its own (already-authoritative-shared) view stale,
+/// which `RecordTenantLifecycle`'s own guard below bounds to "never
+/// regress to an earlier state".
+#[auto_register(BOUNDED_CONTEXT)]
+impl EventType for CompanyLifecycleMirrored {
+    type Payload = CompanyLifecycleMirroredPayload;
+    const NAME: &'static str = "CompanyLifecycleMirrored";
     fn tag_mappings() -> Vec<TagMapping> {
         company_tag()
     }
@@ -558,6 +668,7 @@ pub enum HelpdeskEvent {
     CompanyActivated(CompanyActivatedPayload),
     CompanyExpired(CompanyExpiredPayload),
     CompanyTenantProvisioned(CompanyTenantProvisionedPayload),
+    CompanyLifecycleMirrored(CompanyLifecycleMirroredPayload),
     TicketCreated(TicketCreatedPayload),
     TicketAssigned(TicketAssignedPayload),
     TicketResolved(TicketResolvedPayload),
@@ -585,6 +696,9 @@ impl BoundedContextEvent for HelpdeskEvent {
             }
             "CompanyTenantProvisioned" => Some(
                 serde_json::from_str(&event.payload).map(HelpdeskEvent::CompanyTenantProvisioned),
+            ),
+            "CompanyLifecycleMirrored" => Some(
+                serde_json::from_str(&event.payload).map(HelpdeskEvent::CompanyLifecycleMirrored),
             ),
             "TicketCreated" => {
                 Some(serde_json::from_str(&event.payload).map(HelpdeskEvent::TicketCreated))
@@ -699,7 +813,8 @@ fn escalate_priority(priority: TicketPriority) -> TicketPriority {
 }
 
 /// `specs/skilj-helpdesk.allium`'s `Company.status`, in full.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
 pub enum CompanyStatus {
     Trialing,
     Active,
@@ -709,6 +824,18 @@ pub enum CompanyStatus {
 /// Folds this company's own status - same technique as `ticket_status`
 /// above. `None` means the company doesn't exist (no `CompanySignedUp`
 /// found).
+///
+/// **Two sources, one answer.** In the shared `helpdesk` context the
+/// status comes from the real `CompanySignedUp`/`CompanyActivated`/
+/// `CompanyExpired` events. In a tenant it comes from
+/// `CompanyLifecycleMirrored` instead, because a tenant's own history
+/// holds none of the three - see that event's own doc comment for why
+/// the mirror exists. Both are folded here, in the same pass, in stored
+/// sequence order, so a mixed history (a tenant that also happened to
+/// sign the company up locally, as `tests/multi_tenant_provisioning.rs`
+/// does) resolves by recency exactly the way a single-source history
+/// would - no special-casing, no "prefer the mirror" branch to get
+/// wrong.
 fn company_status(matching_events: &[HelpdeskEvent], company_id: &str) -> Option<CompanyStatus> {
     let mut status = None;
     for event in matching_events {
@@ -721,6 +848,15 @@ fn company_status(matching_events: &[HelpdeskEvent], company_id: &str) -> Option
             }
             HelpdeskEvent::CompanyExpired(p) if p.company_id == company_id => {
                 status = Some(CompanyStatus::Expired);
+            }
+            // The mirror, folded identically to the event it stands in
+            // for. Deliberately *not* matched on `source_event_type`:
+            // that field is provenance for a human reading the log, and
+            // trusting it here would mean a payload that disagrees with
+            // its own `status` field silently decides a Ticket command's
+            // guard. `status` is the single field this reads.
+            HelpdeskEvent::CompanyLifecycleMirrored(p) if p.company_id == company_id => {
+                status = Some(p.status);
             }
             _ => {}
         }
@@ -833,11 +969,13 @@ pub struct RecordCompanyTenant;
 /// This is one company's tenant coming into real existence, not a
 /// no-op: `provisioner`'s own doc comment and this crate's `README.md`
 /// are explicit that Ticket commands/queries for that company still run
-/// against this shared context, not the tenant just created for it -
-/// promoting those too needs `CreateTicket` et al.'s own `company_status`
-/// read (currently one same-context DCB query) to reach across two
-/// bounded contexts instead, which is real cross-context query design
-/// work this pass doesn't do.
+/// against this shared context, not the tenant just created for it.
+/// The `company_status` read those commands' guards depend on used to be
+/// the reason that couldn't change; it no longer is, and the mechanism
+/// is `CompanyLifecycleMirrored` above plus
+/// `src/bin/lifecycle-replicator.rs`. The cutover itself - actually
+/// routing those commands - is still not done, and is called out in this
+/// crate's `README.md`.
 ///
 /// Idempotent by construction, same shape as `EscalateTicket`'s own
 /// `already_escalated` guard: a redelivered `CompanySignedUp` (the REST
@@ -881,6 +1019,127 @@ impl CommandType for RecordCompanyTenant {
                 }),
             }],
         }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct RecordTenantLifecyclePayload {
+    pub company_id: String,
+    pub status: CompanyStatus,
+    /// See `CompanyLifecycleMirroredPayload::source_event_type` - the
+    /// same provenance string, carried through untouched.
+    pub source_event_type: String,
+}
+
+pub struct RecordTenantLifecycle;
+
+/// Writes a `CompanyLifecycleMirrored` fact into **this** bounded
+/// context's own history - the write half of
+/// `CompanyLifecycleMirrored`'s doc comment above, submitted by
+/// `src/bin/lifecycle-replicator.rs` into the tenant named by
+/// `RecordCompanyTenant`'s own recorded mapping.
+///
+/// **Not a lifecycle transition, and deliberately unidirectional.** The
+/// shared `helpdesk` context remains the only place a company's status
+/// actually changes; this command cannot move one, it can only record
+/// what the shared context already decided. That asymmetry is the whole
+/// safety argument, and it is why the guard below rejects a regression
+/// rather than trying to validate a transition table of its own: a
+/// tenant client that can only ever write the state it was last told,
+/// and can never move backwards, cannot disagree with the authority in
+/// a way that widens access.
+///
+/// **Why `status` is taken as already-resolved, not recomputed.** The
+/// replicator derives it from the shared event's *type*
+/// (`CompanySignedUp` -> `Trialing`), and this command trusts that
+/// derivation rather than re-deriving it from a source event it cannot
+/// read - the tenant has no copy of the shared event to re-read. The
+/// compensating control is not a re-derivation but the caller shape:
+/// this is a `rest_trigger_allowed` command reachable only with a
+/// `CommandToken` minted against *this* tenant, which in this
+/// deployment only `lifecycle-replicator.rs` (and tests) hold - see
+/// `server.rs`'s own doc comment on how those tokens are minted.
+#[auto_register(BOUNDED_CONTEXT)]
+impl CommandType for RecordTenantLifecycle {
+    type Payload = RecordTenantLifecyclePayload;
+    type Event = HelpdeskEvent;
+    const NAME: &'static str = RECORD_TENANT_LIFECYCLE_COMMAND;
+    fn tag_mappings() -> Vec<TagMapping> {
+        company_tag()
+    }
+    fn rest_trigger_allowed() -> bool {
+        true
+    }
+    fn decide(payload: &Self::Payload, matching_events: &[Self::Event]) -> CommandDecision {
+        // The shared context is authoritative, but a tenant's own mirror
+        // history is not *ordered* by anything the shared context
+        // guarantees: the replicator reads three separate REST event
+        // feeds (`CompanySignedUp`/`CompanyActivated`/`CompanyExpired`,
+        // each its own `EventReadToken` and therefore its own cursor), so
+        // a company that converts and expires close together can deliver
+        // `Expired` before `Activated`. Folding by sequence alone would
+        // then leave the tenant permanently reporting the older state.
+        //
+        // So rank the states and refuse to move backwards, which makes
+        // the fold order-independent for every ordering the three feeds
+        // can actually produce. `Active` and `Expired` are both
+        // terminal-ish ranks above `Trialing`, and `Active` outranks
+        // `Expired` only because `ReactivateCompany`'s own
+        // `expired -> active` transition makes "active" the later real
+        // outcome of that pair; a company that genuinely expires *after*
+        // activating is not a reachable sequence (the trial deadline is
+        // cancelled on conversion - see `ScheduleCompanyTrialConversion`).
+        let current = company_status(matching_events, &payload.company_id);
+        if let Some(current) = current {
+            if current == payload.status {
+                return CommandDecision::Rejected {
+                    reason: format!(
+                        "company {} is already mirrored as {:?}",
+                        payload.company_id, payload.status
+                    ),
+                    // Idempotency, same shape as `EscalateTicket`'s own
+                    // `already_escalated` guard: the REST feed's
+                    // `mode=auto` cursor can redeliver on a crash
+                    // mid-tick (skilj-rest's own architecture docs §7.4),
+                    // and `lifecycle-replicator.rs` logs a rejection and
+                    // moves on rather than treating it as a failure.
+                    kind: "lifecycle_already_mirrored".into(),
+                };
+            }
+            if lifecycle_rank(payload.status) < lifecycle_rank(current) {
+                return CommandDecision::Rejected {
+                    reason: format!(
+                        "refusing to mirror company {} backwards from {:?} to {:?}",
+                        payload.company_id, current, payload.status
+                    ),
+                    kind: "lifecycle_regression".into(),
+                };
+            }
+        }
+        CommandDecision::Accepted {
+            events: vec![EventSpec {
+                event_type: "CompanyLifecycleMirrored".into(),
+                payload: serde_json::json!({
+                    "company_id": payload.company_id,
+                    "status": payload.status,
+                    "source_event_type": payload.source_event_type,
+                }),
+            }],
+        }
+    }
+}
+
+/// Total order over the lifecycle states, for
+/// `RecordTenantLifecycle`'s own regression guard above - deliberately
+/// hand-written rather than derived from the enum's declaration order,
+/// so reordering the variants can't silently change what "backwards"
+/// means. `Trialing` is first (everything starts there); `Active` above
+/// `Expired` for the reason given at the guard.
+fn lifecycle_rank(status: CompanyStatus) -> u8 {
+    match status {
+        CompanyStatus::Trialing => 0,
+        CompanyStatus::Expired => 1,
+        CompanyStatus::Active => 2,
     }
 }
 
@@ -1960,6 +2219,7 @@ impl Projection for TicketSummary {
             // unconditionally, so the match has to stay exhaustive over
             // every variant even ones this projection never actually
             // gets invoked for.
+            | HelpdeskEvent::CompanyLifecycleMirrored(_)
             | HelpdeskEvent::TicketInternalNoteAdded(_) => vec![],
             HelpdeskEvent::TicketCreated(p) => vec![p.ticket_id.clone()],
             HelpdeskEvent::TicketAssigned(p) => vec![p.ticket_id.clone()],
@@ -1984,6 +2244,12 @@ impl Projection for TicketSummary {
             | HelpdeskEvent::CompanyActivated(_)
             | HelpdeskEvent::CompanyExpired(_)
             | HelpdeskEvent::CompanyTenantProvisioned(_)
+            // A lifecycle mirror, not a ticket fact: this projection is
+            // keyed by `ticket_id` and a mirror carries no ticket at all,
+            // so there is nothing here for it to contribute. Listed
+            // alongside the other company-lifecycle events above for the
+            // same reason they are - exhaustiveness, not intent.
+            | HelpdeskEvent::CompanyLifecycleMirrored(_)
             | HelpdeskEvent::TicketInternalNoteAdded(_) => {}
             HelpdeskEvent::TicketCreated(p) => {
                 state.status = Some("open".into());
@@ -2113,6 +2379,17 @@ impl Projection for CompanyTicketList {
             // see that event's own doc comment, and `TicketSummary::keys`'s
             // own identical comment for why the match still needs this
             // arm regardless.
+            //
+            // Unlike `TicketSummary::keys`, this projection *could*
+            // return a meaningful key here (a mirror carries the
+            // `company_id` this projection is keyed by). It still must
+            // not: `keys` only decides which instances to touch, and
+            // `consumed_event_types()` is what decides whether `project`
+            // runs at all - returning a key for an unconsumed event
+            // would fold a lifecycle fact into a ticket list under the
+            // "an event lacking the tag leaves it untouched" contract
+            // this projection otherwise keeps.
+            | HelpdeskEvent::CompanyLifecycleMirrored(_)
             | HelpdeskEvent::TicketInternalNoteAdded(_) => vec![],
             HelpdeskEvent::TicketCreated(p) => vec![p.company_id.clone()],
             // Every ticket-lifecycle event past creation now carries its
@@ -2143,6 +2420,9 @@ impl Projection for CompanyTicketList {
             | HelpdeskEvent::CompanyActivated(_)
             | HelpdeskEvent::CompanyExpired(_)
             | HelpdeskEvent::CompanyTenantProvisioned(_)
+            // A lifecycle mirror carries no ticket - see
+            // `CompanyTicketList::keys`'s own comment on the same event.
+            | HelpdeskEvent::CompanyLifecycleMirrored(_)
             | HelpdeskEvent::TicketInternalNoteAdded(_) => {}
             HelpdeskEvent::TicketCreated(p) => {
                 state.tickets.insert(
@@ -2311,6 +2591,81 @@ impl Projection for TicketInternalNotes {
                 staff_id: p.staff_id.clone(),
                 note: p.note.clone(),
             });
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub struct TenantDirectoryState {
+    /// The tenant bounded context provisioned for this company, if
+    /// `RecordCompanyTenant` has committed one. `None` covers both
+    /// "hasn't signed up yet" and "signed up, provisioner hasn't reacted
+    /// yet" - the same conflation `company_tenant`'s own `Option` makes
+    /// on the event-history side, kept here so the two agree on what
+    /// absence means.
+    pub tenant_name: Option<String>,
+}
+
+/// Keyed by `company_id`.
+pub struct TenantDirectory;
+
+/// `company_id -> tenant_name`, as a queryable read model - the lookup
+/// every piece of per-tenant routing needs, and the reason this pass
+/// doesn't need a bespoke "resolve tenant" query bolted onto the API
+/// layer.
+///
+/// **Why a Projection and not a `company_tenant`-style history fold.**
+/// `company_tenant` above reads the answer off a command's
+/// `matching_events`, which is the right shape for a `decide()` guard
+/// but the wrong shape for a router: routing happens *before* any
+/// command is dispatched, so there is no `matching_events` to read. A
+/// caller would otherwise have to page the shared context's own event
+/// history itself, re-implementing tag filtering and sequence ordering
+/// that skilj already does correctly. This projection is that same
+/// answer, maintained incrementally and reachable through the existing
+/// `projection(boundedContext, name, key)` GraphQL query.
+///
+/// **`sync()`, deliberately.** Every other projection in this file is
+/// `sync()` and so is this one, which for this particular projection is
+/// a correctness requirement rather than a latency preference: a router
+/// that reads a `stale` (or absent) entry for a company whose tenant was
+/// provisioned seconds ago would route that company's first real command
+/// to the shared context while a later one went to the tenant - splitting
+/// one company's ticket history across two bounded contexts with nothing
+/// recording that it happened. `sync()` bounds that window to "not yet
+/// committed", which `RecordTenantLifecycle`'s own guard downstream is
+/// built to tolerate.
+///
+/// **Not an access-control boundary.** It carries no `OWNER_TAG_KEY`,
+/// deliberately: this is an infrastructure mapping, and unlike
+/// `CompanyTicketList`/`TicketSummary` there is no company data in it to
+/// protect - it says which bounded context holds a company, not anything
+/// about the company. It is readable by anyone with an Admin mapping on
+/// the shared `helpdesk` context, which is the same audience that can
+/// already call `listBoundedContexts` and mint tokens against any
+/// context (`createCommandToken`'s own resolver requires exactly that
+/// mapping), so gating it more tightly would add a check without closing
+/// a real path.
+#[auto_register(BOUNDED_CONTEXT)]
+impl Projection for TenantDirectory {
+    type State = TenantDirectoryState;
+    type Event = HelpdeskEvent;
+    const NAME: &'static str = "TenantDirectory";
+    fn consumed_event_types() -> Vec<&'static str> {
+        vec!["CompanyTenantProvisioned"]
+    }
+    fn sync() -> bool {
+        true
+    }
+    fn keys(event: &Self::Event) -> Vec<String> {
+        match event {
+            HelpdeskEvent::CompanyTenantProvisioned(p) => vec![p.company_id.clone()],
+            _ => vec![],
+        }
+    }
+    fn project(state: &mut Self::State, event: &Self::Event, _key: &str) {
+        if let HelpdeskEvent::CompanyTenantProvisioned(p) = event {
+            state.tenant_name = Some(p.tenant_name.clone());
         }
     }
 }
