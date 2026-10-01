@@ -126,6 +126,11 @@ fU919gnTKorSq3FdV6zGZ8s=
 ";
 const TEST_KID: &str = "test-key-1";
 const TEST_ISSUER: &str = "https://idp.example.test/";
+// The `aud` src/bin/server.rs's own local JWKS shortcut's IdpConfig
+// accepts (skilj 0.0.9 requires an explicit audience on every verified
+// JWT, docs/architecture.md §81) - the same value server.rs's own
+// TEST_AUDIENCE, so these self-signed superadmin JWTs still verify.
+const TEST_AUDIENCE: &str = "skilj-helpdesk-test-client";
 
 fn sign_jwt(subject: &str) -> String {
     let mut header = Header::new(jsonwebtoken::Algorithm::RS256);
@@ -133,6 +138,7 @@ fn sign_jwt(subject: &str) -> String {
     let claims = json!({
         "sub": subject,
         "iss": TEST_ISSUER,
+        "aud": TEST_AUDIENCE,
         "exp": (Utc::now() + chrono::Duration::hours(1)).timestamp(),
     });
     let key = EncodingKey::from_rsa_pem(TEST_PRIVATE_KEY_PEM.as_bytes())
@@ -173,7 +179,10 @@ async fn main() {
 
     let config = Config::from_env();
     let client = reqwest::Client::new();
-    println!("provisioner: polling {} every {POLL_INTERVAL:?}", config.base_url);
+    println!(
+        "provisioner: polling {} every {POLL_INTERVAL:?}",
+        config.base_url
+    );
 
     loop {
         if let Err(e) = tick(&client, &config).await {
@@ -198,10 +207,14 @@ async fn tick(client: &reqwest::Client, config: &Config) -> Result<(), reqwest::
         let tenant_name = format!("company-{company_id}");
         match provision_tenant(client, config, &tenant_name).await {
             Ok(()) => {
-                println!("provisioner: provisioned tenant {tenant_name:?} for company {company_id:?}");
+                println!(
+                    "provisioner: provisioned tenant {tenant_name:?} for company {company_id:?}"
+                );
             }
             Err(e) => {
-                eprintln!("provisioner: createBoundedContextFromTemplate for {company_id} failed: {e}");
+                eprintln!(
+                    "provisioner: createBoundedContextFromTemplate for {company_id} failed: {e}"
+                );
                 tracing::warn!(error = %e, company_id = %company_id, "provisioner: tenant creation failed");
                 continue;
             }
@@ -249,7 +262,11 @@ async fn consume(
         .await?
         .error_for_status()?;
     let body: ConsumeResponse = response.json().await?;
-    Ok(body.events.into_iter().map(|e| (e.payload, e.event_type)).collect())
+    Ok(body
+        .events
+        .into_iter()
+        .map(|e| (e.payload, e.event_type))
+        .collect())
 }
 
 /// `POST /v1/commands/trigger` - identical shape and "a rejection is
@@ -288,7 +305,11 @@ async fn submit_command(
 /// query document - see this file's own module doc comment on why that
 /// matters here specifically (`company_id`, and so `tenant_name`, is
 /// ultimately caller-controlled).
-async fn provision_tenant(client: &reqwest::Client, config: &Config, tenant_name: &str) -> Result<(), String> {
+async fn provision_tenant(
+    client: &reqwest::Client,
+    config: &Config,
+    tenant_name: &str,
+) -> Result<(), String> {
     let query = r#"
         mutation ProvisionTenant($template: String!, $name: String!, $roleId: ID!) {
             createBoundedContextFromTemplate(

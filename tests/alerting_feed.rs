@@ -7,7 +7,10 @@ mod support;
 
 use skilj_helpdesk::alerting::evaluate_ticket_created;
 use skilj_helpdesk::helpdesk::{TicketCreatedPayload, BOUNDED_CONTEXT};
-use support::{consume_auto, mint_command_token, mint_event_read_token, runtime, setup, test_db, trigger, unique_name};
+use support::{
+    consume_auto, mint_command_token, mint_event_read_token, runtime, setup, test_db, trigger,
+    unique_name,
+};
 
 async fn token(
     pool: &skilj_core::db::Pool,

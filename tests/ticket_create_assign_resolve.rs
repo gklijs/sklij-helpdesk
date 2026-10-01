@@ -6,7 +6,10 @@
 mod support;
 
 use skilj_helpdesk::helpdesk::{TicketSummaryState, BOUNDED_CONTEXT};
-use support::{accepted, mint_command_token, projection_state, rejection_kind, runtime, setup, test_db, trigger, unique_name};
+use support::{
+    accepted, mint_command_token, projection_state, rejection_kind, runtime, setup, test_db,
+    trigger, unique_name,
+};
 
 async fn token(
     pool: &skilj_core::db::Pool,

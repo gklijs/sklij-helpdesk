@@ -305,7 +305,10 @@ pub fn next_action(state: &SeedState, rng: &mut Rng) -> SeedAction {
     let provoke_rejection = rng.chance(1, 8);
 
     match (ticket.status, provoke_rejection) {
-        (SeedTicketStatus::Open, false) => SeedAction::AssignTicket { ticket_id, staff_id },
+        (SeedTicketStatus::Open, false) => SeedAction::AssignTicket {
+            ticket_id,
+            staff_id,
+        },
         (SeedTicketStatus::Open, true) => SeedAction::ResolveTicket { ticket_id },
 
         // 60% resolve, 20% ask the customer something, 20% just leave a
@@ -324,7 +327,10 @@ pub fn next_action(state: &SeedState, rng: &mut Rng) -> SeedAction {
             staff_id,
             note: INTERNAL_NOTES[rng.below(INTERNAL_NOTES.len())].to_string(),
         },
-        (SeedTicketStatus::InProgress, true) => SeedAction::AssignTicket { ticket_id, staff_id },
+        (SeedTicketStatus::InProgress, true) => SeedAction::AssignTicket {
+            ticket_id,
+            staff_id,
+        },
 
         (SeedTicketStatus::WaitingOnCustomer, false) => SeedAction::CustomerResponds {
             requester_id: ticket.requester_id.clone(),
@@ -351,11 +357,17 @@ pub fn next_action(state: &SeedState, rng: &mut Rng) -> SeedAction {
             description: "filed by skilj-helpdesk's own demo traffic generator".to_string(),
             priority: random_priority(rng),
         },
-        (SeedTicketStatus::Resolved, true) => SeedAction::AssignTicket { ticket_id, staff_id },
+        (SeedTicketStatus::Resolved, true) => SeedAction::AssignTicket {
+            ticket_id,
+            staff_id,
+        },
 
         // Merged is as terminal here as it is for real - nothing left to
         // advance, so provoke a (correctly-rejected) attempt either way.
-        (SeedTicketStatus::Merged, _) => SeedAction::AssignTicket { ticket_id, staff_id },
+        (SeedTicketStatus::Merged, _) => SeedAction::AssignTicket {
+            ticket_id,
+            staff_id,
+        },
     }
 }
 
@@ -409,7 +421,10 @@ pub fn apply_outcome(state: &mut SeedState, action: &SeedAction, accepted: bool)
                 status: SeedTicketStatus::Open,
             });
         }
-        SeedAction::AssignTicket { ticket_id, staff_id } => {
+        SeedAction::AssignTicket {
+            ticket_id,
+            staff_id,
+        } => {
             if let Some(t) = state.ticket_mut(ticket_id) {
                 t.status = SeedTicketStatus::InProgress;
                 t.staff_id = Some(staff_id.clone());
@@ -590,7 +605,10 @@ mod tests {
             },
             true,
         );
-        assert_eq!(state.tickets()[0].status, SeedTicketStatus::WaitingOnCustomer);
+        assert_eq!(
+            state.tickets()[0].status,
+            SeedTicketStatus::WaitingOnCustomer
+        );
 
         apply_outcome(
             &mut state,

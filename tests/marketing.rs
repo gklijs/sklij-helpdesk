@@ -66,7 +66,10 @@ async fn sign_up_company(
         serde_json::json!({ "company_id": company_id, "name": "Acme Corp", "contact_email": "support@acme.example" }),
     )
     .await;
-    assert!(accepted(&response), "company signup should be accepted: {response:?}");
+    assert!(
+        accepted(&response),
+        "company signup should be accepted: {response:?}"
+    );
     company_id
 }
 
@@ -90,7 +93,10 @@ async fn wait_for_routed_event(
             let Some(events) = consumed["events"].as_array() else {
                 return false;
             };
-            let Some(event) = events.iter().find(|e| e["payload"]["company_id"] == company_id) else {
+            let Some(event) = events
+                .iter()
+                .find(|e| e["payload"]["company_id"] == company_id)
+            else {
                 return false;
             };
             *found.lock().unwrap() = Some(event.clone());
@@ -117,11 +123,21 @@ fn expiring_a_trial_routes_a_trial_lapsed_record_to_marketing() {
         let router = skilj.rest_router();
         let company_id = sign_up_company(&pool, &mappings.helpdesk, &router).await;
 
-        let expire = mint_command_token(&pool, &mappings.helpdesk, HELPDESK, "ExpireCompanyTrial").await;
-        let response = trigger(&router, &expire, serde_json::json!({ "company_id": company_id })).await;
-        assert!(accepted(&response), "expiring a trialing company should succeed: {response:?}");
+        let expire =
+            mint_command_token(&pool, &mappings.helpdesk, HELPDESK, "ExpireCompanyTrial").await;
+        let response = trigger(
+            &router,
+            &expire,
+            serde_json::json!({ "company_id": company_id }),
+        )
+        .await;
+        assert!(
+            accepted(&response),
+            "expiring a trialing company should succeed: {response:?}"
+        );
 
-        let read_lapsed = mint_event_read_token(&pool, &mappings.marketing, MARKETING, "TrialLapsed").await;
+        let read_lapsed =
+            mint_event_read_token(&pool, &mappings.marketing, MARKETING, "TrialLapsed").await;
         let our_event = wait_for_routed_event(
             &router,
             &read_lapsed,
@@ -130,7 +146,10 @@ fn expiring_a_trial_routes_a_trial_lapsed_record_to_marketing() {
         )
         .await;
         assert_eq!(our_event["eventType"], "TrialLapsed");
-        assert!(our_event["payload"]["lapsed_at"].is_string(), "lapsed_at should be present: {our_event:?}");
+        assert!(
+            our_event["payload"]["lapsed_at"].is_string(),
+            "lapsed_at should be present: {our_event:?}"
+        );
     });
 }
 
@@ -147,13 +166,23 @@ fn either_route_into_active_produces_a_trial_converted_record() {
         }
         let (skilj, pool, mappings) = setup_all_contexts().await;
         let router = skilj.rest_router();
-        let read_converted = mint_event_read_token(&pool, &mappings.marketing, MARKETING, "TrialConverted").await;
+        let read_converted =
+            mint_event_read_token(&pool, &mappings.marketing, MARKETING, "TrialConverted").await;
 
         // trialing -> active, via ConvertCompanyTrial.
         let converted_company = sign_up_company(&pool, &mappings.helpdesk, &router).await;
-        let convert = mint_command_token(&pool, &mappings.helpdesk, HELPDESK, "ConvertCompanyTrial").await;
-        let response = trigger(&router, &convert, serde_json::json!({ "company_id": converted_company })).await;
-        assert!(accepted(&response), "converting a trialing company should succeed: {response:?}");
+        let convert =
+            mint_command_token(&pool, &mappings.helpdesk, HELPDESK, "ConvertCompanyTrial").await;
+        let response = trigger(
+            &router,
+            &convert,
+            serde_json::json!({ "company_id": converted_company }),
+        )
+        .await;
+        assert!(
+            accepted(&response),
+            "converting a trialing company should succeed: {response:?}"
+        );
 
         let our_event = wait_for_routed_event(
             &router,
@@ -163,15 +192,33 @@ fn either_route_into_active_produces_a_trial_converted_record() {
         )
         .await;
         assert_eq!(our_event["eventType"], "TrialConverted");
-        assert!(our_event["payload"]["converted_at"].is_string(), "converted_at should be present: {our_event:?}");
+        assert!(
+            our_event["payload"]["converted_at"].is_string(),
+            "converted_at should be present: {our_event:?}"
+        );
 
         // expired -> active, via ExpireCompanyTrial then ReactivateCompany.
         let reactivated_company = sign_up_company(&pool, &mappings.helpdesk, &router).await;
-        let expire = mint_command_token(&pool, &mappings.helpdesk, HELPDESK, "ExpireCompanyTrial").await;
-        trigger(&router, &expire, serde_json::json!({ "company_id": reactivated_company })).await;
-        let reactivate = mint_command_token(&pool, &mappings.helpdesk, HELPDESK, "ReactivateCompany").await;
-        let response = trigger(&router, &reactivate, serde_json::json!({ "company_id": reactivated_company })).await;
-        assert!(accepted(&response), "reactivating an expired company should succeed: {response:?}");
+        let expire =
+            mint_command_token(&pool, &mappings.helpdesk, HELPDESK, "ExpireCompanyTrial").await;
+        trigger(
+            &router,
+            &expire,
+            serde_json::json!({ "company_id": reactivated_company }),
+        )
+        .await;
+        let reactivate =
+            mint_command_token(&pool, &mappings.helpdesk, HELPDESK, "ReactivateCompany").await;
+        let response = trigger(
+            &router,
+            &reactivate,
+            serde_json::json!({ "company_id": reactivated_company }),
+        )
+        .await;
+        assert!(
+            accepted(&response),
+            "reactivating an expired company should succeed: {response:?}"
+        );
 
         let our_event = wait_for_routed_event(
             &router,
@@ -181,7 +228,10 @@ fn either_route_into_active_produces_a_trial_converted_record() {
         )
         .await;
         assert_eq!(our_event["eventType"], "TrialConverted");
-        assert!(our_event["payload"]["converted_at"].is_string(), "converted_at should be present: {our_event:?}");
+        assert!(
+            our_event["payload"]["converted_at"].is_string(),
+            "converted_at should be present: {our_event:?}"
+        );
     });
 }
 
@@ -203,8 +253,14 @@ fn activity_engagement_decline_routes_a_flagged_record_to_marketing() {
         let company_id = sign_up_company(&pool, &mappings.helpdesk, &router).await;
 
         let watcher = seed_superadmin(&pool).await;
-        let watcher_mapping =
-            seed_mapping_for(&pool, &watcher, ACTIVITY, skilj_core::access_control::AccessLevel::Admin, None).await;
+        let watcher_mapping = seed_mapping_for(
+            &pool,
+            &watcher,
+            ACTIVITY,
+            skilj_core::access_control::AccessLevel::Admin,
+            None,
+        )
+        .await;
         let record_decline =
             mint_command_token(&pool, &watcher_mapping, ACTIVITY, "RecordEngagementDecline").await;
         let flagged_at = Utc::now();
@@ -214,10 +270,18 @@ fn activity_engagement_decline_routes_a_flagged_record_to_marketing() {
             serde_json::json!({ "company_id": company_id, "flagged_at": flagged_at.to_rfc3339() }),
         )
         .await;
-        assert!(accepted(&response), "the engagement-decline flag itself should succeed in activity: {response:?}");
+        assert!(
+            accepted(&response),
+            "the engagement-decline flag itself should succeed in activity: {response:?}"
+        );
 
-        let read_flagged =
-            mint_event_read_token(&pool, &mappings.marketing, MARKETING, "EngagementDeclineFlagged").await;
+        let read_flagged = mint_event_read_token(
+            &pool,
+            &mappings.marketing,
+            MARKETING,
+            "EngagementDeclineFlagged",
+        )
+        .await;
         let our_event = wait_for_routed_event(
             &router,
             &read_flagged,

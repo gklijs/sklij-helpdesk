@@ -90,7 +90,11 @@ mod tests {
 
     #[test]
     fn non_urgent_ticket_creation_does_not_alert() {
-        for priority in [TicketPriority::Low, TicketPriority::Medium, TicketPriority::High] {
+        for priority in [
+            TicketPriority::Low,
+            TicketPriority::Medium,
+            TicketPriority::High,
+        ] {
             assert_eq!(evaluate_ticket_created(&payload(priority)), None);
         }
     }

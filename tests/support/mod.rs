@@ -12,7 +12,7 @@ use http_body_util::BodyExt;
 use jsonwebtoken::{EncodingKey, Header};
 use serde::de::DeserializeOwned;
 use serde_json::json;
-use skilj::{IdpConfig, Skilj, SigningAlgorithm};
+use skilj::{IdpConfig, SigningAlgorithm, Skilj};
 use skilj_core::access_control::{self, AccessLevel, Role, RoleAccessMapping, RoleStatus};
 use skilj_core::bootstrap::ContextCreator;
 use skilj_core::db::{self, Pool};
@@ -291,7 +291,9 @@ pub async fn seed_scoped_mapping(
     let bounded_context = db::get_bounded_context(pool, skilj_helpdesk::helpdesk::BOUNDED_CONTEXT)
         .await
         .unwrap()
-        .expect("the helpdesk bounded context must already exist - call setup()/setup_graphql() first");
+        .expect(
+            "the helpdesk bounded context must already exist - call setup()/setup_graphql() first",
+        );
     let mapping = RoleAccessMapping {
         role: role.clone(),
         bounded_context,
@@ -302,7 +304,9 @@ pub async fn seed_scoped_mapping(
         created_at: test_now(),
         revoked_at: None,
     };
-    db::insert_role_access_mapping(pool, &mapping).await.unwrap();
+    db::insert_role_access_mapping(pool, &mapping)
+        .await
+        .unwrap();
     mapping
 }
 
@@ -331,7 +335,9 @@ pub async fn seed_mapping_for(
         created_at: test_now(),
         revoked_at: None,
     };
-    db::insert_role_access_mapping(pool, &mapping).await.unwrap();
+    db::insert_role_access_mapping(pool, &mapping)
+        .await
+        .unwrap();
     mapping
 }
 
@@ -381,7 +387,14 @@ pub async fn setup_all_contexts() -> (Skilj, Pool, AllContextMappings) {
     ensure_activity_and_marketing_contexts(&pool).await;
 
     let role = seed_role(&pool, "cross-context-admin").await;
-    let helpdesk = seed_mapping_for(&pool, &role, skilj_helpdesk::helpdesk::BOUNDED_CONTEXT, AccessLevel::Admin, None).await;
+    let helpdesk = seed_mapping_for(
+        &pool,
+        &role,
+        skilj_helpdesk::helpdesk::BOUNDED_CONTEXT,
+        AccessLevel::Admin,
+        None,
+    )
+    .await;
     let activity = seed_mapping_for(&pool, &role, "activity", AccessLevel::Admin, None).await;
     let marketing = seed_mapping_for(&pool, &role, "marketing", AccessLevel::Admin, None).await;
 
@@ -512,7 +525,11 @@ pub async fn consume_auto(router: &axum::Router, credential: &str) -> serde_json
         .unwrap();
 
     let response = router.clone().oneshot(request).await.unwrap();
-    assert_eq!(response.status(), StatusCode::OK, "a well-formed consume request always renders 200");
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "a well-formed consume request always renders 200"
+    );
     let body = response.into_body().collect().await.unwrap().to_bytes();
     serde_json::from_slice(&body).unwrap()
 }
@@ -587,6 +604,11 @@ const TEST_MODULUS_N: &str = "zx1RbFB4ll0mxv0wooNXE0BzU-hZ6GKGbTBI7w4kAK7Di_3RaD
 const TEST_EXPONENT_E: &str = "AQAB";
 const TEST_KID: &str = "test-key-1";
 const TEST_ISSUER: &str = "https://idp.example.test/";
+// skilj 0.0.9 requires an explicit `aud` on every verified JWT
+// (IdpConfig::new's `audience`, docs/architecture.md §81), so sign_jwt's
+// own claims carry this and setup_graphql's own IdpConfig accepts it -
+// same shape src/bin/server.rs's own local shortcut uses.
+const TEST_AUDIENCE: &str = "skilj-helpdesk-test-client";
 
 pub async fn serve_jwks() -> String {
     let jwks = json!({
@@ -622,6 +644,7 @@ pub fn sign_jwt(subject: &str) -> String {
     let claims = json!({
         "sub": subject,
         "iss": TEST_ISSUER,
+        "aud": TEST_AUDIENCE,
         "exp": (Utc::now() + chrono::Duration::hours(1)).timestamp(),
     });
     let key = EncodingKey::from_rsa_pem(TEST_PRIVATE_KEY_PEM.as_bytes()).unwrap();
@@ -646,6 +669,7 @@ pub async fn setup_graphql() -> (Skilj, Pool, RoleAccessMapping, String) {
         .identity_provider(IdpConfig::new(
             jwks_url.parse().unwrap(),
             TEST_ISSUER,
+            TEST_AUDIENCE,
             SigningAlgorithm::Rs256,
         ))
         .build()
@@ -721,7 +745,9 @@ pub async fn serve_for_real(router: axum::Router) -> String {
         .expect("failed to bind an ephemeral port for a real test server");
     let base_url = format!("http://{}", listener.local_addr().unwrap());
     tokio::spawn(async move {
-        axum::serve(listener, router).await.expect("test server failed");
+        axum::serve(listener, router)
+            .await
+            .expect("test server failed");
     });
     base_url
 }
@@ -740,14 +766,23 @@ pub struct AlerterTokens {
     pub escalate_ticket: String,
 }
 
-pub async fn mint_alerter_tokens(pool: &Pool, mapping: &RoleAccessMapping, bounded_context: &str) -> AlerterTokens {
+pub async fn mint_alerter_tokens(
+    pool: &Pool,
+    mapping: &RoleAccessMapping,
+    bounded_context: &str,
+) -> AlerterTokens {
     AlerterTokens {
-        ticket_created: mint_event_read_token(pool, mapping, bounded_context, "TicketCreated").await,
-        ticket_resolved: mint_event_read_token(pool, mapping, bounded_context, "TicketResolved").await,
-        ticket_reopened: mint_event_read_token(pool, mapping, bounded_context, "TicketReopened").await,
+        ticket_created: mint_event_read_token(pool, mapping, bounded_context, "TicketCreated")
+            .await,
+        ticket_resolved: mint_event_read_token(pool, mapping, bounded_context, "TicketResolved")
+            .await,
+        ticket_reopened: mint_event_read_token(pool, mapping, bounded_context, "TicketReopened")
+            .await,
         ticket_closed: mint_event_read_token(pool, mapping, bounded_context, "TicketClosed").await,
-        ticket_escalated: mint_event_read_token(pool, mapping, bounded_context, "TicketEscalated").await,
-        tickets_merged: mint_event_read_token(pool, mapping, bounded_context, "TicketsMerged").await,
+        ticket_escalated: mint_event_read_token(pool, mapping, bounded_context, "TicketEscalated")
+            .await,
+        tickets_merged: mint_event_read_token(pool, mapping, bounded_context, "TicketsMerged")
+            .await,
         escalate_ticket: mint_command_token(pool, mapping, bounded_context, "EscalateTicket").await,
     }
 }

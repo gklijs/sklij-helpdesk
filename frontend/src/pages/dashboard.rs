@@ -15,7 +15,10 @@ use web_sys::window;
 /// `helpdesk.rs`. Shared between the "Notes" toggle's own first fetch
 /// and `AddInternalNote`'s own re-fetch-after-success, rather than
 /// duplicated inline in each.
-async fn fetch_internal_notes(token: &str, ticket_id: &str) -> Result<Vec<TicketInternalNote>, String> {
+async fn fetch_internal_notes(
+    token: &str,
+    ticket_id: &str,
+) -> Result<Vec<TicketInternalNote>, String> {
     let json = api::query_projection(
         token,
         config::BOUNDED_CONTEXT,
@@ -160,7 +163,9 @@ pub fn Dashboard() -> impl IntoView {
                 "description": description,
                 "priority": priority,
             });
-            match api::submit_command(&token, config::BOUNDED_CONTEXT, "CreateTicket", &payload).await {
+            match api::submit_command(&token, config::BOUNDED_CONTEXT, "CreateTicket", &payload)
+                .await
+            {
                 Ok(_) => set_refresh.update(|n| *n += 1),
                 Err(e) => set_status.set(format!("couldn't create ticket: {e}")),
             }
@@ -271,7 +276,14 @@ fn TicketRow(
         move |command_type_name: &'static str, payload: serde_json::Value| {
             let token = token.clone();
             spawn_local(async move {
-                match api::submit_command(&token, config::BOUNDED_CONTEXT, command_type_name, &payload).await {
+                match api::submit_command(
+                    &token,
+                    config::BOUNDED_CONTEXT,
+                    command_type_name,
+                    &payload,
+                )
+                .await
+                {
                     Ok(_) => set_refresh.update(|n| *n += 1),
                     Err(e) => set_status.set(format!("{command_type_name} failed: {e}")),
                 }
@@ -283,12 +295,22 @@ fn TicketRow(
         let ticket_id = ticket_id.clone();
         let my_sub = my_sub.clone();
         let run = run.clone();
-        move |_| run("AssignTicket", serde_json::json!({ "ticket_id": ticket_id, "staff_id": my_sub }))
+        move |_| {
+            run(
+                "AssignTicket",
+                serde_json::json!({ "ticket_id": ticket_id, "staff_id": my_sub }),
+            )
+        }
     };
     let resolve = {
         let ticket_id = ticket_id.clone();
         let run = run.clone();
-        move |_| run("ResolveTicket", serde_json::json!({ "ticket_id": ticket_id }))
+        move |_| {
+            run(
+                "ResolveTicket",
+                serde_json::json!({ "ticket_id": ticket_id }),
+            )
+        }
     };
     let close = {
         let ticket_id = ticket_id.clone();
@@ -298,7 +320,12 @@ fn TicketRow(
     let reopen = {
         let ticket_id = ticket_id.clone();
         let run = run.clone();
-        move |_| run("ReopenTicket", serde_json::json!({ "ticket_id": ticket_id }))
+        move |_| {
+            run(
+                "ReopenTicket",
+                serde_json::json!({ "ticket_id": ticket_id }),
+            )
+        }
     };
 
     // The one round of `StaffRequestsInfo`/`CustomerReplies` actually
@@ -405,10 +432,14 @@ fn TicketRow(
             let staff_id = my_sub.clone();
             let token = token.clone();
             spawn_local(async move {
-                let payload =
-                    serde_json::json!({ "ticket_id": ticket_id, "staff_id": staff_id, "note": text });
-                match api::submit_command(&token, config::BOUNDED_CONTEXT, "AddInternalNote", &payload)
-                    .await
+                let payload = serde_json::json!({ "ticket_id": ticket_id, "staff_id": staff_id, "note": text });
+                match api::submit_command(
+                    &token,
+                    config::BOUNDED_CONTEXT,
+                    "AddInternalNote",
+                    &payload,
+                )
+                .await
                 {
                     Ok(_) => match fetch_internal_notes(&token, &ticket_id).await {
                         Ok(list) => set_notes.set(list),

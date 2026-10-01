@@ -21,7 +21,9 @@
 mod support;
 
 use skilj_helpdesk::helpdesk::BOUNDED_CONTEXT;
-use support::{accepted, mint_command_token, rejection_kind, runtime, setup, test_db, trigger, unique_name};
+use support::{
+    accepted, mint_command_token, rejection_kind, runtime, setup, test_db, trigger, unique_name,
+};
 
 async fn token(
     pool: &skilj_core::db::Pool,
@@ -51,7 +53,10 @@ fn company_signup_succeeds() {
             }),
         )
         .await;
-        assert!(accepted(&response), "signup should be accepted: {response:?}");
+        assert!(
+            accepted(&response),
+            "signup should be accepted: {response:?}"
+        );
     });
 }
 
@@ -78,7 +83,10 @@ fn signing_up_the_same_company_twice_is_rejected() {
         assert!(accepted(&response));
 
         let response = trigger(&router, &sign_up, payload).await;
-        assert!(!accepted(&response), "second signup should be rejected: {response:?}");
+        assert!(
+            !accepted(&response),
+            "second signup should be rejected: {response:?}"
+        );
         assert_eq!(rejection_kind(&response), "already_signed_up");
     });
 }

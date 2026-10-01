@@ -44,7 +44,10 @@ async fn sign_up_company(
         serde_json::json!({ "company_id": company_id, "name": "Acme Corp", "contact_email": "support@acme.example" }),
     )
     .await;
-    assert!(accepted(&response), "company signup should be accepted: {response:?}");
+    assert!(
+        accepted(&response),
+        "company signup should be accepted: {response:?}"
+    );
     company_id
 }
 
@@ -52,7 +55,12 @@ async fn sign_up_company(
 /// in the spec: calendar-day granularity, caller-truncated, since Allium
 /// has no dedicated Date primitive.
 fn today() -> chrono::DateTime<Utc> {
-    Utc::now().trunc_subsecs(0).date_naive().and_hms_opt(0, 0, 0).unwrap().and_utc()
+    Utc::now()
+        .trunc_subsecs(0)
+        .date_naive()
+        .and_hms_opt(0, 0, 0)
+        .unwrap()
+        .and_utc()
 }
 
 /// `rule DailyActivityIsRecorded`'s success and rejection branches, via
@@ -72,7 +80,8 @@ fn customer_daily_activity_ping_is_recorded_and_dedupes_same_day() {
         let record_activity =
             mint_command_token(&pool, &mappings.activity, ACTIVITY, "RecordDailyActivity").await;
         let read_activity =
-            mint_event_read_token(&pool, &mappings.activity, ACTIVITY, "DailyActivityRecorded").await;
+            mint_event_read_token(&pool, &mappings.activity, ACTIVITY, "DailyActivityRecorded")
+                .await;
         let person_subject = unique_name("customer-subject");
         let day = today();
 
@@ -83,7 +92,10 @@ fn customer_daily_activity_ping_is_recorded_and_dedupes_same_day() {
             "day": day.to_rfc3339(),
         });
         let response = trigger(&router, &record_activity, payload.clone()).await;
-        assert!(accepted(&response), "a customer's first ping today should be accepted: {response:?}");
+        assert!(
+            accepted(&response),
+            "a customer's first ping today should be accepted: {response:?}"
+        );
 
         // entity-fields.DailyActivityRecorded / rule-entity-creation.DailyActivityIsRecorded:
         // the committed event carries exactly the fields `ensures` names.
@@ -91,8 +103,13 @@ fn customer_daily_activity_ping_is_recorded_and_dedupes_same_day() {
         let events = consumed["events"].as_array().expect("events array");
         let our_event = events
             .iter()
-            .find(|e| e["payload"]["company_id"] == company_id && e["payload"]["person_subject"] == person_subject)
-            .unwrap_or_else(|| panic!("our own DailyActivityRecorded should be on the feed: {consumed:?}"));
+            .find(|e| {
+                e["payload"]["company_id"] == company_id
+                    && e["payload"]["person_subject"] == person_subject
+            })
+            .unwrap_or_else(|| {
+                panic!("our own DailyActivityRecorded should be on the feed: {consumed:?}")
+            });
         assert_eq!(our_event["eventType"], "DailyActivityRecorded");
         assert_eq!(our_event["payload"]["company_id"], company_id);
         assert_eq!(our_event["payload"]["person_kind"], "customer");
@@ -103,7 +120,10 @@ fn customer_daily_activity_ping_is_recorded_and_dedupes_same_day() {
         // unconditionally - a second ping the same company+person+day is
         // rejected, not silently accepted again.
         let response = trigger(&router, &record_activity, payload).await;
-        assert!(!accepted(&response), "a duplicate same-day ping should be rejected: {response:?}");
+        assert!(
+            !accepted(&response),
+            "a duplicate same-day ping should be rejected: {response:?}"
+        );
         assert_eq!(rejection_kind(&response), "already_recorded_today");
     });
 }
@@ -125,7 +145,8 @@ fn staff_daily_activity_ping_uses_staff_person_kind() {
         let record_activity =
             mint_command_token(&pool, &mappings.activity, ACTIVITY, "RecordDailyActivity").await;
         let read_activity =
-            mint_event_read_token(&pool, &mappings.activity, ACTIVITY, "DailyActivityRecorded").await;
+            mint_event_read_token(&pool, &mappings.activity, ACTIVITY, "DailyActivityRecorded")
+                .await;
         let person_subject = unique_name("staff-subject");
         let day = today();
 
@@ -140,14 +161,19 @@ fn staff_daily_activity_ping_uses_staff_person_kind() {
             }),
         )
         .await;
-        assert!(accepted(&response), "a staff member's ping should be accepted: {response:?}");
+        assert!(
+            accepted(&response),
+            "a staff member's ping should be accepted: {response:?}"
+        );
 
         let consumed = consume_auto(&router, &read_activity).await;
         let events = consumed["events"].as_array().unwrap();
         let our_event = events
             .iter()
             .find(|e| e["payload"]["person_subject"] == person_subject)
-            .unwrap_or_else(|| panic!("our own DailyActivityRecorded should be on the feed: {consumed:?}"));
+            .unwrap_or_else(|| {
+                panic!("our own DailyActivityRecorded should be on the feed: {consumed:?}")
+            });
         assert_eq!(our_event["payload"]["company_id"], company_id);
         assert_eq!(our_event["payload"]["person_kind"], "staff");
         assert_eq!(our_event["payload"]["day"], day.to_rfc3339());
@@ -173,31 +199,51 @@ fn engagement_decline_is_flagged_once_and_rejected_on_repeat() {
         // helpdesk-scoped admin mapping `setup_all_contexts` already
         // grants isn't what the spec's actor declaration describes.
         let watcher = seed_superadmin(&pool).await;
-        let watcher_mapping =
-            seed_mapping_for(&pool, &watcher, ACTIVITY, skilj_core::access_control::AccessLevel::Admin, None).await;
+        let watcher_mapping = seed_mapping_for(
+            &pool,
+            &watcher,
+            ACTIVITY,
+            skilj_core::access_control::AccessLevel::Admin,
+            None,
+        )
+        .await;
         let record_decline =
             mint_command_token(&pool, &watcher_mapping, ACTIVITY, "RecordEngagementDecline").await;
-        let read_decline =
-            mint_event_read_token(&pool, &mappings.activity, ACTIVITY, "CompanyEngagementDeclined").await;
+        let read_decline = mint_event_read_token(
+            &pool,
+            &mappings.activity,
+            ACTIVITY,
+            "CompanyEngagementDeclined",
+        )
+        .await;
         let flagged_at = Utc::now().trunc_subsecs(6);
 
-        let payload = serde_json::json!({ "company_id": company_id, "flagged_at": flagged_at.to_rfc3339() });
+        let payload =
+            serde_json::json!({ "company_id": company_id, "flagged_at": flagged_at.to_rfc3339() });
         let response = trigger(&router, &record_decline, payload.clone()).await;
-        assert!(accepted(&response), "the first engagement-decline flag for this company should be accepted: {response:?}");
+        assert!(
+            accepted(&response),
+            "the first engagement-decline flag for this company should be accepted: {response:?}"
+        );
 
         let consumed = consume_auto(&router, &read_decline).await;
         let events = consumed["events"].as_array().unwrap();
         let our_event = events
             .iter()
             .find(|e| e["payload"]["company_id"] == company_id)
-            .unwrap_or_else(|| panic!("our own CompanyEngagementDeclined should be on the feed: {consumed:?}"));
+            .unwrap_or_else(|| {
+                panic!("our own CompanyEngagementDeclined should be on the feed: {consumed:?}")
+            });
         assert_eq!(our_event["eventType"], "CompanyEngagementDeclined");
         assert_eq!(our_event["payload"]["flagged_at"], flagged_at.to_rfc3339());
 
         // "fires once, not once per check while the condition holds" -
         // the spec's own confirmed note on the rule.
         let response = trigger(&router, &record_decline, payload).await;
-        assert!(!accepted(&response), "flagging the same company twice should be rejected: {response:?}");
+        assert!(
+            !accepted(&response),
+            "flagging the same company twice should be rejected: {response:?}"
+        );
         assert_eq!(rejection_kind(&response), "already_flagged");
     });
 }

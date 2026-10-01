@@ -36,7 +36,10 @@ mod support;
 
 use skilj_helpdesk::helpdesk::{TicketSummaryState, BOUNDED_CONTEXT};
 use std::time::Duration;
-use support::{accepted, mint_command_token, projection_state, rejection_kind, runtime, setup, test_db, trigger, unique_name, wait_until};
+use support::{
+    accepted, mint_command_token, projection_state, rejection_kind, runtime, setup, test_db,
+    trigger, unique_name, wait_until,
+};
 
 async fn token(
     pool: &skilj_core::db::Pool,

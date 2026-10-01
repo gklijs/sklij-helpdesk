@@ -115,7 +115,14 @@ pub fn store_session(id_token: &str) -> Result<Role, String> {
         .set_item(TOKEN_KEY, id_token)
         .map_err(|_| "localStorage.setItem failed".to_string())?;
     storage
-        .set_item(ROLE_KEY, if role == Role::Customer { "customer" } else { "staff" })
+        .set_item(
+            ROLE_KEY,
+            if role == Role::Customer {
+                "customer"
+            } else {
+                "staff"
+            },
+        )
         .map_err(|_| "localStorage.setItem failed".to_string())?;
     Ok(role)
 }

@@ -77,7 +77,9 @@ pub fn ThemeToggle() -> impl IntoView {
     // saw a label naming the mode they were already in, not the one a
     // click would switch to - one wasted click to reach the theme they
     // actually wanted, not a wrong theme, but wrong all the same).
-    if let Some(mql) = window().and_then(|w| w.match_media("(prefers-color-scheme: dark)").ok().flatten()) {
+    if let Some(mql) =
+        window().and_then(|w| w.match_media("(prefers-color-scheme: dark)").ok().flatten())
+    {
         let on_change = Closure::<dyn Fn()>::new(move || {
             set_theme.set(effective_theme().to_string());
         });

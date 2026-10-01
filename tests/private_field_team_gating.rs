@@ -40,8 +40,13 @@ use support::{
 };
 
 fn fetch_add_internal_note_commands() -> String {
+    // skilj 0.0.9's own shape (docs/architecture.md §126): `fetchCommands`
+    // returns `[QueriedCommand!]!` - `{ id, createdAt, payload }`, the
+    // payload still a JSON *string* - not the flat `[String!]!` of bare
+    // payload strings it used to, so the selection set below has to name
+    // the field it now lives under.
     format!(
-        r#"query {{ fetchCommands(boundedContext: {BOUNDED_CONTEXT:?}, commandTypes: ["AddInternalNote"]) }}"#
+        r#"query {{ fetchCommands(boundedContext: {BOUNDED_CONTEXT:?}, commandTypes: ["AddInternalNote"]) {{ payload }} }}"#
     )
 }
 
@@ -100,7 +105,7 @@ fn an_admin_role_off_the_staff_team_cannot_read_an_internal_notes_command_payloa
             .expect("fetchCommands returns a list");
         let payload: serde_json::Value = commands
             .iter()
-            .map(|c| serde_json::from_str::<serde_json::Value>(c.as_str().unwrap()).unwrap())
+            .map(|c| serde_json::from_str::<serde_json::Value>(c["payload"].as_str().unwrap()).unwrap())
             .find(|p| p["ticket_id"] == ticket)
             .expect("the AddInternalNote command just triggered must be in the list");
         assert!(
@@ -127,7 +132,7 @@ fn an_admin_role_off_the_staff_team_cannot_read_an_internal_notes_command_payloa
             .expect("fetchCommands returns a list");
         let staff_payload: serde_json::Value = staff_commands
             .iter()
-            .map(|c| serde_json::from_str::<serde_json::Value>(c.as_str().unwrap()).unwrap())
+            .map(|c| serde_json::from_str::<serde_json::Value>(c["payload"].as_str().unwrap()).unwrap())
             .find(|p| p["ticket_id"] == ticket)
             .expect("the AddInternalNote command must be in the list for a staff-team admin too");
         assert_eq!(

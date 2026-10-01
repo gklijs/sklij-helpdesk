@@ -136,6 +136,19 @@ const TEST_MODULUS_N: &str = "zx1RbFB4ll0mxv0wooNXE0BzU-hZ6GKGbTBI7w4kAK7Di_3RaD
 const TEST_EXPONENT_E: &str = "AQAB";
 const TEST_KID: &str = "test-key-1";
 const TEST_ISSUER: &str = "https://idp.example.test/";
+// skilj 0.0.9 requires an explicit `aud` on every verified JWT
+// (IdpConfig::new's `audience`, docs/architecture.md §81) - a token
+// issued to some *other* application at the same IdP must not be
+// accepted here as its user. The local JWKS shortcut's own signed JWTs
+// (sign_jwt below) therefore carry one, exactly like the real Dex-issued
+// ones this falls back from do; never a real secret, same reasoning as
+// the test keypair above.
+const TEST_AUDIENCE: &str = "skilj-helpdesk-test-client";
+// The Dex client id `dex/config.yaml`'s own staticClients registers -
+// the `aud` Dex puts in every token it issues for this deployment
+// (skilj's own §81: "usually its client id there"). Changing that id
+// there means changing it here too.
+const DEX_AUDIENCE: &str = "skilj-helpdesk-frontend";
 
 // --- real IdP demo identities - see this file's own module doc comment ---
 //
@@ -194,6 +207,7 @@ fn sign_jwt(subject: &str) -> String {
     let claims = json!({
         "sub": subject,
         "iss": TEST_ISSUER,
+        "aud": TEST_AUDIENCE,
         "exp": (Utc::now() + chrono::Duration::hours(1)).timestamp(),
     });
     let key = EncodingKey::from_rsa_pem(TEST_PRIVATE_KEY_PEM.as_bytes())
@@ -283,7 +297,10 @@ async fn ensure_bounded_context_and_grant(
     role: &Role,
     bounded_context_name: &str,
 ) -> Result<RoleAccessMapping, Box<dyn std::error::Error>> {
-    if db::get_bounded_context(pool, bounded_context_name).await?.is_none() {
+    if db::get_bounded_context(pool, bounded_context_name)
+        .await?
+        .is_none()
+    {
         db::insert_bounded_context(
             pool,
             &BoundedContext {
@@ -437,7 +454,11 @@ async fn run_csat_metrics_loop(client: &reqwest::Client, base_url: &str, token: 
 /// `src/bin/alerter.rs`'s own `consume` has, duplicated rather than
 /// shared for the same "no common library boundary worth introducing
 /// for one helper" reason that file's own doc comment gives.
-async fn consume_ticket_rated(client: &reqwest::Client, base_url: &str, token: &str) -> Result<Vec<u8>, reqwest::Error> {
+async fn consume_ticket_rated(
+    client: &reqwest::Client,
+    base_url: &str,
+    token: &str,
+) -> Result<Vec<u8>, reqwest::Error> {
     #[derive(serde::Deserialize)]
     struct ConsumeResponse {
         events: Vec<EventDto>,
@@ -499,11 +520,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(90);
-    let pool = db::connect_with(&database_url, db::PgPoolOptions::new().max_connections(db_max_connections))
-        .await?;
+    let pool = db::connect_with(
+        &database_url,
+        db::PgPoolOptions::new().max_connections(db_max_connections),
+    )
+    .await?;
     db::migrate(&pool).await?;
 
-    if db::get_bounded_context(&pool, BOUNDED_CONTEXT).await?.is_none() {
+    if db::get_bounded_context(&pool, BOUNDED_CONTEXT)
+        .await?
+        .is_none()
+    {
         db::insert_bounded_context(
             &pool,
             &BoundedContext {
@@ -574,27 +601,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // own doc comment); only the bounded context row and this grant are
     // this file's own job, the same two steps `helpdesk`'s own bootstrap
     // just did above.
-    let activity_mapping = ensure_bounded_context_and_grant(
-        &pool,
-        &role,
-        skilj_helpdesk::activity::BOUNDED_CONTEXT,
-    )
-    .await?;
-    let _marketing_mapping = ensure_bounded_context_and_grant(
-        &pool,
-        &role,
-        skilj_helpdesk::marketing::BOUNDED_CONTEXT,
-    )
-    .await?;
+    let activity_mapping =
+        ensure_bounded_context_and_grant(&pool, &role, skilj_helpdesk::activity::BOUNDED_CONTEXT)
+            .await?;
+    let _marketing_mapping =
+        ensure_bounded_context_and_grant(&pool, &role, skilj_helpdesk::marketing::BOUNDED_CONTEXT)
+            .await?;
 
     // Real IdP when OIDC_ISSUER_URL is set (a running Dex instance - see
     // this file's own module doc comment), the local JWKS/JWT shortcut
     // otherwise. Either way `IdpConfig` is what skilj-graphql actually
     // verifies every GraphQL request's JWT against.
     let oidc_issuer_url = std::env::var("OIDC_ISSUER_URL").ok();
-    let (issuer, jwks_url) = match &oidc_issuer_url {
-        Some(url) => (url.clone(), format!("{url}/keys")),
-        None => (TEST_ISSUER.to_string(), serve_local_jwks().await),
+    let (issuer, jwks_url, audience) = match &oidc_issuer_url {
+        Some(url) => (url.clone(), format!("{url}/keys"), DEX_AUDIENCE),
+        None => (
+            TEST_ISSUER.to_string(),
+            serve_local_jwks().await,
+            TEST_AUDIENCE,
+        ),
     };
 
     // The two demo identities the frontend's login page offers, seeded
@@ -708,13 +733,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .parse()
                 .unwrap_or_else(|e| panic!("{jwks_url:?} is not a well-formed URL: {e}")),
             issuer,
+            audience,
             SigningAlgorithm::Rs256,
         ))
         .build()
         .await?;
-    println!("server: reconciliation complete, registered {:?}", report.registered);
+    println!(
+        "server: reconciliation complete, registered {:?}",
+        report.registered
+    );
     if !report.skipped_no_access.is_empty() {
-        println!("server: reconciliation skipped (no access yet): {:?}", report.skipped_no_access);
+        println!(
+            "server: reconciliation skipped (no access yet): {:?}",
+            report.skipped_no_access
+        );
     }
 
     if let Some(url) = &oidc_issuer_url {
@@ -726,8 +758,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("(local JWKS shortcut in use - set OIDC_ISSUER_URL to a running Dex for a real login flow)");
     }
 
-    println!("\ncommand tokens (send as `authorization: Bearer <id>.<secret>` to /v1/commands/trigger):");
-    let command_tokens = mint_command_tokens(&pool, &mapping, BOUNDED_CONTEXT, COMMAND_TYPES).await?;
+    println!(
+        "\ncommand tokens (send as `authorization: Bearer <id>.<secret>` to /v1/commands/trigger):"
+    );
+    let command_tokens =
+        mint_command_tokens(&pool, &mapping, BOUNDED_CONTEXT, COMMAND_TYPES).await?;
 
     println!("\nalerter's own event read tokens:");
     let alerter_event_tokens =
@@ -781,13 +816,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // built - closes the loop between all three.
     println!("\nto run the alerter against this server:");
     println!("  export SKILJ_BASE_URL=http://localhost:{port}");
-    println!("  export TICKET_CREATED_TOKEN={}", alerter_event_tokens["TicketCreated"]);
-    println!("  export TICKET_RESOLVED_TOKEN={}", alerter_event_tokens["TicketResolved"]);
-    println!("  export TICKET_REOPENED_TOKEN={}", alerter_event_tokens["TicketReopened"]);
-    println!("  export TICKET_CLOSED_TOKEN={}", alerter_event_tokens["TicketClosed"]);
-    println!("  export TICKET_ESCALATED_TOKEN={}", alerter_event_tokens["TicketEscalated"]);
-    println!("  export TICKETS_MERGED_TOKEN={}", alerter_event_tokens["TicketsMerged"]);
-    println!("  export ESCALATE_TICKET_TOKEN={}", command_tokens["EscalateTicket"]);
+    println!(
+        "  export TICKET_CREATED_TOKEN={}",
+        alerter_event_tokens["TicketCreated"]
+    );
+    println!(
+        "  export TICKET_RESOLVED_TOKEN={}",
+        alerter_event_tokens["TicketResolved"]
+    );
+    println!(
+        "  export TICKET_REOPENED_TOKEN={}",
+        alerter_event_tokens["TicketReopened"]
+    );
+    println!(
+        "  export TICKET_CLOSED_TOKEN={}",
+        alerter_event_tokens["TicketClosed"]
+    );
+    println!(
+        "  export TICKET_ESCALATED_TOKEN={}",
+        alerter_event_tokens["TicketEscalated"]
+    );
+    println!(
+        "  export TICKETS_MERGED_TOKEN={}",
+        alerter_event_tokens["TicketsMerged"]
+    );
+    println!(
+        "  export ESCALATE_TICKET_TOKEN={}",
+        command_tokens["EscalateTicket"]
+    );
     println!("  cargo run --bin alerter");
 
     println!("\nto run the provisioner against this server:");
@@ -863,12 +919,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .layer(tower_http::cors::CorsLayer::permissive())
         .layer(
             tower::ServiceBuilder::new()
-                .layer(axum::error_handling::HandleErrorLayer::new(|_: tower::BoxError| async {
-                    (
-                        axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                        "overloaded - too many in-flight requests, try again shortly",
-                    )
-                }))
+                .layer(axum::error_handling::HandleErrorLayer::new(
+                    |_: tower::BoxError| async {
+                        (
+                            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                            "overloaded - too many in-flight requests, try again shortly",
+                        )
+                    },
+                ))
                 .load_shed()
                 .concurrency_limit(http_max_in_flight),
         );
@@ -928,10 +986,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // every `interval_ms` - a smoother, more realistic load
                 // shape (one steady stream) than `concurrency` synchronised
                 // bursts would be.
-                let stagger = Duration::from_millis(interval_ms * worker_index as u64 / concurrency as u64);
+                let stagger =
+                    Duration::from_millis(interval_ms * worker_index as u64 / concurrency as u64);
                 tokio::spawn(async move {
                     tokio::time::sleep(stagger).await;
-                    run_demo_seed_loop(worker_index, base_url, tokens, Duration::from_millis(interval_ms)).await;
+                    run_demo_seed_loop(
+                        worker_index,
+                        base_url,
+                        tokens,
+                        Duration::from_millis(interval_ms),
+                    )
+                    .await;
                 });
             }
         });
@@ -940,6 +1005,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await?;
+
+    // skilj 0.0.9's own graceful stop (docs/architecture.md §123):
+    // every background loop this process started - projection/snapshot
+    // catch-up, routes, the per-entity deadline reactors this server's
+    // own trial-conversion and ticket auto-close rules ride on, scheduled
+    // events, the new idempotency-key and resolved-deadline retention
+    // sweeps - finishes the tick it is in and stops, then the pool
+    // closes. Before this existed, dropping the process killed those
+    // loops mid-tick and left the pool to die with the connections
+    // (documented as "97 'request failed' lines ... server was torn down
+    // mid-request" in docs/load-test-report-2026-09-19.md's own step 4).
+    //
+    // Only safe once `axum::serve` above has returned: the routers share
+    // this pool, so a request still in flight would fail, and the pool
+    // can't close while a request holds a connection. Anything still busy
+    // at the timeout is aborted exactly like a crash, and recovers on the
+    // next start under its own idempotency keys.
+    let shutdown_report = skilj.shutdown(Duration::from_secs(10)).await;
+    println!(
+        "server: background loops stopped cleanly: {:?}; aborted at the timeout: {:?}; pool closed: {}",
+        shutdown_report.stopped, shutdown_report.aborted, shutdown_report.pool_closed
+    );
 
     if let Some(telemetry) = telemetry {
         telemetry.shutdown();
@@ -1003,8 +1090,13 @@ async fn run_demo_seed_loop(
         tokio::time::sleep(interval).await;
         let action = demo_seed::next_action(&state, &mut rng);
         let (command_type_name, payload) = command_and_payload(&action);
-        match trigger_command(&client, &base_url, &command_tokens[command_type_name], payload)
-            .await
+        match trigger_command(
+            &client,
+            &base_url,
+            &command_tokens[command_type_name],
+            payload,
+        )
+        .await
         {
             Ok(accepted) => {
                 demo_seed::apply_outcome(&mut state, &action, accepted);
@@ -1038,7 +1130,10 @@ fn command_and_payload(action: &SeedAction) -> (&'static str, serde_json::Value)
                 "priority": priority,
             }),
         ),
-        SeedAction::AssignTicket { ticket_id, staff_id } => (
+        SeedAction::AssignTicket {
+            ticket_id,
+            staff_id,
+        } => (
             "AssignTicket",
             serde_json::json!({ "ticket_id": ticket_id, "staff_id": staff_id }),
         ),

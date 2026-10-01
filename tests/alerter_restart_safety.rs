@@ -33,7 +33,10 @@ mod support;
 use skilj_helpdesk::helpdesk::{TicketSummaryState, BOUNDED_CONTEXT};
 use std::path::Path;
 use std::time::Duration;
-use support::{mint_alerter_tokens, mint_command_token, projection_state, runtime, serve_for_real, setup, spawn_alerter, test_db, trigger, unique_name, wait_until};
+use support::{
+    mint_alerter_tokens, mint_command_token, projection_state, runtime, serve_for_real, setup,
+    spawn_alerter, test_db, trigger, unique_name, wait_until,
+};
 
 fn checkpoint_tracks_ticket(state_file: &Path, ticket_id: &str) -> bool {
     let Ok(contents) = std::fs::read_to_string(state_file) else {

@@ -153,7 +153,9 @@ impl Config {
             escalate_ticket_token: required("ESCALATE_TICKET_TOKEN"),
             unhandled_alert_after: chrono::Duration::hours(hours),
             state_file,
-            slack_webhook_url: std::env::var("SLACK_WEBHOOK_URL").ok().filter(|s| !s.is_empty()),
+            slack_webhook_url: std::env::var("SLACK_WEBHOOK_URL")
+                .ok()
+                .filter(|s| !s.is_empty()),
         }
     }
 }
@@ -249,10 +251,16 @@ fn load_state(path: &std::path::Path) -> State {
 /// the next restart.
 fn save_state(path: &std::path::Path, state: &State) {
     let tmp = path.with_extension("json.tmp");
-    let write = std::fs::write(&tmp, serde_json::to_vec(state).expect("State always serializes"))
-        .and_then(|()| std::fs::rename(&tmp, path));
+    let write = std::fs::write(
+        &tmp,
+        serde_json::to_vec(state).expect("State always serializes"),
+    )
+    .and_then(|()| std::fs::rename(&tmp, path));
     if let Err(e) = write {
-        eprintln!("alerter: couldn't checkpoint state to {}: {e}", path.display());
+        eprintln!(
+            "alerter: couldn't checkpoint state to {}: {e}",
+            path.display()
+        );
     }
 }
 
@@ -269,7 +277,9 @@ async fn tick(
         match serde_json::from_value::<TicketCreatedPayload>(payload) {
             Ok(p) => {
                 state.created_at.insert(p.ticket_id.clone(), created_at);
-                state.company_id.insert(p.ticket_id.clone(), p.company_id.clone());
+                state
+                    .company_id
+                    .insert(p.ticket_id.clone(), p.company_id.clone());
                 state.unhandled.insert(p.ticket_id.clone());
                 if let Some(alert) = evaluate_ticket_created(&p) {
                     send_alert(client, config.slack_webhook_url.as_deref(), &alert).await;
@@ -280,14 +290,12 @@ async fn tick(
     }
 
     // --- track state for rule TicketBecomesOverdue ---
-    for (_, payload, _) in consume(client, &config.base_url, &config.ticket_resolved_token).await?
-    {
+    for (_, payload, _) in consume(client, &config.base_url, &config.ticket_resolved_token).await? {
         if let Some(ticket_id) = payload["ticket_id"].as_str() {
             state.unhandled.remove(ticket_id);
         }
     }
-    for (_, payload, _) in consume(client, &config.base_url, &config.ticket_reopened_token).await?
-    {
+    for (_, payload, _) in consume(client, &config.base_url, &config.ticket_reopened_token).await? {
         if let Some(ticket_id) = payload["ticket_id"].as_str() {
             state.unhandled.insert(ticket_id.to_string());
         }
@@ -335,7 +343,11 @@ async fn tick(
                     config.slack_webhook_url.as_deref(),
                     &skilj_helpdesk::alerting::Alert {
                         ticket_id: ticket_id.clone(),
-                        company_id: state.company_id.get(&ticket_id).cloned().unwrap_or_default(),
+                        company_id: state
+                            .company_id
+                            .get(&ticket_id)
+                            .cloned()
+                            .unwrap_or_default(),
                         reason: skilj_helpdesk::alerting::AlertReason::Overdue,
                     },
                 )
@@ -431,7 +443,11 @@ async fn submit_command(
 /// this binary back to console-only, never take the whole poll loop
 /// down (same "a failed checkpoint shouldn't stop `tick`" reasoning
 /// `save_state` already gets).
-async fn send_alert(client: &reqwest::Client, webhook_url: Option<&str>, alert: &skilj_helpdesk::alerting::Alert) {
+async fn send_alert(
+    client: &reqwest::Client,
+    webhook_url: Option<&str>,
+    alert: &skilj_helpdesk::alerting::Alert,
+) {
     println!(
         "ALERT [{:?}]: ticket {} (company {}) needs a lead's attention",
         alert.reason, alert.ticket_id, alert.company_id
@@ -487,5 +503,7 @@ async fn send_alert(client: &reqwest::Client, webhook_url: Option<&str>, alert: 
 /// lands in a `text` field - see `send_alert`'s own call site for why
 /// that matters here specifically.
 fn escape_slack_text(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }

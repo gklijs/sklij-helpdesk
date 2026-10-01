@@ -17,7 +17,11 @@ use chrono::{DateTime, Duration, Utc};
 /// since its own last customer-kind `DailyActivityRecorded` - see
 /// `specs/activity.allium`'s own resolved note on this rule (and why
 /// staff activity/helpdesk's own ticket activity don't count).
-pub fn is_quiet(last_customer_activity: DateTime<Utc>, now: DateTime<Utc>, quiet_after: Duration) -> bool {
+pub fn is_quiet(
+    last_customer_activity: DateTime<Utc>,
+    now: DateTime<Utc>,
+    quiet_after: Duration,
+) -> bool {
     last_customer_activity + quiet_after <= now
 }
 

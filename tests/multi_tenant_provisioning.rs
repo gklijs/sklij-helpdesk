@@ -48,8 +48,8 @@ mod support;
 
 use skilj_helpdesk::helpdesk::{TicketSummaryState, BOUNDED_CONTEXT};
 use support::{
-    accepted, graphql_request, mint_command_token, projection_state, runtime, seed_role, seed_superadmin, setup_graphql,
-    sign_jwt, test_db, trigger, unique_name,
+    accepted, graphql_request, mint_command_token, projection_state, runtime, seed_role,
+    seed_superadmin, setup_graphql, sign_jwt, test_db, trigger, unique_name,
 };
 
 #[test]

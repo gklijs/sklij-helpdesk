@@ -242,9 +242,7 @@ impl CrossContextRoute for HelpdeskExpiryToTrialLapse {
     type Source = helpdesk::CompanyExpired;
     type Target = RecordTrialLapse;
     const NAME: &'static str = "HelpdeskExpiryToTrialLapse";
-    fn route(
-        source_payload: &helpdesk::CompanyExpiredPayload,
-    ) -> Option<RecordTrialLapsePayload> {
+    fn route(source_payload: &helpdesk::CompanyExpiredPayload) -> Option<RecordTrialLapsePayload> {
         Some(RecordTrialLapsePayload {
             company_id: source_payload.company_id.clone(),
             lapsed_at: chrono::Utc::now().to_rfc3339(),

@@ -35,7 +35,9 @@ pub fn Callback() -> impl IntoView {
 /// the flow.
 async fn exchange() -> Result<(), String> {
     let location = window().expect("browser").location();
-    let search = location.search().map_err(|_| "no query string on this URL".to_string())?;
+    let search = location
+        .search()
+        .map_err(|_| "no query string on this URL".to_string())?;
     let params = web_sys::UrlSearchParams::new_with_str(&search)
         .map_err(|_| "malformed query string".to_string())?;
     let code = params
@@ -44,7 +46,8 @@ async fn exchange() -> Result<(), String> {
     let verifier = auth::take_verifier()
         .ok_or("no PKCE verifier stored for this session - did you navigate here directly?")?;
 
-    let form = web_sys::UrlSearchParams::new().map_err(|_| "couldn't build a form body".to_string())?;
+    let form =
+        web_sys::UrlSearchParams::new().map_err(|_| "couldn't build a form body".to_string())?;
     form.append("grant_type", "authorization_code");
     form.append("code", &code);
     form.append("redirect_uri", config::REDIRECT_URI);

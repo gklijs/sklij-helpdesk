@@ -108,13 +108,18 @@ tower = { version = "0.5", features = ["limit", "load-shed"] }
 # wiring that actually does. A version mismatch against skilj-core's
 # own opentelemetry dependency would make global::meter() resolve to a
 # different, incompatible API, so these can't float independently.
+# 0.0.9 moved the whole stack 0.32 -> 0.33 (tracing-opentelemetry
+# 0.33 -> 0.34) with no call-site changes here, and warned explicitly
+# that an application still installing a 0.32 provider would silently
+# receive none of skilj's spans or metrics - the globals are per crate
+# version, so this isn't a compile error, it's a silent no-op.
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-opentelemetry = "0.32"
-opentelemetry_sdk = "0.32"
-opentelemetry-otlp = { version = "0.32", default-features = false, features = ["http-proto", "reqwest-blocking-client", "trace", "logs", "metrics"] }
-tracing-opentelemetry = "0.33"
-opentelemetry-appender-tracing = "0.32"
+opentelemetry = "0.33"
+opentelemetry_sdk = "0.33"
+opentelemetry-otlp = { version = "0.33", default-features = false, features = ["http-proto", "reqwest-blocking-client", "trace", "logs", "metrics"] }
+tracing-opentelemetry = "0.34"
+opentelemetry-appender-tracing = "0.33"
 
 [dev-dependencies]
 postgresql_embedded = "0.21.0"

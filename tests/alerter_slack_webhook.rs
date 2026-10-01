@@ -24,12 +24,18 @@ use axum::Json;
 use skilj_helpdesk::helpdesk::BOUNDED_CONTEXT;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use support::{mint_alerter_tokens, mint_command_token, runtime, serve_for_real, setup, spawn_alerter, test_db, trigger, unique_name, wait_until};
+use support::{
+    mint_alerter_tokens, mint_command_token, runtime, serve_for_real, setup, spawn_alerter,
+    test_db, trigger, unique_name, wait_until,
+};
 
 #[derive(Clone, Default)]
 struct Captured(Arc<Mutex<Vec<serde_json::Value>>>);
 
-async fn capture(State(captured): State<Captured>, Json(body): Json<serde_json::Value>) -> &'static str {
+async fn capture(
+    State(captured): State<Captured>,
+    Json(body): Json<serde_json::Value>,
+) -> &'static str {
     captured.0.lock().unwrap().push(body);
     "ok"
 }

@@ -598,9 +598,9 @@ impl BoundedContextEvent for HelpdeskEvent {
             "TicketReopened" => {
                 Some(serde_json::from_str(&event.payload).map(HelpdeskEvent::TicketReopened))
             }
-            "TicketInfoRequested" => Some(
-                serde_json::from_str(&event.payload).map(HelpdeskEvent::TicketInfoRequested),
-            ),
+            "TicketInfoRequested" => {
+                Some(serde_json::from_str(&event.payload).map(HelpdeskEvent::TicketInfoRequested))
+            }
             "TicketCustomerResponded" => Some(
                 serde_json::from_str(&event.payload).map(HelpdeskEvent::TicketCustomerResponded),
             ),

@@ -124,7 +124,10 @@ async fn main() {
         Some(path) => load_state(path),
         None => State::default(),
     };
-    println!("engagement-watcher: polling {} every {POLL_INTERVAL:?}", config.base_url);
+    println!(
+        "engagement-watcher: polling {} every {POLL_INTERVAL:?}",
+        config.base_url
+    );
 
     loop {
         if let Err(e) = tick(&client, &config, &mut state).await {
@@ -146,7 +149,10 @@ fn load_state(path: &std::path::Path) -> State {
     match std::fs::read_to_string(path) {
         Ok(contents) => match serde_json::from_str(&contents) {
             Ok(state) => {
-                println!("engagement-watcher: resumed tracking state from {}", path.display());
+                println!(
+                    "engagement-watcher: resumed tracking state from {}",
+                    path.display()
+                );
                 state
             }
             Err(e) => {
@@ -165,10 +171,16 @@ fn load_state(path: &std::path::Path) -> State {
 /// see its doc comment.
 fn save_state(path: &std::path::Path, state: &State) {
     let tmp = path.with_extension("json.tmp");
-    let write = std::fs::write(&tmp, serde_json::to_vec(state).expect("State always serializes"))
-        .and_then(|()| std::fs::rename(&tmp, path));
+    let write = std::fs::write(
+        &tmp,
+        serde_json::to_vec(state).expect("State always serializes"),
+    )
+    .and_then(|()| std::fs::rename(&tmp, path));
     if let Err(e) = write {
-        eprintln!("engagement-watcher: couldn't checkpoint state to {}: {e}", path.display());
+        eprintln!(
+            "engagement-watcher: couldn't checkpoint state to {}: {e}",
+            path.display()
+        );
     }
 }
 
@@ -178,8 +190,12 @@ async fn tick(
     state: &mut State,
 ) -> Result<(), reqwest::Error> {
     // --- track state from the event feed ---
-    for (_, payload, _) in
-        consume(client, &config.base_url, &config.daily_activity_recorded_token).await?
+    for (_, payload, _) in consume(
+        client,
+        &config.base_url,
+        &config.daily_activity_recorded_token,
+    )
+    .await?
     {
         if payload["person_kind"].as_str() != Some("customer") {
             continue;
@@ -187,7 +203,9 @@ async fn tick(
         let Some(company_id) = payload["company_id"].as_str() else {
             continue;
         };
-        let Some(day) = payload["day"].as_str().and_then(|d| DateTime::parse_from_rfc3339(d).ok())
+        let Some(day) = payload["day"]
+            .as_str()
+            .and_then(|d| DateTime::parse_from_rfc3339(d).ok())
         else {
             continue;
         };

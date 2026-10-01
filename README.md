@@ -269,8 +269,15 @@ surfaced five real bugs, each confirmed failing first, then fixed:
 
 1. **skilj-core**: JWT audience validation was never configured, so any
    spec-compliant OIDC token (which always carries `aud`) was rejected
-   outright. Fixed in skilj-core itself (`validate_aud = false`, matching
-   its own stated design).
+   outright. Worked around first inside skilj-core itself
+   (`validate_aud = false`, matching its own then-stated design), then
+   superseded by the real fix in skilj 0.0.9: `IdpConfig::new` takes
+   the deployment's own `audience`(s) and a token issued to any *other*
+   application at the same IdP is refused instead. Adopted here in
+   `src/bin/server.rs` (`DEX_AUDIENCE` for a real Dex,
+   `TEST_AUDIENCE` for the local JWKS shortcut) and in the
+   self-signed JWTs `src/bin/provisioner.rs` and
+   `tests/support/mod.rs` mint.
 2. **This project's `server.rs`**: re-seeded the two demo `Role`s on
    every restart, violating a uniqueness constraint on the second run.
    Fixed with a check-before-insert.
@@ -304,3 +311,39 @@ surfaced five real bugs, each confirmed failing first, then fixed:
    `TicketInternalNotes`'s own doc comment in `src/helpdesk.rs`) —
    `tests/cross_company_projection_scoping.rs` now proves this half live
    too.
+
+## Running on skilj 0.0.9
+
+- **Graceful shutdown.** `server` stops through skilj's own
+  `Skilj::shutdown` on Ctrl-C/SIGTERM: every background loop it started
+  — including the two deadline reactors the trial-conversion and
+  ticket auto-close rules ride on — finishes the tick it is in and
+  stops, then the pool closes, and the process prints which loops
+  stopped cleanly and which, if any, were aborted at the timeout.
+- **Telemetry on the matching OTel line.** The OpenTelemetry stack is
+  pinned to what `../skilj/Cargo.toml` uses (0.33, with
+  `tracing-opentelemetry` 0.34). `opentelemetry`'s globals are per
+  crate version, so a provider installed on a different line receives
+  none of skilj's spans or metrics — silently, with no error anywhere.
+- **A required JWT audience.** `IdpConfig::new` now takes the
+  deployment's own `audience`, so a token minted for any *other*
+  application at the same IdP is refused. `server` passes Dex's own
+  client id (`dex/config.yaml`'s static client) when
+  `OIDC_ISSUER_URL` is set, and a fixed test audience for the local
+  JWKS shortcut; `provisioner` and the test harness sign matching
+  `aud` claims of their own.
+- Two upstream correctness fixes land directly on this project's own
+  deadline rules: a deadline could previously fire even though its
+  cancelling event had already been committed, and a cancel could lose
+  to the schedule that had not created the deadline yet
+  (`docs/architecture.md` §130–131 in the `skilj` repo) — "a paid order
+  still cancelled". Both are fixed upstream.
+
+[`docs/load-test-report-2026-10-01.md`](docs/load-test-report-2026-10-01.md)
+is the full 0.0.9 adoption pass and a load-ramp run on this build: no
+regression at any step, ~50–63 accepted commands/s sustained (round
+four measured ~45–60 on the same ramp), lock-hold time at zero across
+the whole ramp, and slow-statement warnings down from 71 to 4. It also
+flags the one open item every report since 09-18b has raised and none
+has yet investigated: RSS still reaches ~4.6GB under sustained
+1600/s offered load.
