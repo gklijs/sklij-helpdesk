@@ -171,6 +171,17 @@ impl EventType for CompanyTenantProvisioned {
     fn tag_mappings() -> Vec<TagMapping> {
         company_tag()
     }
+    /// Phase 4 multi-tenant alerter discovers tenants by reading this
+    /// event off the shared context's own REST feed - the alerter has no
+    /// other way to enumerate which companies have been provisioned a
+    /// tenant at runtime, since `TenantDirectory` is keyed by company_id
+    /// and `CrossContextRoute` can't fan out to a runtime-created set of
+    /// contexts. The event carries nothing `company_id`-scoped beyond what
+    /// skilj's own `event_read_allowed` gate exists to control: it carries
+    /// a `tenant_name`, not a `ticket_id` or any per-company data.
+    fn event_read_allowed() -> bool {
+        true
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

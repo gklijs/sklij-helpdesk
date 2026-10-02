@@ -756,6 +756,10 @@ pub async fn serve_for_real(router: axum::Router) -> String {
 /// `Config::from_env` requires, minted once and reused across however
 /// many times a test restarts the binary - real deployments would do
 /// the same (one set of credentials, not reminted per restart).
+///
+/// `company_tenant_provisioned` and `superadmin_subject` are Phase 4
+/// additions: when set, the alerter can discover and poll per-tenant
+/// event feeds rather than reading only the shared context.
 pub struct AlerterTokens {
     pub ticket_created: String,
     pub ticket_resolved: String,
@@ -764,6 +768,8 @@ pub struct AlerterTokens {
     pub ticket_escalated: String,
     pub tickets_merged: String,
     pub escalate_ticket: String,
+    pub company_tenant_provisioned: String,
+    pub superadmin_subject: String,
 }
 
 pub async fn mint_alerter_tokens(
@@ -778,12 +784,19 @@ pub async fn mint_alerter_tokens(
             .await,
         ticket_reopened: mint_event_read_token(pool, mapping, bounded_context, "TicketReopened")
             .await,
-        ticket_closed: mint_event_read_token(pool, mapping, bounded_context, "TicketClosed").await,
+        ticket_closed: mint_event_read_token(pool, mapping, bounded_context, "TicketClosed")
+            .await,
         ticket_escalated: mint_event_read_token(pool, mapping, bounded_context, "TicketEscalated")
             .await,
         tickets_merged: mint_event_read_token(pool, mapping, bounded_context, "TicketsMerged")
             .await,
-        escalate_ticket: mint_command_token(pool, mapping, bounded_context, "EscalateTicket").await,
+        escalate_ticket: mint_command_token(pool, mapping, bounded_context, "EscalateTicket")
+            .await,
+        company_tenant_provisioned: mint_event_read_token(
+            pool, mapping, bounded_context, "CompanyTenantProvisioned",
+        )
+        .await,
+        superadmin_subject: mapping.role.external_subject.clone(),
     }
 }
 
@@ -831,6 +844,8 @@ pub fn spawn_alerter(
         .env("TICKET_ESCALATED_TOKEN", &tokens.ticket_escalated)
         .env("TICKETS_MERGED_TOKEN", &tokens.tickets_merged)
         .env("ESCALATE_TICKET_TOKEN", &tokens.escalate_ticket)
+        .env("COMPANY_TENANT_PROVISIONED_TOKEN", &tokens.company_tenant_provisioned)
+        .env("ALERTER_SUPERADMIN_SUBJECT", &tokens.superadmin_subject)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         // Captured to a file, not a pipe left undrained (that risks the

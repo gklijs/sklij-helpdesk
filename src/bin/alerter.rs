@@ -52,6 +52,25 @@
 //! everything. `engagement-watcher.rs` has the identical fix, for the
 //! identical reason, over its own "gone quiet" sweep.
 //!
+//! **Phase 4: multi-tenant awareness.** When `TICKET_ROUTING=tenant`
+//! is on, ticket events live in per-company tenant contexts, not in the
+//! shared `helpdesk` context. The alerter now discovers tenants by
+//! reading `CompanyTenantProvisioned` events off the shared context's
+//! own REST feed (which is why `CompanyTenantProvisioned` carries
+//! `event_read_allowed = true` in `helpdesk.rs`), then mints per-tenant
+//! `EventReadToken`s for each ticket event type and a per-tenant
+//! `EscalateTicket` `CommandToken` via skilj's own
+//! `createEventReadToken`/`createCommandToken` GraphQL mutations,
+//! signed as the same superadmin identity the provisioner and
+//! lifecycle-replicator already use. Token mints are cached in memory
+//! for the process lifetime (one round trip per tenant, not per event);
+//! discovered tenant names are checkpointed to the state file so a
+//! restart re-provisions tokens for known tenants without re-scanning.
+//! The shared-context tokens from env vars still cover companies
+//! without a tenant, so the fallback path is unchanged. When escalating
+//! a ticket, the alerter picks the right `EscalateTicket` token by
+//! matching the ticket to its tenant (tracked per `TicketCreated`).
+//!
 //! Configuration (env vars, deliberately minimal - no config-loading
 //! crate, matching skilj's own §2.4 choice):
 //!   SKILJ_BASE_URL               - default "http://localhost:3000"
@@ -73,6 +92,30 @@
 //!     TICKET_CLOSED_TOKEN, TICKET_ESCALATED_TOKEN, TICKETS_MERGED_TOKEN
 //!   One CommandToken:
 //!     ESCALATE_TICKET_TOKEN
+//!   All six EventReadTokens and the CommandToken above are for the
+//!   *shared* `helpdesk` context - they cover companies without a
+//!   tenant. Per-tenant tokens are minted on demand and cached in
+//!   memory.
+//!   TICKET_ROUTING                - optional; set to "tenant" to enable
+//!                                  Phase 4 multi-tenant discovery and
+//!                                  polling. Requires the two tokens
+//!                                  below.
+//!   COMPANY_TENANT_PROVISIONED_TOKEN - optional; required when
+//!                                  TICKET_ROUTING=tenant. EventReadToken
+//!                                  for `CompanyTenantProvisioned` on
+//!                                  the shared context, used to discover
+//!                                  which companies have been provisioned
+//!                                  a tenant.
+//!   ALERTER_SUPERADMIN_SUBJECT    - optional; required when
+//!                                  TICKET_ROUTING=tenant. The bootstrap
+//!                                  admin Role's own `external_subject`
+//!                                  (same one `server.rs` prints for the
+//!                                  provisioner and lifecycle-replicator),
+//!                                  which this binary signs its own
+//!                                  short-lived JWT for, local-JWKS-
+//!                                  shortcut only, to call
+//!                                  `createEventReadToken`/`createCommandToken`
+//!                                  on each tenant.
 //!   SLACK_WEBHOOK_URL             - optional; unset means console-only
 //!                                  (the original behaviour, and still
 //!                                  what every alert does regardless).
@@ -97,7 +140,9 @@
 //! batch exporters still flush periodically on their own.
 
 use chrono::{DateTime, Utc};
+use jsonwebtoken::{EncodingKey, Header};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use skilj_helpdesk::alerting::{evaluate_ticket_created, is_overdue};
 use skilj_helpdesk::helpdesk::TicketCreatedPayload;
 use std::collections::{HashMap, HashSet};
@@ -105,6 +150,76 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Every ticket event type this alerter consumes, by wire name. Used both
+/// for the shared-context tokens (from env vars) and for minting the
+/// same set against each tenant via GraphQL. A single source of truth so
+/// the two never drift.
+const ALERTER_EVENT_TYPES: &[&str] = &[
+    "TicketCreated",
+    "TicketResolved",
+    "TicketReopened",
+    "TicketClosed",
+    "TicketEscalated",
+    "TicketsMerged",
+];
+
+/// The one command type this alerter submits - `EscalateTicket`. Same
+/// single-name-as-constant reasoning `helpdesk.rs` gives for
+/// `RECORD_TENANT_LIFECYCLE_COMMAND`: a `CommandToken` is minted by type
+/// name, not by Rust type, so the literal lives in one place.
+const ESCALATE_TICKET_COMMAND: &str = "EscalateTicket";
+
+// --- local JWKS/JWT shortcut - same test key material as every other
+// binary in this crate (server.rs, provisioner.rs, lifecycle-replicator.rs,
+// tests/support/mod.rs). Never a real secret. Duplicated rather than
+// shared across the binary boundary, same reasoning those files give. ---
+
+const TEST_PRIVATE_KEY_PEM: &str = "-----BEGIN PRIVATE KEY-----
+MIIEvQIBATANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQDPHVFsUHiWXSbG
+/TCig1cTQHNT6FnoYoZtMEjvDiQArsOL/dFoM9pmGRM9CfEtQGNum4TsimPtgJec
+awfdPnW0uJCRlIF9wGmYdh2mYNBKw8jqxwp664Gd5uqH5L6A4pN8bfGO7+2niD6p
+8t0cNeyYOd0PusbAEDcpzCUZmr6KQyM5i8/wk5oO98gntp+ZpMjUZabAD6R8DyhM
+IZmV645jo5NPJG7zuSz+3dmKkNY0/GXz8YwvZ2swqmmOANRZHHfN1vgP2ycK02WZ
+4yihx6EiuQCDseddBw+xit9KSvSq6GwmwnV1qVpMVNlSGGOeVX7v7JQ3z/BNbQ85
+5p6s/FjhAgMBAAECggEAFu8fKghLIhNUjOpSbVxv0vDrFFqBQitOyV50ZQxCzlSL
+0L+dZZWAVJfoOnUUYLdli0TrVioI4K7Bmw97AnO9IvLhB03TfPJGfxxtMhQ8XFsL
+r3u03GGhq7N7OusIcUslm7ys5/AHd+qtTbJX65zJAx49LVW4VmI1SYqSfSBWgway
+8uGYaXyCfwuxQ+xB4fQd6llm/+9dqS+U36LVSMWgEmVjceorYFhPVLfuX4A1wHjF
+mDl40AwPBqzVbOIzFDMDikk4heFi6wlt6N3LGDtyBUUuzEg5TBhyiirvNvTjW+4V
+Z4MZs3tez+IqM0+F4EsgAEQUU12YQxa4lobm8/zgZQKBgQD81FMzymNR6xWhUSwY
+4RtkVntfMBOMp1rVGcVyBxOLKxEXF6ctk2rV38krfUI50h/lWzrbpl+zJvEe8D1H
+vZjYj28sL3wf0CSnPYUeGANTxrW1dTiz1HVzzChfbAEWj3fsVrlghNcnHBkDDhqz
+L/rPEfp//fB0SyLAEAJt87cgFwKBgQDRtjtH1gIkGn5GCS3u0FAbxV+qrUlTvu4t
+Di1GcEw32jootQQSMZN1PxEvLuehaBlaASEL2OZzZlQ4q60LV1Jisvd7wqv5EYnG
+o+sKtrCS5iXKfkxqTmg+JS7OZazggyvgBnv4GXT0US6/G4nw7C9JaS2jyOvPGIPS
+K8dsWDIxxwKBgQCgr4FBxTticPqKUECqf0cdeilm0fNazXJZRcvLMNwm8vQlrQ6/
+VJXt4BDG5xEUFovXBShfOVpRTkqo0x7fXYyq9l49wuAsh+kDsYHNIo3azMvny9yB
+zmHnerWeD9KROBWLy4J96W+kl6L94hTuFWxd9psyhX4xKx+m2YXxw5d7eQKBgFB2
+I86PHOkvRQ2oDfiX8nSFSQxaSk0Yb5fX3aUuBwBS+YeO1E4KuXH9zaEV1QeHwlpX
+Ho/GG71hIKVRsSYtzc1Sr0PL0GHSydLuJ4tHxv3F0fAcf0M2bCaT656DQk4t5dKh
+ikUJt2baEx59+XH3nLkE4t75gwhFdqZX5775I+EXAoGAfnpHlLZdGW48rl9Cl887
+hRDjXDm/gP/ljCrvxxiWselEgaLj2o4NiT28QAfq7KgtOIpAeLAGzIBP6vkE7KFp
+nAF+t4gRpooXXSI5oXCBcGI9a26q68UV3iDEmQGiP8kVHOsdzcOKY0qk1ulNAIV4
+fU919gnTKorSq3FdV6zGZ8s=
+-----END PRIVATE KEY-----";
+const TEST_KID: &str = "test-key-1";
+const TEST_ISSUER: &str = "https://idp.example.test/";
+const TEST_AUDIENCE: &str = "skilj-helpdesk-test-client";
+
+fn sign_jwt(subject: &str) -> String {
+    let mut header = Header::new(jsonwebtoken::Algorithm::RS256);
+    header.kid = Some(TEST_KID.to_string());
+    let claims = json!({
+        "sub": subject,
+        "iss": TEST_ISSUER,
+        "aud": TEST_AUDIENCE,
+        "exp": (Utc::now() + chrono::Duration::hours(1)).timestamp(),
+    });
+    let key = EncodingKey::from_rsa_pem(TEST_PRIVATE_KEY_PEM.as_bytes())
+        .expect("the test private key PEM is well-formed");
+    jsonwebtoken::encode(&header, &claims, &key).expect("signing a well-formed JWT never fails")
+}
 
 struct Config {
     base_url: String,
@@ -122,6 +237,16 @@ struct Config {
     /// `None` when `SLACK_WEBHOOK_URL` is unset - `send_alert` below
     /// then stays console-only, exactly the original behaviour.
     slack_webhook_url: Option<String>,
+    /// `Some` when `TICKET_ROUTING=tenant` *and* `ALERTER_SUPERADMIN_SUBJECT`
+    /// and `COMPANY_TENANT_PROVISIONED_TOKEN` are set - enables Phase 4
+    /// multi-tenant discovery and polling. `None` otherwise, and the
+    /// alerter reads only the shared context, exactly as before Phase 4.
+    multi_tenant: Option<MultiTenantConfig>,
+}
+
+struct MultiTenantConfig {
+    superadmin_subject: String,
+    company_tenant_provisioned_token: String,
 }
 
 impl Config {
@@ -141,6 +266,28 @@ impl Config {
             Ok(s) => Some(PathBuf::from(s)),
             Err(_) => Some(PathBuf::from("alerter-state.json")),
         };
+        let routing_mode =
+            skilj_helpdesk::routing::RoutingMode::from_env_value(
+                std::env::var("TICKET_ROUTING").ok().as_deref()
+            );
+        let superadmin_subject = std::env::var("ALERTER_SUPERADMIN_SUBJECT").ok();
+        let company_tenant_provisioned_token =
+            std::env::var("COMPANY_TENANT_PROVISIONED_TOKEN").ok();
+        let multi_tenant = match (
+            routing_mode,
+            superadmin_subject,
+            &company_tenant_provisioned_token,
+        ) {
+            (
+                skilj_helpdesk::routing::RoutingMode::Tenant,
+                Some(subj),
+                Some(_),
+            ) => Some(MultiTenantConfig {
+                superadmin_subject: subj,
+                company_tenant_provisioned_token: company_tenant_provisioned_token.unwrap(),
+            }),
+            _ => None,
+        };
         Config {
             base_url: std::env::var("SKILJ_BASE_URL")
                 .unwrap_or_else(|_| "http://localhost:3000".to_string()),
@@ -156,6 +303,7 @@ impl Config {
             slack_webhook_url: std::env::var("SLACK_WEBHOOK_URL")
                 .ok()
                 .filter(|s| !s.is_empty()),
+            multi_tenant,
         }
     }
 }
@@ -165,25 +313,104 @@ struct State {
     /// ticket_id -> its own original `TicketCreated` timestamp - read
     /// off skilj's own event metadata, not a payload field, since
     /// `TicketCreatedPayload` carries no timestamp of its own. Kept
-    /// forever, even
-    /// past resolution: a reopened ticket's age is still measured from
-    /// its own original creation, never reset.
+    /// forever, even past resolution: a reopened ticket's age is still
+    /// measured from its own original creation, never reset.
     created_at: HashMap<String, DateTime<Utc>>,
     /// ticket_id -> company_id, populated alongside `created_at` - so an
     /// overdue-escalation alert (unlike an urgent-on-creation one, which
     /// already has this straight off `TicketCreated`'s own payload) can
     /// still report which company it's for.
     company_id: HashMap<String, String>,
-    /// `specs/skilj-helpdesk.allium`'s own `unhandled: status not in
-    /// {resolved, closed}` derived field, tracked directly - `merged`
-    /// counts as handled too, for the same "nothing left to do" reason
-    /// `ticket_status`'s own catch-all treatment in `helpdesk.rs` gives it.
+    /// ticket_id -> the tenant this ticket lives in, if known. `None`
+    /// means the shared `helpdesk` context (either no tenant was
+    /// provisioned for the company, or the cutover isn't routing there
+    /// yet). This is what decides which `EscalateTicket` token gets
+    /// used when escalating - the command must land in the same context
+    /// the ticket does.
+    tenant_for_ticket: HashMap<String, Option<String>>,
+    /// `specs/skilj-helpdesk.allium`'s own
+    /// `unhandled: status not in {resolved, closed}` derived field, tracked
+    /// directly - `merged` counts as handled too, for the same "nothing
+    /// left to do" reason `ticket_status`'s own catch-all treatment in
+    /// `helpdesk.rs` gives it.
     unhandled: HashSet<String>,
     /// Ticket ids already escalated (this alerter's own submission, or
     /// read back off the same `TicketEscalated` stream another instance
     /// produced) - stops resubmitting `EscalateTicket` every poll once
     /// it's already been done.
     escalated: HashSet<String>,
+    /// Tenant bounded-context names this process has learned about via
+    /// `CompanyTenantProvisioned` events. Persisted to the state file
+    /// so a restart re-mints tokens for known tenants without needing
+    /// to re-scan the shared feed from the beginning (the `mode=auto`
+    /// cursor on that token has already advanced past historical
+    /// events).
+    discovered_tenants: HashSet<String>,
+}
+
+/// Per-tenant credential cache, minted on demand via skilj's own
+/// `createEventReadToken`/`createCommandToken` GraphQL mutations, signed
+/// as the configured superadmin identity. Process-local by design - see
+/// the "Phase 4" section of this file's own module doc comment. Not
+/// persisted: a restart re-mints, which costs one round trip per tenant
+/// per restart and nothing else.
+struct TenantTokenCache {
+    base_url: String,
+    superadmin_subject: String,
+    /// tenant_name -> (per-event-type event read tokens, EscalateTicket command token)
+    cache: HashMap<String, TenantTokens>,
+}
+
+#[derive(Clone)]
+struct TenantTokens {
+    event_tokens: HashMap<String, String>,
+    escalate_ticket_token: String,
+}
+
+impl TenantTokenCache {
+    fn new(base_url: &str, superadmin_subject: &str) -> Self {
+        TenantTokenCache {
+            base_url: base_url.to_string(),
+            superadmin_subject: superadmin_subject.to_string(),
+            cache: HashMap::new(),
+        }
+    }
+
+    /// Mint all tenant-scoped tokens for `tenant_name` in one batch, cache,
+    /// and return a clone. A failed mint leaves the cache untouched, so a
+    /// transient GraphQL failure doesn't permanently strand a tenant.
+    async fn get_or_mint(&mut self, client: &reqwest::Client, tenant_name: &str) -> Result<TenantTokens, String> {
+        if let Some(tokens) = self.cache.get(tenant_name) {
+            return Ok(tokens.clone());
+        }
+        let jwt = sign_jwt(&self.superadmin_subject);
+        let mut event_tokens = HashMap::with_capacity(ALERTER_EVENT_TYPES.len());
+        for event_type in ALERTER_EVENT_TYPES {
+            let token = mint_graphql_event_token(
+                client,
+                &self.base_url,
+                &jwt,
+                tenant_name,
+                event_type,
+            )
+            .await?;
+            event_tokens.insert(event_type.to_string(), token);
+        }
+        let escalate_ticket_token = mint_graphql_command_token(
+            client,
+            &self.base_url,
+            &jwt,
+            tenant_name,
+            ESCALATE_TICKET_COMMAND,
+        )
+        .await?;
+        let tokens = TenantTokens {
+            event_tokens,
+            escalate_ticket_token,
+        };
+        self.cache.insert(tenant_name.to_string(), tokens.clone());
+        Ok(tokens)
+    }
 }
 
 #[tokio::main]
@@ -196,21 +423,26 @@ async fn main() {
         Some(path) => load_state(path),
         None => State::default(),
     };
+    let mut tenant_cache = match &config.multi_tenant {
+        Some(mt) => Some(TenantTokenCache::new(&config.base_url, &mt.superadmin_subject)),
+        None => None,
+    };
     println!(
         "alerter: polling {} every {POLL_INTERVAL:?} (escalating tickets unhandled for {:?})",
         config.base_url, config.unhandled_alert_after
     );
+    if config.multi_tenant.is_some() {
+        println!(
+            "alerter: multi-tenant mode ON (TICKET_ROUTING=tenant) - discovering and polling per-company \
+             tenant feeds alongside the shared context"
+        );
+    }
 
     loop {
-        if let Err(e) = tick(&client, &config, &mut state).await {
+        if let Err(e) = tick(&client, &config, &mut state, &mut tenant_cache).await {
             eprintln!("alerter: poll failed, will retry: {e}");
             tracing::warn!(error = %e, "alerter: poll failed, will retry");
         }
-        // Checkpoint after every tick, success or not - `tick` may have
-        // already applied some of this round's `consume()` results
-        // before a later one failed, and there's no reason to lose
-        // that progress too. See this file's own "Restart safety" doc
-        // comment for why this exists at all.
         if let Some(path) = &config.state_file {
             save_state(path, &state);
         }
@@ -218,11 +450,6 @@ async fn main() {
     }
 }
 
-/// Best-effort load: a missing file (first run, or checkpointing just
-/// turned on) or unparseable one (a format change, a hand-edited file)
-/// both fall back to `State::default()` rather than refusing to start -
-/// this is a recovery aid, not a durability guarantee this binary
-/// should ever block its own startup on.
 fn load_state(path: &std::path::Path) -> State {
     match std::fs::read_to_string(path) {
         Ok(contents) => match serde_json::from_str(&contents) {
@@ -242,13 +469,6 @@ fn load_state(path: &std::path::Path) -> State {
     }
 }
 
-/// Write-to-temp-then-rename: a crash or power loss mid-write leaves
-/// the previous checkpoint intact (a partially-written `path` itself
-/// would otherwise corrupt the next `load_state`) - `rename` within the
-/// same directory is atomic on the filesystems this runs on. Errors are
-/// logged, not propagated: a failed checkpoint shouldn't take the whole
-/// poll loop down, only degrade back to this tick's state being lost on
-/// the next restart.
 fn save_state(path: &std::path::Path, state: &State) {
     let tmp = path.with_extension("json.tmp");
     let write = std::fs::write(
@@ -268,52 +488,150 @@ async fn tick(
     client: &reqwest::Client,
     config: &Config,
     state: &mut State,
+    tenant_cache: &mut Option<TenantTokenCache>,
 ) -> Result<(), reqwest::Error> {
-    // --- rule UrgentTicketNeedsImmediateAttention, plus tracking this
-    // ticket's own age for the overdue sweep below ---
-    for (_, payload, created_at) in
-        consume(client, &config.base_url, &config.ticket_created_token).await?
-    {
-        match serde_json::from_value::<TicketCreatedPayload>(payload) {
-            Ok(p) => {
-                state.created_at.insert(p.ticket_id.clone(), created_at);
-                state
-                    .company_id
-                    .insert(p.ticket_id.clone(), p.company_id.clone());
-                state.unhandled.insert(p.ticket_id.clone());
-                if let Some(alert) = evaluate_ticket_created(&p) {
-                    send_alert(client, config.slack_webhook_url.as_deref(), &alert).await;
-                }
+    // --- Phase 4: discover new tenants from the shared context ---
+    if let Some(mt) = &config.multi_tenant {
+        for (_, payload, _) in
+            consume(client, &config.base_url, &mt.company_tenant_provisioned_token).await?
+        {
+            if let Some(tenant_name) = payload["tenant_name"].as_str() {
+                state.discovered_tenants.insert(tenant_name.to_string());
             }
-            Err(e) => eprintln!("alerter: couldn't decode TicketCreated payload: {e}"),
         }
     }
 
-    // --- track state for rule TicketBecomesOverdue ---
-    for (_, payload, _) in consume(client, &config.base_url, &config.ticket_resolved_token).await? {
-        if let Some(ticket_id) = payload["ticket_id"].as_str() {
+    // --- shared context feeds (companies without a tenant) ---
+    process_ticket_created(
+        client,
+        config,
+        state,
+        None,
+        &config.ticket_created_token,
+    )
+    .await?;
+    process_state_update(
+        client,
+        config,
+        state,
+        None,
+        &config.ticket_resolved_token,
+        |state, ticket_id| {
             state.unhandled.remove(ticket_id);
-        }
-    }
-    for (_, payload, _) in consume(client, &config.base_url, &config.ticket_reopened_token).await? {
-        if let Some(ticket_id) = payload["ticket_id"].as_str() {
+        },
+    )
+    .await?;
+    process_state_update(
+        client,
+        config,
+        state,
+        None,
+        &config.ticket_reopened_token,
+        |state, ticket_id| {
             state.unhandled.insert(ticket_id.to_string());
-        }
-    }
-    for (_, payload, _) in consume(client, &config.base_url, &config.ticket_closed_token).await? {
-        if let Some(ticket_id) = payload["ticket_id"].as_str() {
+        },
+    )
+    .await?;
+    process_state_update(
+        client,
+        config,
+        state,
+        None,
+        &config.ticket_closed_token,
+        |state, ticket_id| {
             state.unhandled.remove(ticket_id);
-        }
-    }
-    for (_, payload, _) in consume(client, &config.base_url, &config.ticket_escalated_token).await?
-    {
-        if let Some(ticket_id) = payload["ticket_id"].as_str() {
-            state.escalated.insert(ticket_id.to_string());
-        }
-    }
-    for (_, payload, _) in consume(client, &config.base_url, &config.tickets_merged_token).await? {
-        if let Some(duplicate_ticket_id) = payload["duplicate_ticket_id"].as_str() {
-            state.unhandled.remove(duplicate_ticket_id);
+        },
+    )
+    .await?;
+    process_ticket_escalated(
+        client,
+        config,
+        state,
+        None,
+        &config.ticket_escalated_token,
+    )
+    .await?;
+    process_tickets_merged(
+        client,
+        config,
+        state,
+        None,
+        &config.tickets_merged_token,
+    )
+    .await?;
+
+    // --- per-tenant feeds (Phase 4: multi-tenant) ---
+    if let Some(cache) = tenant_cache.as_mut() {
+        // Snapshot discovered tenants so we can iterate while mutating state.
+        let tenants: Vec<String> = state.discovered_tenants.iter().cloned().collect();
+        for tenant_name in tenants {
+            let tokens = match cache.get_or_mint(client, &tenant_name).await {
+                Ok(t) => t,
+                Err(e) => {
+                    eprintln!(
+                        "alerter: failed to mint tokens for tenant {tenant_name}: {e}"
+                    );
+                    continue;
+                }
+            };
+            let src = Some(tenant_name.as_str());
+            process_ticket_created(
+                client,
+                config,
+                state,
+                src,
+                &tokens.event_tokens["TicketCreated"],
+            )
+            .await?;
+            process_state_update(
+                client,
+                config,
+                state,
+                src,
+                &tokens.event_tokens["TicketResolved"],
+                |state, ticket_id| {
+                    state.unhandled.remove(ticket_id);
+                },
+            )
+            .await?;
+            process_state_update(
+                client,
+                config,
+                state,
+                src,
+                &tokens.event_tokens["TicketReopened"],
+                |state, ticket_id| {
+                    state.unhandled.insert(ticket_id.to_string());
+                },
+            )
+            .await?;
+            process_state_update(
+                client,
+                config,
+                state,
+                src,
+                &tokens.event_tokens["TicketClosed"],
+                |state, ticket_id| {
+                    state.unhandled.remove(ticket_id);
+                },
+            )
+            .await?;
+            process_ticket_escalated(
+                client,
+                config,
+                state,
+                src,
+                &tokens.event_tokens["TicketEscalated"],
+            )
+            .await?;
+            process_tickets_merged(
+                client,
+                config,
+                state,
+                src,
+                &tokens.event_tokens["TicketsMerged"],
+            )
+            .await?;
         }
     }
 
@@ -325,14 +643,38 @@ async fn tick(
         .filter(|ticket_id| !state.escalated.contains(ticket_id.as_str()))
         .filter_map(|ticket_id| {
             let created_at = state.created_at.get(ticket_id)?;
-            is_overdue(*created_at, now, config.unhandled_alert_after).then(|| ticket_id.clone())
+            is_overdue(*created_at, now, config.unhandled_alert_after)
+                .then(|| ticket_id.clone())
         })
         .collect();
     for ticket_id in due {
+        // Phase 4: route the escalation command to the tenant the ticket
+        // lives in, if it has one. REST derives its destination from the
+        // token's own bounded context, so using a tenant-scoped token is
+        // what lands the command in the tenant.
+        let tenant = state.tenant_for_ticket.get(&ticket_id).cloned().flatten();
+        let escalate_token: &str = if let Some(ref tenant_name) = tenant {
+            if let Some(cache) = tenant_cache.as_ref() {
+                match cache.cache.get(tenant_name) {
+                    Some(t) => &t.escalate_ticket_token,
+                    None => {
+                        eprintln!(
+                            "alerter: no EscalateTicket token for tenant {tenant_name}, \
+                             falling back to shared"
+                        );
+                        &config.escalate_ticket_token
+                    }
+                }
+            } else {
+                &config.escalate_ticket_token
+            }
+        } else {
+            &config.escalate_ticket_token
+        };
         match submit_command(
             client,
             &config.base_url,
-            &config.escalate_ticket_token,
+            escalate_token,
             serde_json::json!({ "ticket_id": ticket_id }),
         )
         .await
@@ -361,6 +703,91 @@ async fn tick(
         }
     }
 
+    Ok(())
+}
+
+/// Process a batch of `TicketCreated` events from one source (shared
+/// context or a tenant). Tags each ticket with `source` so the overdue
+/// sweep above can pick the right `EscalateTicket` token.
+async fn process_ticket_created(
+    client: &reqwest::Client,
+    config: &Config,
+    state: &mut State,
+    source: Option<&str>,
+    token: &str,
+) -> Result<(), reqwest::Error> {
+    for (_, payload, created_at) in consume(client, &config.base_url, token).await? {
+        match serde_json::from_value::<TicketCreatedPayload>(payload) {
+            Ok(p) => {
+                state.created_at.insert(p.ticket_id.clone(), created_at);
+                state
+                    .company_id
+                    .insert(p.ticket_id.clone(), p.company_id.clone());
+                state
+                    .tenant_for_ticket
+                    .insert(p.ticket_id.clone(), source.map(str::to_string));
+                state.unhandled.insert(p.ticket_id.clone());
+                if let Some(alert) = evaluate_ticket_created(&p) {
+                    send_alert(client, config.slack_webhook_url.as_deref(), &alert).await;
+                }
+            }
+            Err(e) => eprintln!("alerter: couldn't decode TicketCreated payload: {e}"),
+        }
+    }
+    Ok(())
+}
+
+/// Process one event type that only updates ticket state (resolve,
+/// reopen, close) - removes/adds the ticket from `unhandled` based on
+/// `op`. Generic over the specific mutation because the three cases are
+/// identical in shape (consume one event type, touch the `unhandled`
+/// set), differing only in which set operation runs.
+async fn process_state_update<F>(
+    client: &reqwest::Client,
+    config: &Config,
+    state: &mut State,
+    _source: Option<&str>,
+    token: &str,
+    op: F,
+) -> Result<(), reqwest::Error>
+where
+    F: Fn(&mut State, &str),
+{
+    for (_, payload, _) in consume(client, &config.base_url, token).await? {
+        if let Some(ticket_id) = payload["ticket_id"].as_str() {
+            op(state, ticket_id);
+        }
+    }
+    Ok(())
+}
+
+async fn process_ticket_escalated(
+    client: &reqwest::Client,
+    config: &Config,
+    state: &mut State,
+    _source: Option<&str>,
+    token: &str,
+) -> Result<(), reqwest::Error> {
+    for (_, payload, _) in consume(client, &config.base_url, token).await? {
+        if let Some(ticket_id) = payload["ticket_id"].as_str() {
+            state.escalated.insert(ticket_id.to_string());
+        }
+    }
+    Ok(())
+}
+
+async fn process_tickets_merged(
+    client: &reqwest::Client,
+    config: &Config,
+    state: &mut State,
+    _source: Option<&str>,
+    token: &str,
+) -> Result<(), reqwest::Error> {
+    for (_, payload, _) in consume(client, &config.base_url, token).await? {
+        if let Some(duplicate_ticket_id) = payload["duplicate_ticket_id"].as_str() {
+            state.unhandled.remove(duplicate_ticket_id);
+        }
+    }
     Ok(())
 }
 
@@ -436,6 +863,113 @@ async fn submit_command(
     }
 }
 
+/// Call `createEventReadToken` on the skilj GraphQL surface, authenticated
+/// as the superadmin identity, to mint a per-tenant `EventReadToken`.
+/// Returns the `"id.secret"` credential string. Byte-for-byte the same
+/// shape as `lifecycle-replicator.rs`'s own `get_or_mint`, adapted for
+/// the event-read-token variant of the mutation (deliberately
+/// duplicated rather than shared across binaries, the same convention the
+/// test key material follows).
+async fn mint_graphql_event_token(
+    client: &reqwest::Client,
+    base_url: &str,
+    jwt: &str,
+    bounded_context: &str,
+    event_type_name: &str,
+) -> Result<String, String> {
+    let query = r#"
+        mutation MintEventToken($bc: String!, $eventTypeName: String!) {
+            createEventReadToken(
+                boundedContext: $bc
+                eventTypeName: $eventTypeName
+            ) {
+                id
+                secret
+            }
+        }
+    "#;
+    let response = client
+        .post(format!("{base_url}/graphql"))
+        .bearer_auth(jwt)
+        .json(&json!({
+            "query": query,
+            "variables": {
+                "bc": bounded_context,
+                "eventTypeName": event_type_name,
+            },
+        }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?
+        .error_for_status()
+        .map_err(|e| e.to_string())?;
+    let body: serde_json::Value = response.json().await.map_err(|e| e.to_string())?;
+    if let Some(errors) = body.get("errors").and_then(|e| e.as_array()) {
+        if !errors.is_empty() {
+            return Err(format!("createEventReadToken errors: {errors:?}"));
+        }
+    }
+    let id = body["data"]["createEventReadToken"]["id"]
+        .as_str()
+        .ok_or_else(|| format!("no id in response: {body:?}"))?;
+    let secret = body["data"]["createEventReadToken"]["secret"]
+        .as_str()
+        .ok_or_else(|| format!("no secret in response: {body:?}"))?;
+    Ok(format!("{id}.{secret}"))
+}
+
+/// Call `createCommandToken` on the skilj GraphQL surface - identical
+/// shape to `lifecycle-replicator.rs`'s own `get_or_mint` mutation body
+/// (deliberately duplicated rather than shared across binaries, the same
+/// convention the test key material follows).
+async fn mint_graphql_command_token(
+    client: &reqwest::Client,
+    base_url: &str,
+    jwt: &str,
+    bounded_context: &str,
+    command_type_name: &str,
+) -> Result<String, String> {
+    let query = r#"
+        mutation MintCommandToken($bc: String!, $commandType: String!) {
+            createCommandToken(
+                boundedContext: $bc
+                commandTypeName: $commandType
+            ) {
+                id
+                secret
+            }
+        }
+    "#;
+    let response = client
+        .post(format!("{base_url}/graphql"))
+        .bearer_auth(jwt)
+        .json(&json!({
+            "query": query,
+            "variables": {
+                "bc": bounded_context,
+                "commandType": command_type_name,
+            },
+        }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?
+        .error_for_status()
+        .map_err(|e| e.to_string())?;
+    let body: serde_json::Value = response.json().await.map_err(|e| e.to_string())?;
+    if let Some(errors) = body.get("errors").and_then(|e| e.as_array()) {
+        if !errors.is_empty() {
+            return Err(format!("createCommandToken errors: {errors:?}"));
+        }
+    }
+    let id = body["data"]["createCommandToken"]["id"]
+        .as_str()
+        .ok_or_else(|| format!("no id in response: {body:?}"))?;
+    let secret = body["data"]["createCommandToken"]["secret"]
+        .as_str()
+        .ok_or_else(|| format!("no secret in response: {body:?}"))?;
+    Ok(format!("{id}.{secret}"))
+}
+
 /// Console output (unconditional) plus, when `webhook_url` is set, a
 /// real Slack post - the worked example this file's own module doc
 /// comment describes. A rejected/unreachable webhook is logged and
@@ -471,9 +1005,9 @@ async fn send_alert(
     // `escape_slack_text` on both fields is load-bearing, not
     // decoration: `ticket_id`/`company_id` are plain, unvalidated
     // `String`s a customer fully controls via an ordinary `CreateTicket`
-    // request (`helpdesk.rs`'s own `CreateTicketPayload`) - without
+    // request (`helpdesk_rs`'s own `CreateTicketPayload`) - without
     // escaping, a `ticket_id` containing Slack's own link/mention
-    // syntax (backtick-then-`<!channel>`, or a masked `<https://
+    // syntax (backtick-then-`<!channel>`, or a masked `<https://`
     // evil.example|...>` link) would render *live* in the support
     // team's own trusted alerting channel: a real message-injection/
     // phishing vector a security review caught, not a formatting nicety.

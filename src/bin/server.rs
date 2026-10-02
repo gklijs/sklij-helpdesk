@@ -255,6 +255,13 @@ const PROVISIONER_EVENT_TYPES: &[&str] = &["CompanySignedUp"];
 /// (`helpdesk.rs`'s own `ScheduleTicketAutoClose` etc.), which reads
 /// events through its own internal poller, not a minted `EventReadToken`
 /// at all.
+///
+/// `CompanyTenantProvisioned` is in the same set so the alerter can
+/// discover tenants when `TICKET_ROUTING=tenant` is on - see that
+/// config's own doc comment in `src/bin/alerter.rs`. It is *not* one of
+/// the per-tenant event types the alerter mints (the alerter's own
+/// `ALERTER_EVENT_TYPES` constant in that binary lists only the six
+/// ticket types); discovery stays on the shared context only.
 const ALERTER_EVENT_TYPES: &[&str] = &[
     "TicketCreated",
     "TicketResolved",
@@ -262,6 +269,7 @@ const ALERTER_EVENT_TYPES: &[&str] = &[
     "TicketClosed",
     "TicketEscalated",
     "TicketsMerged",
+    "CompanyTenantProvisioned",
 ];
 
 /// `src/bin/lifecycle-replicator.rs`'s own event types - the three
@@ -887,6 +895,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         command_tokens["EscalateTicket"]
     );
     println!("  cargo run --bin alerter");
+    println!();
+    println!("  # Phase 4: multi-tenant mode (TICKET_ROUTING=tenant).");
+    println!("  # When the cutover is on, the alerter discovers per-company");
+    println!("  # tenants from CompanyTenantProvisioned, then mints its own");
+    println!("  # per-tenant tokens via GraphQL using this superadmin subject.");
+    println!("  export COMPANY_TENANT_PROVISIONED_TOKEN={}", alerter_event_tokens["CompanyTenantProvisioned"]);
+    println!("  export ALERTER_SUPERADMIN_SUBJECT={external_subject}");
 
     println!("\nto run the provisioner against this server:");
     println!("  export SKILJ_BASE_URL=http://localhost:{port}");
