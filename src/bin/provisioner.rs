@@ -206,13 +206,12 @@ async fn tick(client: &reqwest::Client, config: &Config) -> Result<(), reqwest::
         // `tests/multi_tenant_provisioning.rs`).
         // `routing::tenant_name_for`, not `format!("company-{company_id}")`:
         // a bounded context name must match `[a-z][a-z0-9_]{0,39}` and
-        // `company_id` is a free-form caller-supplied string
-        // (`SignUpCompanyPayload::company_id` validates nothing), so a
-        // company id with a dash, an uppercase letter, or more than 32
-        // characters produced a name skilj rejects - this provisioner
-        // logged the failure and moved on, and the company silently
-        // stayed in the shared context with no isolation and no error.
-        // See that function's own doc comment for the scheme and for why
+        // `company_id` is a caller-supplied string (`SignUpCompany::decide`
+        // now rejects empty ids but otherwise accepts any characters — a
+        // dash, an uppercase letter, or more than 32 characters would be
+        // rejected by skilj if forwarded raw), so `tenant_name_for`
+        // normalises it into a legal bounded context name instead — see
+        // that function's own doc comment for the scheme and why
         // already-provisioned companies are unaffected by it.
         let tenant_name = skilj_helpdesk::routing::tenant_name_for(company_id);
         match provision_tenant(client, config, &tenant_name).await {
