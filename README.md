@@ -235,8 +235,8 @@ silently absent:
 
 - **Real payment processing** — mocked on purpose; this is a showcase,
   not a billing product.
-- **Ticket routing into tenants: the guard is solved, the cutover isn't**
-  — the spec calls for each company to be its own skilj tenant (bounded
+- **Ticket routing into tenants — Phase 4 is complete** — the spec calls for each
+  company to be its own skilj tenant (bounded context), stamped from a template
   context), stamped from a template via
   `CreateBoundedContextFromTemplate`. That mechanism was first proven in
   isolation by `tests/multi_tenant_provisioning.rs` (stamps a real
@@ -299,9 +299,29 @@ silently absent:
     does hold a valid shared-context mapping). REST needs no equivalent —
     `skilj-rest` derives its destination from the command token, so a REST
     caller cannot name a context at all. `tests/ticket_routing_enforcement.rs`
-    proves the refusal, and equally that correctly-routed traffic,
-    lifecycle traffic, `TenantDirectory` itself, and a company with no
-    tenant all still pass.
+     proves the refusal, and equally that correctly-routed traffic,
+     lifecycle traffic, `TenantDirectory` itself, and a company with no
+     tenant all still pass.
+
+   Backend components are now multi-tenant aware end to end — every one of
+   them discovers tenants from `CompanyTenantProvisioned` and mints its own
+   per-tenant tokens via GraphQL, so it follows a company's traffic into its
+   tenant rather than reading the shared context alone:
+   - **Alerter** (`src/bin/alerter.rs`): watches each tenant's `UrgentTicketNeedsImmediateAttention`,
+     `TicketEscalated`, `TicketResolved`, `TicketReopened`, `TicketClosed`,
+     and `TicketsMerged` feeds, and submits `EscalateTicket` to the right
+     tenant. `tests/alerter_multi_tenant.rs` proves the full loop against a
+     real provisioned tenant.
+   - **CSAT metrics loop** (`src/bin/server.rs`): discovers tenants, mints a
+     per-tenant `TicketRated` event read token, and polls each tenant's own
+     feed — so a `RateTicket` routed to a tenant still records its rating as
+     `skilj_helpdesk_ticket_ratings_total`, not just in the shared context.
+   - **Demo seed traffic** (`run_demo_seed_loop` in `src/bin/server.rs`): when
+     `TICKET_ROUTING=tenant`, resolves each `SeedAction`'s `company_id`
+     (`demo_seed::SeedAction::company_id`, backed by `SeedState::
+     company_for_ticket`) and mints per-tenant REST `CreateTicket`/etc.
+     tokens on demand, so the fake load exercises the same per-tenant path
+     real traffic takes — instead of always hitting the shared context.
 
   Two deliberate properties of the guard, both tested:
   - It **fails open** on a body it cannot parse. A guard that
@@ -327,13 +347,14 @@ silently absent:
   resistant name instead; already-provisioned tenants are untouched
   because nothing re-derives a recorded tenant's name.
 
-  Still open: what `alerter.rs` watching *every* tenant's own event feed
-  would even mean, and the fact that `staff-lead`'s unrestricted
-  (`scope: None`) cross-company visibility only works while everything
-  shares one context — after a cutover it needs a mapping per tenant, and
-  no single query can span tenants. The reconciler deliberately leaves
-  `scope: None` grants alone rather than quietly narrowing a
-  cross-company staff grant to one company.
+   Still open (limitation, not in-progress): `staff-lead`'s unrestricted
+   (`scope: None`) cross-company visibility only works while everything
+   shares one context — after a cutover it needs a mapping per tenant, and
+   no single skilj query can span tenants. The reconciler deliberately
+   leaves `scope: None` grants alone rather than quietly narrowing a
+   cross-company staff grant to one company, so a staff-lead who resolves
+   across all companies only sees tickets in the shared context post-cutover
+   until an explicit per-tenant mapping is granted.
 - **A backend-for-frontend / GraphQL schema beyond what's registered**
   — the frontend talks to skilj-graphql's own auto-generated schema
   directly; there's no hand-written GraphQL layer.

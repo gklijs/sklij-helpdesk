@@ -201,6 +201,18 @@ impl SeedState {
         &self.tickets
     }
 
+    /// Phase 4 multi-tenant helper: looks up which company a ticket belongs
+    /// to, so `server.rs`'s own seed loop can route commands for that ticket
+    /// to the company's own tenant context when `TICKET_ROUTING=tenant` (REST
+    /// routes by token, so the loop needs to pick the right token per
+    /// company - see `DemoSeedTokenCache` in `src/bin/server.rs`).
+    pub fn company_for_ticket(&self, ticket_id: &str) -> Option<&str> {
+        self.tickets
+            .iter()
+            .find(|t| t.ticket_id == ticket_id)
+            .map(|t| t.company_id.as_str())
+    }
+
     fn next_ticket_id(&self) -> String {
         format!("{}-{}", self.ticket_id_prefix, self.next_seq)
     }
@@ -256,6 +268,35 @@ pub enum SeedAction {
         primary_ticket_id: String,
         duplicate_ticket_id: String,
     },
+}
+
+impl SeedAction {
+    /// Phase 4 multi-tenant helper: resolves the `company_id` this action
+    /// targets, either from the action itself (`CreateTicket` carries it
+    /// directly) or by looking up the ticket in `SeedState` (every other
+    /// action only has a `ticket_id`). `server.rs`'s own seed loop uses
+    /// this to pick the right per-company tenant token when
+    /// `TICKET_ROUTING=tenant`. Returns `None` for actions that don't
+    /// carry or imply a company (currently none - every variant does, but
+    /// this keeps the `Option` shape honest against future additions).
+    pub fn company_id<'a>(&'a self, state: &'a SeedState) -> Option<&'a str> {
+        let ticket_id = match self {
+            SeedAction::CreateTicket { company_id, .. } => {
+                return Some(company_id);
+            }
+            SeedAction::AssignTicket { ticket_id, .. } => ticket_id,
+            SeedAction::ResolveTicket { ticket_id } => ticket_id,
+            SeedAction::RequestInfo { ticket_id, .. } => ticket_id,
+            SeedAction::CustomerResponds { ticket_id, .. } => ticket_id,
+            SeedAction::ReopenTicket { ticket_id } => ticket_id,
+            SeedAction::AddInternalNote { ticket_id, .. } => ticket_id,
+            SeedAction::RateTicket { ticket_id, .. } => ticket_id,
+            SeedAction::MergeTickets {
+                primary_ticket_id, ..
+            } => primary_ticket_id,
+        };
+        state.company_for_ticket(ticket_id)
+    }
 }
 
 /// Picks the next fake REST call to make. Never mutates `state` itself -
