@@ -72,6 +72,11 @@ use skilj_helpdesk::demo_seed::{self, Rng, SeedAction, SeedState, DEMO_COMPANIES
 use skilj_helpdesk::helpdesk::BOUNDED_CONTEXT;
 use skilj_helpdesk::routing::RoutingMode;
 use skilj_helpdesk::routing_guard::{self, GuardState};
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine;
+use rsa::pkcs1::EncodeRsaPrivateKey;
+use rsa::traits::PublicKeyParts;
+use rsa::RsaPrivateKey;
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
@@ -101,53 +106,20 @@ static TICKET_RATINGS: LazyLock<Counter<u64>> = LazyLock::new(|| {
 
 // --- local JWKS/IdP shortcut - see this file's own doc comment above ---
 //
-// The same fixed test RSA keypair `tests/support/mod.rs` already uses
-// (itself adapted from `skilj-demo/tests/graphql_auth.rs`) - never a
-// real secret, so reusing it here rather than generating a fresh one is
-// simpler with no downside. Duplicated rather than shared across the
-// test/binary boundary, same reasoning as everywhere else this keypair
-// appears in this project.
+// When `OIDC_ISSUER_URL` is unset, this binary falls back to its own
+// self-signed JWKS/JWT shortcut: it spins up a tiny local HTTP server that
+// serves a freshly generated RSA public key, and `sign_jwt` below signs
+// demo JWTs with the matching private key. The key pair is generated at
+// startup from a CSPRNG so no secret is ever committed to source — each
+// `cargo run` gets a new, unpredictable key.
 
-const TEST_PRIVATE_KEY_PEM: &str = "-----BEGIN PRIVATE KEY-----
-MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQDPHVFsUHiWXSbG
-/TCig1cTQHNT6FnoYoZtMEjvDiQArsOL/dFoM9pmGRM9CfEtQGNum4TsimPtgJec
-awfdPnW0uJCRlIF9wGmYdh2mYNBKw8jqxwp664Gd5uqH5L6A4pN8bfGO7+2niD6p
-8t0cNeyYOd0PusbAEDcpzCUZmr6KQyM5i8/wk5oO98gntp+ZpMjUZabAD6R8DyhM
-IZmV645jo5NPJG7zuSz+3dmKkNY0/GXz8YwvZ2swqmmOANRZHHfN1vgP2ycK02WZ
-4yihx6EiuQCDseddBw+xit9KSvSq6GwmwnV1qVpMVNlSGGOeVX7v7JQ3z/BNbQ85
-5p6s/FjhAgMBAAECggEAFu8fKghLIhNUjOpSbVxv0vDrFFqBQitOyV50ZQxCzlSL
-0L+dZZWAVJfoOnUUYLdli0TrVioI4K7Bmw97AnO9IvLhB03TfPJGfxxtMhQ8XFsL
-r3u03GGhq7N7OusIcUslm7ys5/AHd+qtTbJX65zJAx49LVW4VmI1SYqSfSBWgway
-8uGYaXyCfwuxQ+xB4fQd6llm/+9dqS+U36LVSMWgEmVjceorYFhPVLfuX4A1wHjF
-mDl40AwPBqzVbOIzFDMDikk4heFi6wlt6N3LGDtyBUUuzEg5TBhyiirvNvTjW+4V
-Z4MZs3tez+IqM0+F4EsgAEQUU12YQxa4lobm8/zgZQKBgQD81FMzymNR6xWhUSwY
-4RtkVntfMBOMp1rVGcVyBxOLKxEXF6ctk2rV38krfUI50h/lWzrbpl+zJvEe8D1H
-vZjYj28sL3wf0CSnPYUeGANTxrW1dTiz1HVzzChfbAEWj3fsVrlghNcnHBkDDhqz
-L/rPEfp//fB0SyLAEAJt87cgFwKBgQDRtjtH1gIkGn5GCS3u0FAbxV+qrUlTvu4t
-Di1GcEw32jootQQSMZN1PxEvLuehaBlaASEL2OZzZlQ4q60LV1Jisvd7wqv5EYnG
-o+sKtrCS5iXKfkxqTmg+JS7OZazggyvgBnv4GXT0US6/G4nw7C9JaS2jyOvPGIPS
-K8dsWDIxxwKBgQCgr4FBxTticPqKUECqf0cdeilm0fNazXJZRcvLMNwm8vQlrQ6/
-VJXt4BDG5xEUFovXBShfOVpRTkqo0x7fXYyq9l49wuAsh+kDsYHNIo3azMvny9yB
-zmHnerWeD9KROBWLy4J96W+kl6L94hTuFWxd9psyhX4xKx+m2YXxw5d7eQKBgFB2
-I86PHOkvRQ2oDfiX8nSFSQxaSk0Yb5fX3aUuBwBS+YeO1E4KuXH9zaEV1QeHwlpX
-Ho/GG71hIKVRsSYtzc1Sr0PL0GHSydLuJ4tHxv3F0fAcf0M2bCaT656DQk4t5dKh
-ikUJt2baEx59+XH3nLkE4t75gwhFdqZX5775I+EXAoGAfnpHlLZdGW48rl9Cl887
-hRDjXDm/gP/ljCrvxxiWselEgaLj2o4NiT28QAfq7KgtOIpAeLAGzIBP6vkE7KFp
-nAF+t4gRpooXXSI5oXCBcGI9a26q68UV3iDEmQGiP8kVHOsdzcOKY0qk1ulNAIV4
-fU919gnTKorSq3FdV6zGZ8s=
------END PRIVATE KEY-----
-";
-const TEST_MODULUS_N: &str = "zx1RbFB4ll0mxv0wooNXE0BzU-hZ6GKGbTBI7w4kAK7Di_3RaDPaZhkTPQnxLUBjbpuE7Ipj7YCXnGsH3T51tLiQkZSBfcBpmHYdpmDQSsPI6scKeuuBnebqh-S-gOKTfG3xju_tp4g-qfLdHDXsmDndD7rGwBA3KcwlGZq-ikMjOYvP8JOaDvfIJ7afmaTI1GWmwA-kfA8oTCGZleuOY6OTTyRu87ks_t3ZipDWNPxl8_GML2drMKppjgDUWRx3zdb4D9snCtNlmeMoocehIrkAg7HnXQcPsYrfSkr0quhsJsJ1dalaTFTZUhhjnlV-7-yUN8_wTW0POeaerPxY4Q";
-const TEST_EXPONENT_E: &str = "AQAB";
-const TEST_KID: &str = "test-key-1";
 const TEST_ISSUER: &str = "https://idp.example.test/";
 // skilj 0.0.9 requires an explicit `aud` on every verified JWT
 // (IdpConfig::new's `audience`, docs/architecture.md §81) - a token
 // issued to some *other* application at the same IdP must not be
 // accepted here as its user. The local JWKS shortcut's own signed JWTs
 // (sign_jwt below) therefore carry one, exactly like the real Dex-issued
-// ones this falls back from do; never a real secret, same reasoning as
-// the test keypair above.
+// ones this falls back from do.
 const TEST_AUDIENCE: &str = "skilj-helpdesk-test-client";
 // The Dex client id `dex/config.yaml`'s own staticClients registers -
 // the `aud` Dex puts in every token it issues for this deployment
@@ -174,17 +146,76 @@ const DEMO_STAFF_LEAD_SUB: &str = "Cg9zdGFmZi1sZWFkLWRlbW8SBWxvY2Fs";
 // below to it.
 const DEMO_COMPANY_ID: &str = "acme";
 
-async fn serve_local_jwks() -> String {
-    let jwks = json!({
-        "keys": [{
-            "kty": "RSA",
-            "use": "sig",
-            "alg": "RS256",
-            "kid": TEST_KID,
-            "n": TEST_MODULUS_N,
-            "e": TEST_EXPONENT_E,
-        }]
-    });
+// --- local JWKS/IdP shortcut - see this file's own doc comment above ---
+//
+// When `OIDC_ISSUER_URL` is unset, this binary falls back to its own
+// self-signed JWKS/JWT shortcut: it spins up a tiny local HTTP server that
+// serves a freshly generated RSA public key, and `GeneratedKeyPair::sign_jwt`
+// below signs demo JWTs with the matching private key. The key pair is
+// generated at startup from a CSPRNG so no secret is ever committed to source
+// — each `cargo run` gets a new, unpredictable key.
+
+/// A freshly generated RSA keypair for the local JWKS/JWT shortcut.
+/// The private key PEM is used for signing; the JWK representation is served
+/// via the local `/jwks.json` endpoint. Generated once per process lifetime.
+struct GeneratedKeyPair {
+    private_key_pem: String,
+    kid: String,
+    jwks: serde_json::Value,
+}
+
+impl GeneratedKeyPair {
+    fn generate() -> Self {
+        let mut rng = rsa::rand_core::OsRng;
+        let priv_key = RsaPrivateKey::new(&mut rng, 2048)
+            .expect("RSA 2048 key generation from the OS RNG should succeed");
+
+        let priv_pem = priv_key
+            .to_pkcs1_pem(rsa::pkcs1::LineEnding::LF)
+            .expect("PEM encoding a generated RSA key should succeed")
+            .to_string();
+
+        let pub_key = priv_key.to_public_key();
+        let n_bytes = pub_key.n().to_bytes_be();
+        let e_bytes = pub_key.e().to_bytes_be();
+        let n_b64 = URL_SAFE_NO_PAD.encode(&n_bytes);
+        let e_b64 = URL_SAFE_NO_PAD.encode(&e_bytes);
+
+        let kid = "skilj-helpdesk-rs256-01".to_string();
+        let jwks = json!({
+            "keys": [{
+                "kty": "RSA",
+                "use": "sig",
+                "alg": "RS256",
+                "kid": &kid,
+                "n": &n_b64,
+                "e": &e_b64,
+            }]
+        });
+
+        GeneratedKeyPair {
+            private_key_pem: priv_pem,
+            kid,
+            jwks,
+        }
+    }
+
+    fn sign_jwt(&self, subject: &str) -> String {
+        let mut header = Header::new(jsonwebtoken::Algorithm::RS256);
+        header.kid = Some(self.kid.clone());
+        let claims = json!({
+            "sub": subject,
+            "iss": TEST_ISSUER,
+            "aud": TEST_AUDIENCE,
+            "exp": (Utc::now() + chrono::Duration::hours(1)).timestamp(),
+        });
+        let key = EncodingKey::from_rsa_pem(self.private_key_pem.as_bytes())
+            .expect("the generated private key PEM is well-formed");
+        jsonwebtoken::encode(&header, &claims, &key).expect("signing a well-formed JWT never fails")
+    }
+}
+
+async fn serve_local_jwks(jwks: serde_json::Value) -> String {
     let app = axum::Router::new().route(
         "/jwks.json",
         axum::routing::get(move || {
@@ -206,18 +237,37 @@ async fn serve_local_jwks() -> String {
     format!("http://{addr}/jwks.json")
 }
 
-fn sign_jwt(subject: &str) -> String {
-    let mut header = Header::new(jsonwebtoken::Algorithm::RS256);
-    header.kid = Some(TEST_KID.to_string());
-    let claims = json!({
-        "sub": subject,
-        "iss": TEST_ISSUER,
-        "aud": TEST_AUDIENCE,
-        "exp": (Utc::now() + chrono::Duration::hours(1)).timestamp(),
-    });
-    let key = EncodingKey::from_rsa_pem(TEST_PRIVATE_KEY_PEM.as_bytes())
-        .expect("the test private key PEM is well-formed");
-    jsonwebtoken::encode(&header, &claims, &key).expect("signing a well-formed JWT never fails")
+/// CORS policy for the demo server. By default, only the frontend's own dev
+/// server origin is allowed (`http://localhost:8081` and `http://127.0.0.1:8081`).
+/// `CORS_ALLOWED_ORIGINS` can be set to a comma-separated list to override.
+/// This is bearer-token-based (no cookies), so permissive CORS doesn't open
+/// a CSRF hole — but it does let any compromised page read the token out of
+/// `localStorage` and make authenticated requests. A real deployment should
+/// restrict this; the default here already prevents the worst case.
+fn cors_layer() -> tower_http::cors::CorsLayer {
+    let allowed: Vec<axum::http::HeaderValue> = match std::env::var("CORS_ALLOWED_ORIGINS") {
+        Ok(s) if !s.is_empty() => s
+            .split(',')
+            .filter_map(|o| o.trim().parse().ok())
+            .collect(),
+        _ => ["http://localhost:8081", "http://127.0.0.1:8081"]
+            .iter()
+            .filter_map(|o| o.parse().ok())
+            .collect(),
+    };
+    tower_http::cors::CorsLayer::new()
+        .allow_origin(allowed)
+        .allow_methods([
+            axum::http::Method::GET,
+            axum::http::Method::POST,
+            axum::http::Method::OPTIONS,
+        ])
+        .allow_headers([
+            axum::http::header::AUTHORIZATION,
+            axum::http::header::CONTENT_TYPE,
+            axum::http::header::ACCEPT,
+        ])
+        .allow_credentials(false)
 }
 
 /// Every `rest_trigger_allowed` command type in `helpdesk.rs`.
@@ -664,17 +714,19 @@ async fn discover_tenants(
 /// records its rating as a metric, not just in the shared context.
 struct MultiTenantCsatLoop {
     base_url: String,
-    jwt: String,
+    key_pair: Arc<GeneratedKeyPair>,
+    superadmin_subject: String,
     company_tenant_provisioned_token: String,
     /// tenant_name -> TicketRated EventReadToken
     tenant_tokens: HashMap<String, String>,
 }
 
 impl MultiTenantCsatLoop {
-    fn new(config: &MultiTenantCsatConfig, base_url: &str) -> Self {
+    fn new(config: &MultiTenantCsatConfig, base_url: &str, key_pair: Arc<GeneratedKeyPair>) -> Self {
         MultiTenantCsatLoop {
             base_url: base_url.to_string(),
-            jwt: sign_jwt(&config.superadmin_subject),
+            key_pair,
+            superadmin_subject: config.superadmin_subject.clone(),
             company_tenant_provisioned_token: config.company_tenant_provisioned_token.clone(),
             tenant_tokens: HashMap::new(),
         }
@@ -690,14 +742,15 @@ impl MultiTenantCsatLoop {
             &self.company_tenant_provisioned_token,
         )
         .await?;
-        for tenant_name in discovered {
-            if !self.tenant_tokens.contains_key(&tenant_name) {
-                match mint_tenant_ticket_rated_token(
-                    client,
-                    &self.base_url,
-                    &self.jwt,
-                    &tenant_name,
-                )
+                let jwt = self.key_pair.sign_jwt(&self.superadmin_subject);
+                for tenant_name in discovered {
+                    if !self.tenant_tokens.contains_key(&tenant_name) {
+                        match mint_tenant_ticket_rated_token(
+                            client,
+                            &self.base_url,
+                            &jwt,
+                            &tenant_name,
+                        )
                 .await
                 {
                     Ok(token) => {
@@ -776,9 +829,10 @@ async fn run_multi_tenant_csat_loop(
     client: &reqwest::Client,
     base_url: &str,
     config: MultiTenantCsatConfig,
+    key_pair: Arc<GeneratedKeyPair>,
 ) {
     const POLL_INTERVAL: Duration = Duration::from_secs(5);
-    let mut loop_state = MultiTenantCsatLoop::new(&config, base_url);
+    let mut loop_state = MultiTenantCsatLoop::new(&config, base_url, key_pair);
     loop {
         if let Err(e) = loop_state.tick(client).await {
             eprintln!("csat metrics: multi-tenant poll failed, will retry: {e}");
@@ -798,6 +852,7 @@ async fn run_multi_tenant_csat_loop(
 /// not just the shared one.
 struct DemoSeedTokenCache {
     base_url: String,
+    key_pair: Arc<GeneratedKeyPair>,
     superadmin_subject: String,
     company_tenant_provisioned_token: String,
     /// tenant (company_id -> tenant_name) mapping, refreshed each discover
@@ -828,11 +883,13 @@ const DEMO_TENANT_COMMAND_TYPES: &[&str] = &[
 impl DemoSeedTokenCache {
     fn new(
         base_url: &str,
+        key_pair: Arc<GeneratedKeyPair>,
         superadmin_subject: &str,
         company_tenant_provisioned_token: &str,
     ) -> Self {
         DemoSeedTokenCache {
             base_url: base_url.to_string(),
+            key_pair,
             superadmin_subject: superadmin_subject.to_string(),
             company_tenant_provisioned_token: company_tenant_provisioned_token.to_string(),
             company_to_tenant: HashMap::new(),
@@ -875,7 +932,7 @@ impl DemoSeedTokenCache {
                 return;
             }
         };
-        let jwt = sign_jwt(&self.superadmin_subject);
+        let jwt = self.key_pair.sign_jwt(&self.superadmin_subject);
         for event in body.events {
             if let (Some(cid), Some(tn)) = (
                 event.payload["company_id"].as_str(),
@@ -934,7 +991,7 @@ impl DemoSeedTokenCache {
             if let Some(token) = self.command_tokens.get(&key) {
                 return token.clone();
             }
-            let jwt = sign_jwt(&self.superadmin_subject);
+            let jwt = self.key_pair.sign_jwt(&self.superadmin_subject);
             match mint_graphql_command_token(
                 client,
                 &self.base_url,
@@ -1091,13 +1148,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // otherwise. Either way `IdpConfig` is what skilj-graphql actually
     // verifies every GraphQL request's JWT against.
     let oidc_issuer_url = std::env::var("OIDC_ISSUER_URL").ok();
-    let (issuer, jwks_url, audience) = match &oidc_issuer_url {
-        Some(url) => (url.clone(), format!("{url}/keys"), DEX_AUDIENCE),
-        None => (
-            TEST_ISSUER.to_string(),
-            serve_local_jwks().await,
-            TEST_AUDIENCE,
-        ),
+    let (issuer, jwks_url, audience, key_pair) = match &oidc_issuer_url {
+        Some(url) => (url.clone(), format!("{url}/keys"), DEX_AUDIENCE, None),
+        None => {
+            let kp = Arc::new(GeneratedKeyPair::generate());
+            let url = serve_local_jwks(kp.jwks.clone()).await;
+            (TEST_ISSUER.to_string(), url, TEST_AUDIENCE, Some(kp))
+        }
     };
 
     // The two demo identities the frontend's login page offers, seeded
@@ -1231,8 +1288,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("\nreal IdP: {url} - log in as customer@acme.example / customer-demo-pw");
         println!("or lead@acme.example / staff-demo-pw (see dex/config.yaml)");
     } else {
+        let key_pair = key_pair.as_ref().expect("key_pair is Some when no OIDC issuer is configured");
         println!("\nGraphQL Role credential (send as `authorization: Bearer <jwt>`):");
-        println!("  {}", sign_jwt(&role.external_subject));
+        println!("  {}", key_pair.sign_jwt(&role.external_subject));
         println!("(local JWKS shortcut in use - set OIDC_ISSUER_URL to a running Dex for a real login flow)");
     }
 
@@ -1458,7 +1516,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let app = rest
         .merge(graphql)
-        .layer(tower_http::cors::CorsLayer::permissive())
+        .layer(cors_layer())
         .layer(
             tower::ServiceBuilder::new()
                 .layer(axum::error_handling::HandleErrorLayer::new(
@@ -1473,7 +1531,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .concurrency_limit(http_max_in_flight),
         );
 
-    let listener = tokio::net::TcpListener::bind(("0.0.0.0", port)).await?;
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
     println!("\nskilj-helpdesk listening on http://localhost:{port} (REST under /v1/..., GraphQL at /graphql)");
     println!("example - sign up a company:");
     println!(
@@ -1502,8 +1560,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
             let mt_base_url = format!("http://localhost:{port}");
             let mt_client = reqwest::Client::new();
+            let mt_key_pair = key_pair
+                .as_ref()
+                .expect("key_pair is Some when TICKET_ROUTING=tenant in local shortcut mode")
+                .clone();
             tokio::spawn(async move {
-                run_multi_tenant_csat_loop(&mt_client, &mt_base_url, mt_config).await;
+                run_multi_tenant_csat_loop(&mt_client, &mt_base_url, mt_config, mt_key_pair).await;
             });
         }
     }
@@ -1559,8 +1621,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // right tenant context (REST routes by token, so a shared token
         // would always hit the shared `helpdesk` context).
         let tenant_token_cache = if routing_mode == RoutingMode::Tenant {
+            let seed_key_pair = key_pair
+                .as_ref()
+                .expect("key_pair is Some when TICKET_ROUTING=tenant in local shortcut mode")
+                .clone();
             let cache = DemoSeedTokenCache::new(
                 &seed_base_url,
+                seed_key_pair,
                 &external_subject,
                 &alerter_event_tokens["CompanyTenantProvisioned"],
             );

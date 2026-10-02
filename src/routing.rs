@@ -207,12 +207,17 @@ pub fn route(
 ///   - **Validity.** A bounded context name must match
 ///     `[a-z][a-z0-9_]*` and be at most 40 characters
 ///     (`AddBoundedContext`'s own validation). `company_id` is a
-///     free-form caller-supplied string - `SignUpCompanyPayload::company_id`
-///     validates nothing - so `"acme-corp"` (a dash), `"ACME"` (uppercase)
-///     or any id longer than 32 characters produces a name skilj rejects.
+///     caller-supplied string that `SignUpCompany::decide` now rejects as
+///     empty, but otherwise accepts freely — it may be longer than 32
+///     characters, contain uppercase letters, dashes, or non-ASCII — so
+///     `tenant_name_for` must normalise it (see below) rather than using
+///     the raw value.
 ///     `createBoundedContextFromTemplate` then fails for that company, the
 ///     provisioner logs it and moves on, and the company silently keeps
-///     running in the shared context: no error, no isolation.
+///     running in the shared context: no error, no isolation. (This is why
+///     `tenant_name_for` normalises every input rather than forwarding it
+///     raw — it is defence-in-depth for the case where `SignUpCompany`'s own
+///     validation is bypassed via a different code path or a future change.)
 ///   - **Uniqueness.** Any scheme based only on the characters of
 ///     `company_id` can map two different companies onto one name.
 ///

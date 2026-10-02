@@ -90,6 +90,11 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 # explains why). A real dependency, not a dev one: this ships in the
 # `server` binary, not just tests.
 jsonwebtoken = "9"
+# src/bin/server.rs only - generates a fresh RSA keypair at startup for the
+# local JWKS/JWT shortcut (no more hardcoded private key in source).
+rsa = { version = "0.9", default-features = false, features = ["pem", "std"] }
+# base64url for JWK modulus/exponent encoding.
+base64 = "0.22"
 # src/bin/server.rs only - CORS is a per-deployment policy decision
 # (which origins to allow), not something skilj's own rest_router()/
 # graphql_router() should bake in a global answer for - it's the

@@ -938,6 +938,41 @@ impl CommandType for SignUpCompany {
         true
     }
     fn decide(payload: &Self::Payload, matching_events: &[Self::Event]) -> CommandDecision {
+        if payload.company_id.is_empty() {
+            return CommandDecision::Rejected {
+                reason: "company_id must not be empty".into(),
+                kind: "empty_company_id".into(),
+            };
+        }
+        if payload.company_id.len() > 256 {
+            return CommandDecision::Rejected {
+                reason: "company_id is too long (max 256 characters)".into(),
+                kind: "company_id_too_long".into(),
+            };
+        }
+        if payload.name.trim().is_empty() {
+            return CommandDecision::Rejected {
+                reason: "company name must not be empty".into(),
+                kind: "empty_company_name".into(),
+            };
+        }
+        if payload.name.len() > 256 {
+            return CommandDecision::Rejected {
+                reason: "company name is too long (max 256 characters)".into(),
+                kind: "company_name_too_long".into(),
+            };
+        }
+        let email_parts: Vec<&str> = payload.contact_email.splitn(2, '@').collect();
+        if email_parts.len() != 2
+            || email_parts[0].is_empty()
+            || email_parts[1].is_empty()
+            || !email_parts[1].contains('.')
+        {
+            return CommandDecision::Rejected {
+                reason: format!("contact_email {:?} is not a valid email address", payload.contact_email),
+                kind: "invalid_email".into(),
+            };
+        }
         if company_status(matching_events, &payload.company_id).is_some() {
             return CommandDecision::Rejected {
                 reason: format!("company {} has already signed up", payload.company_id),
