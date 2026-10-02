@@ -11,6 +11,18 @@ pub const REDIRECT_URI: &str = "http://127.0.0.1:8081/callback";
 /// overridden, this needs to match.
 pub const GRAPHQL_URL: &str = "http://localhost:8080/graphql";
 
+/// The shared `helpdesk` context - where company *lifecycle* traffic is
+/// authoritative, and where *Ticket* traffic goes for a company that has
+/// no tenant of its own.
+///
+/// **Not what ticket calls should name.** Once a company is provisioned,
+/// its tickets live in its own tenant, so `routing::TicketContext` is
+/// resolved once per session from `TenantDirectory` and used for every
+/// ticket call instead. This constant is still the correct answer for
+/// lifecycle traffic, and for the `TenantDirectory` read that resolution
+/// itself depends on. Naming it directly for a ticket call is the
+/// pre-cutover behaviour, and with `TICKET_ROUTING=tenant` the server
+/// refuses it - see `src/routing_guard.rs`.
 pub const BOUNDED_CONTEXT: &str = "helpdesk";
 
 /// `specs/activity.allium`'s own bounded context - `Dashboard`'s own

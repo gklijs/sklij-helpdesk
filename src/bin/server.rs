@@ -22,7 +22,10 @@
 //! tick, so `concurrency` workers is roughly `concurrency`x one
 //! worker's own request rate, spread smoothly rather than bursting in
 //! lockstep. Unset (the default), nothing about this file's behaviour
-//! changes.
+//! changes. When `TICKET_ROUTING=tenant` is also set, each worker routes
+//! ticket commands to the company's own tenant (discovered from
+//! `CompanyTenantProvisioned` and per-tenant tokens minted via GraphQL),
+//! so the demo exercises the same per-tenant path real traffic takes.
 //!
 //! Needs `DATABASE_URL` pointing at a real Postgres (`PORT` optionally
 //! overrides the default `8080`). Every run is safe to repeat against
@@ -67,8 +70,10 @@ use skilj_core::event_store::{BoundedContext, BoundedContextStatus};
 use skilj_core::shared::{generate_token_id, generate_token_secret};
 use skilj_helpdesk::demo_seed::{self, Rng, SeedAction, SeedState, DEMO_COMPANIES};
 use skilj_helpdesk::helpdesk::BOUNDED_CONTEXT;
+use skilj_helpdesk::routing::RoutingMode;
+use skilj_helpdesk::routing_guard::{self, GuardState};
 use std::collections::HashMap;
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 // --- CSAT metric - see run_csat_metrics_loop's own doc comment ---
@@ -253,6 +258,13 @@ const PROVISIONER_EVENT_TYPES: &[&str] = &["CompanySignedUp"];
 /// (`helpdesk.rs`'s own `ScheduleTicketAutoClose` etc.), which reads
 /// events through its own internal poller, not a minted `EventReadToken`
 /// at all.
+///
+/// `CompanyTenantProvisioned` is in the same set so the alerter can
+/// discover tenants when `TICKET_ROUTING=tenant` is on - see that
+/// config's own doc comment in `src/bin/alerter.rs`. It is *not* one of
+/// the per-tenant event types the alerter mints (the alerter's own
+/// `ALERTER_EVENT_TYPES` constant in that binary lists only the six
+/// ticket types); discovery stays on the shared context only.
 const ALERTER_EVENT_TYPES: &[&str] = &[
     "TicketCreated",
     "TicketResolved",
@@ -260,6 +272,7 @@ const ALERTER_EVENT_TYPES: &[&str] = &[
     "TicketClosed",
     "TicketEscalated",
     "TicketsMerged",
+    "CompanyTenantProvisioned",
 ];
 
 /// `src/bin/lifecycle-replicator.rs`'s own event types - the three
@@ -447,6 +460,29 @@ async fn mint_command_tokens(
 /// installed, `TICKET_RATINGS` already records into a harmless no-op
 /// meter, but there is no reason to keep a poll loop and its own token
 /// alive for that.
+/// One pass of the tenant-access reconciler, on an interval.
+///
+/// Runs unconditionally, including while the cutover is off, because it
+/// is pure preparation: it makes a tenant's grants match the shared
+/// context whether or not anything is being routed there yet. Turning it
+/// off would only save a couple of index reads per company, and would
+/// mean the cutover itself starts from a cold cache - the one moment
+/// where a company's first routed command could arrive before its
+/// reconciler pass.
+///
+/// Interval is short-ish (5s, same as the CSAT loop) because the failure
+/// this guards against is a *rejected customer command*: a Role granted
+/// after provisioning is denied at the tenant until the next pass, and
+/// the window is user-visible. The cost when everything is already in
+/// sync is two indexed reads and a comparison per company per tick.
+async fn run_tenant_access_reconciler(pool: skilj_core::db::Pool, ops_role: Role) {
+    const POLL_INTERVAL: Duration = Duration::from_secs(5);
+    loop {
+        skilj_helpdesk::tenant_access::reconcile_all_tenants(&pool, &ops_role).await;
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
+}
+
 async fn run_csat_metrics_loop(client: &reqwest::Client, base_url: &str, token: &str) {
     const POLL_INTERVAL: Duration = Duration::from_secs(5);
     loop {
@@ -462,7 +498,242 @@ async fn run_csat_metrics_loop(client: &reqwest::Client, base_url: &str, token: 
     }
 }
 
-/// One `GET /v1/events/consume?mode=auto` call, decoded down to just the
+/// Phase 4 multi-tenant CSAT config: when `TICKET_ROUTING=tenant` is set,
+/// `TicketRated` events live in per-company tenant contexts, not just the
+/// shared `helpdesk` one. This struct carries the extra wiring the CSAT loop
+/// needs to discover and poll those tenant feeds:
+///
+/// - `company_tenant_provisioned_token`: an `EventReadToken` for
+///   `CompanyTenantProvisioned` on the shared context, so the loop can
+///   learn which tenants exist (the same approach `src/bin/alerter.rs`
+///   uses).
+/// - `superadmin_subject`: the bootstrap admin Role's `external_subject`,
+///   which this binary signs its own short-lived JWT for to call
+///   `createEventReadToken` on each tenant (the same identity
+///   `src/bin/provisioner.rs` used to grant Admin on each tenant via
+///   `createBoundedContextFromTemplate`'s `roleId`).
+struct MultiTenantCsatConfig {
+    company_tenant_provisioned_token: String,
+    superadmin_subject: String,
+}
+
+/// Mints a per-tenant `TicketRated` `EventReadToken` via skilj's own
+/// `createEventReadToken` GraphQL mutation, signed as the superadmin
+/// identity. Mirrors `src/bin/alerter.rs`'s own
+/// `mint_graphql_event_token` (deliberately duplicated across binaries,
+/// same convention the test key material follows) - only the event type
+/// differs (`TicketRated` instead of the six alerter event types).
+async fn mint_tenant_ticket_rated_token(
+    client: &reqwest::Client,
+    base_url: &str,
+    jwt: &str,
+    tenant_name: &str,
+) -> Result<String, String> {
+    let query = r#"
+        mutation MintTicketRatedToken($bc: String!, $eventTypeName: String!) {
+            createEventReadToken(
+                boundedContext: $bc
+                eventTypeName: $eventTypeName
+            ) {
+                id
+                secret
+            }
+        }
+    "#;
+    let response = client
+        .post(format!("{base_url}/graphql"))
+        .bearer_auth(jwt)
+        .json(&serde_json::json!({
+            "query": query,
+            "variables": {
+                "bc": tenant_name,
+                "eventTypeName": "TicketRated",
+            },
+        }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?
+        .error_for_status()
+        .map_err(|e| e.to_string())?;
+    let body: serde_json::Value = response.json().await.map_err(|e| e.to_string())?;
+    if let Some(errors) = body.get("errors").and_then(|e| e.as_array()) {
+        if !errors.is_empty() {
+            return Err(format!("createEventReadToken errors: {errors:?}"));
+        }
+    }
+    let id = body["data"]["createEventReadToken"]["id"]
+        .as_str()
+        .ok_or_else(|| format!("no id in response: {body:?}"))?;
+    let secret = body["data"]["createEventReadToken"]["secret"]
+        .as_str()
+        .ok_or_else(|| format!("no secret in response: {body:?}"))?;
+    Ok(format!("{id}.{secret}"))
+}
+
+/// Phase 4 multi-tenant helper: mints a per-tenant REST `CommandToken`
+/// via skilj's own `createCommandToken` GraphQL mutation, signed as the
+/// superadmin identity. Mirrors `src/bin/alerter.rs`'s own
+/// `mint_graphql_command_token` (deliberately duplicated across binaries,
+/// same convention the test key material follows) - the server's own
+/// `mint_command_tokens` works against the DB directly, but that path needs
+/// a `RoleAccessMapping` row that only exists once the tenant is
+/// provisioned; this GraphQL route resolves that dynamically at runtime.
+async fn mint_graphql_command_token(
+    client: &reqwest::Client,
+    base_url: &str,
+    jwt: &str,
+    bounded_context: &str,
+    command_type_name: &str,
+) -> Result<String, String> {
+    let query = r#"
+        mutation MintCommandToken($bc: String!, $commandType: String!) {
+            createCommandToken(
+                boundedContext: $bc
+                commandTypeName: $commandType
+            ) {
+                id
+                secret
+            }
+        }
+    "#;
+    let response = client
+        .post(format!("{base_url}/graphql"))
+        .bearer_auth(jwt)
+        .json(&serde_json::json!({
+            "query": query,
+            "variables": {
+                "bc": bounded_context,
+                "commandType": command_type_name,
+            },
+        }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?
+        .error_for_status()
+        .map_err(|e| e.to_string())?;
+    let body: serde_json::Value = response.json().await.map_err(|e| e.to_string())?;
+    if let Some(errors) = body.get("errors").and_then(|e| e.as_array()) {
+        if !errors.is_empty() {
+            return Err(format!("createCommandToken errors: {errors:?}"));
+        }
+    }
+    let id = body["data"]["createCommandToken"]["id"]
+        .as_str()
+        .ok_or_else(|| format!("no id in response: {body:?}"))?;
+    let secret = body["data"]["createCommandToken"]["secret"]
+        .as_str()
+        .ok_or_else(|| format!("no secret in response: {body:?}"))?;
+    Ok(format!("{id}.{secret}"))
+}
+
+/// Discovers tenants from `CompanyTenantProvisioned` events on the shared
+/// context and returns the tenant name, using the same `mode=auto` consume
+/// shape `src/bin/alerter.rs`'s own `consume` helper uses.
+async fn discover_tenants(
+    client: &reqwest::Client,
+    base_url: &str,
+    company_tenant_provisioned_token: &str,
+) -> Result<Vec<String>, reqwest::Error> {
+    #[derive(serde::Deserialize)]
+    struct ConsumeResponse {
+        events: Vec<EventDto>,
+    }
+    #[derive(serde::Deserialize)]
+    struct EventDto {
+        payload: serde_json::Value,
+    }
+    let response = client
+        .get(format!("{base_url}/v1/events/consume"))
+        .query(&[("mode", "auto")])
+        .bearer_auth(company_tenant_provisioned_token)
+        .send()
+        .await?
+        .error_for_status()?;
+    let body: ConsumeResponse = response.json().await?;
+    Ok(body
+        .events
+        .into_iter()
+        .filter_map(|e| e.payload["tenant_name"].as_str().map(str::to_string))
+        .collect())
+}
+
+/// Phase 4 multi-tenant CSAT loop. In addition to the shared-context
+/// `TicketRated` polling `run_csat_metrics_loop` already does, this discovers
+/// per-company tenants and polls each tenant's own `TicketRated` feed - so
+/// a `RateTicket` command routed into a tenant (the Phase 4 cutover) still
+/// records its rating as a metric, not just in the shared context.
+struct MultiTenantCsatLoop {
+    base_url: String,
+    jwt: String,
+    company_tenant_provisioned_token: String,
+    /// tenant_name -> TicketRated EventReadToken
+    tenant_tokens: HashMap<String, String>,
+}
+
+impl MultiTenantCsatLoop {
+    fn new(config: &MultiTenantCsatConfig, base_url: &str) -> Self {
+        MultiTenantCsatLoop {
+            base_url: base_url.to_string(),
+            jwt: sign_jwt(&config.superadmin_subject),
+            company_tenant_provisioned_token: config.company_tenant_provisioned_token.clone(),
+            tenant_tokens: HashMap::new(),
+        }
+    }
+
+    /// One tick: discover new tenants, mint tokens for any unseen ones,
+    /// then consume `TicketRated` from each tenant's own feed.
+    async fn tick(&mut self, client: &reqwest::Client) -> Result<(), reqwest::Error> {
+        // Discover new tenants from the shared context.
+        let discovered = discover_tenants(
+            client,
+            &self.base_url,
+            &self.company_tenant_provisioned_token,
+        )
+        .await?;
+        for tenant_name in discovered {
+            if !self.tenant_tokens.contains_key(&tenant_name) {
+                match mint_tenant_ticket_rated_token(
+                    client,
+                    &self.base_url,
+                    &self.jwt,
+                    &tenant_name,
+                )
+                .await
+                {
+                    Ok(token) => {
+                        println!(
+                            "csat metrics: minted TicketRated token for tenant {tenant_name}"
+                        );
+                        self.tenant_tokens.insert(tenant_name.clone(), token);
+                    }
+                    Err(e) => eprintln!("csat metrics: minting TicketRated for tenant {tenant_name} failed: {e}"),
+                }
+            }
+        }
+
+        // Consume TicketRated from each tenant's own feed.
+        for (tenant_name, token) in &self.tenant_tokens {
+            match consume_ticket_rated(client, &self.base_url, token).await {
+                Ok(ratings) => {
+                    for rating in ratings {
+                        TICKET_RATINGS.add(1, &[opentelemetry::KeyValue::new(
+                            "rating",
+                            i64::from(rating),
+                        )]);
+                    }
+                }
+                Err(e) => {
+                    eprintln!(
+                        "csat metrics: poll failed for tenant {tenant_name}: {e}"
+                    );
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
 /// `rating` field this loop needs - the identical shape
 /// `src/bin/alerter.rs`'s own `consume` has, duplicated rather than
 /// shared for the same "no common library boundary worth introducing
@@ -494,6 +765,200 @@ async fn consume_ticket_rated(
         .filter_map(|e| e.payload["rating"].as_u64())
         .map(|r| r as u8)
         .collect())
+}
+
+/// Phase 4 multi-tenant CSAT loop: discovers tenants from
+/// `CompanyTenantProvisioned` events, mints a per-tenant `TicketRated`
+/// `EventReadToken` via GraphQL, and polls that tenant's own feed - so a
+/// `RateTicket` command routed into a tenant (Phase 4 cutover) still records
+/// its rating as a metric, not just in the shared context.
+async fn run_multi_tenant_csat_loop(
+    client: &reqwest::Client,
+    base_url: &str,
+    config: MultiTenantCsatConfig,
+) {
+    const POLL_INTERVAL: Duration = Duration::from_secs(5);
+    let mut loop_state = MultiTenantCsatLoop::new(&config, base_url);
+    loop {
+        if let Err(e) = loop_state.tick(client).await {
+            eprintln!("csat metrics: multi-tenant poll failed, will retry: {e}");
+        }
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
+}
+
+/// Phase 4 multi-tenant demo seed tokens: discovers per-company tenants
+/// (consuming `CompanyTenantProvisioned` from the shared context) and mints
+/// per-tenant REST `createCommandToken` values for each tenant, so the demo
+/// seed loop can route ticket commands into the right tenant when
+/// `TICKET_ROUTING=tenant`. Follows the same lazy-discover-and-cache shape
+/// `src/bin/alerter.rs`'s own `TenantTokenCache` uses (deliberately
+/// duplicated across binaries, same convention the test key material
+/// follows) - REST routes by token, so each tenant needs its own token set,
+/// not just the shared one.
+struct DemoSeedTokenCache {
+    base_url: String,
+    superadmin_subject: String,
+    company_tenant_provisioned_token: String,
+    /// tenant (company_id -> tenant_name) mapping, refreshed each discover
+    company_to_tenant: HashMap<String, String>,
+    /// (company_id, command_type_name) -> REST command token, for ticket
+    /// commands that must hit the tenant context
+    command_tokens: HashMap<(String, &'static str), String>,
+}
+
+/// The ticket command types the demo seed loop fires - all of which must
+/// route to the tenant, not the shared context, when `TICKET_ROUTING=tenant`.
+/// Used to pre-mint per-tenant tokens for each discovered tenant in one
+/// batch (one GraphQL `createCommandToken` mutation per type per tenant),
+/// rather than minting them one at a time on first use inside the seed loop.
+const DEMO_TENANT_COMMAND_TYPES: &[&str] = &[
+    "CreateTicket",
+    "AssignTicket",
+    "ResolveTicket",
+    "ReopenTicket",
+    "RequestInfoFromCustomer",
+    "CustomerRespondsToTicket",
+    "EscalateTicket",
+    "MergeTickets",
+    "RateTicket",
+    "AddInternalNote",
+];
+
+impl DemoSeedTokenCache {
+    fn new(
+        base_url: &str,
+        superadmin_subject: &str,
+        company_tenant_provisioned_token: &str,
+    ) -> Self {
+        DemoSeedTokenCache {
+            base_url: base_url.to_string(),
+            superadmin_subject: superadmin_subject.to_string(),
+            company_tenant_provisioned_token: company_tenant_provisioned_token.to_string(),
+            company_to_tenant: HashMap::new(),
+            command_tokens: HashMap::new(),
+        }
+    }
+
+     /// Refresh the company -> tenant_name map from `CompanyTenantProvisioned`,
+    /// and pre-mint per-tenant command tokens for any newly discovered
+    /// tenant (so the seed loop's first `CreateTicket` for that company
+    /// doesn't block on a GraphQL round-trip per command type).
+    async fn refresh_tenant_map(&mut self, client: &reqwest::Client) {
+        // Reuses the same `CompanyTenantProvisioned` consume that the CSAT
+        // loop above does. The payload carries `company_id` -> `tenant_name`.
+        #[derive(serde::Deserialize)]
+        struct EventDto {
+            payload: serde_json::Value,
+        }
+        #[derive(serde::Deserialize)]
+        struct ConsumeResponse {
+            events: Vec<EventDto>,
+        }
+        let response = match client
+            .get(format!("{}/v1/events/consume", self.base_url))
+            .query(&[("mode", "auto")])
+            .bearer_auth(&self.company_tenant_provisioned_token)
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("demo-seed: tenant discovery failed, will retry: {e}");
+                return;
+            }
+        };
+        let body: ConsumeResponse = match response.json().await {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("demo-seed: tenant discovery response decode failed: {e}");
+                return;
+            }
+        };
+        let jwt = sign_jwt(&self.superadmin_subject);
+        for event in body.events {
+            if let (Some(cid), Some(tn)) = (
+                event.payload["company_id"].as_str(),
+                event.payload["tenant_name"].as_str(),
+            ) {
+                // Skip if already known - avoids re-minting tokens for
+                // tenants discovered in a previous tick.
+                if self.company_to_tenant.contains_key(cid) {
+                    continue;
+                }
+                self.company_to_tenant.insert(cid.to_string(), tn.to_string());
+                // Pre-mint all demo tenant command tokens for this tenant
+                // in one batch, so the seed loop can fire immediately.
+                for &command_type in DEMO_TENANT_COMMAND_TYPES {
+                    match mint_graphql_command_token(
+                        client,
+                        &self.base_url,
+                        &jwt,
+                        tn,
+                        command_type,
+                    )
+                    .await
+                    {
+                        Ok(token) => {
+                            self.command_tokens
+                                .insert((cid.to_string(), command_type), token);
+                        }
+                        Err(e) => eprintln!(
+                            "demo-seed: pre-minting {command_type} for tenant {tn} failed: {e}"
+                        ),
+                    }
+                }
+            }
+        }
+    }
+
+    /// Returns a REST command token for `command_type` in `company_id`'s
+    /// tenant, minting it on the first miss. Falls back to `fallback` when
+    /// the company has no tenant yet (or minting fails) - which keeps the
+    /// seed loop running against the shared context until provisioning
+    /// catches up, rather than blocking on tenant existence at startup.
+    async fn get_or_mint(
+        &mut self,
+        client: &reqwest::Client,
+        company_id: &str,
+        command_type: &'static str,
+        fallback: &str,
+    ) -> String {
+        // Refresh if we don't know this company's tenant yet.
+        if !self.company_to_tenant.contains_key(company_id) {
+            self.refresh_tenant_map(client).await;
+        }
+        let tenant_name = self.company_to_tenant.get(company_id);
+        if let Some(tenant_name) = tenant_name {
+            let key = (company_id.to_string(), command_type);
+            if let Some(token) = self.command_tokens.get(&key) {
+                return token.clone();
+            }
+            let jwt = sign_jwt(&self.superadmin_subject);
+            match mint_graphql_command_token(
+                client,
+                &self.base_url,
+                &jwt,
+                tenant_name,
+                command_type,
+            )
+            .await
+            {
+                Ok(token) => {
+                    self.command_tokens.insert(key, token.clone());
+                    token
+                }
+                Err(e) => {
+                    eprintln!(
+                        "demo-seed: minting {command_type} for tenant {tenant_name} failed: {e}"
+                    );
+                    fallback.to_string()
+                }
+            }
+        } else {
+            fallback.to_string()
+        }
+    }
 }
 
 #[tokio::main]
@@ -862,6 +1327,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         command_tokens["EscalateTicket"]
     );
     println!("  cargo run --bin alerter");
+    println!();
+    println!("  # Phase 4: multi-tenant mode (TICKET_ROUTING=tenant).");
+    println!("  # When the cutover is on, the alerter discovers per-company");
+    println!("  # tenants from CompanyTenantProvisioned, then mints its own");
+    println!("  # per-tenant tokens via GraphQL using this superadmin subject.");
+    println!("  export COMPANY_TENANT_PROVISIONED_TOKEN={}", alerter_event_tokens["CompanyTenantProvisioned"]);
+    println!("  export ALERTER_SUPERADMIN_SUBJECT={external_subject}");
 
     println!("\nto run the provisioner against this server:");
     println!("  export SKILJ_BASE_URL=http://localhost:{port}");
@@ -952,6 +1424,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(70);
+    // Ticket-routing enforcement, in front of the GraphQL router only.
+    // The frontend resolves each company's tenant and names it; this
+    // refuses ticket traffic that names the shared `helpdesk` context
+    // instead, so a client that resolved no tenant - or one deliberately
+    // naming shared - can't split a company's history across two
+    // contexts. REST needs no equivalent: `skilj-rest` derives its
+    // destination from the command token rather than from a body field.
+    //
+    // A `from_fn_with_state` layer on the GraphQL router rather than on
+    // the merged `app`, so it cannot slow down or interfere with the
+    // REST surface or anything else merged in later. With the cutover
+    // off (the default) it short-circuits without buffering the body at
+    // all - see `routing_guard::enforce_graphql_routing`.
+    let routing_mode = routing_guard::mode_from_env();
+    let graphql = if routing_mode == RoutingMode::Tenant {
+        println!(
+            "\nticket routing is ON (TICKET_ROUTING=tenant): each company's Ticket traffic is \
+             served from that company's own tenant, and GraphQL traffic naming the shared \
+             {BOUNDED_CONTEXT:?} context for a company that has a tenant is refused. Company \
+             lifecycle traffic stays shared."
+        );
+        let guard_state = Arc::new(GuardState {
+            pool: pool.clone(),
+            mode: routing_mode,
+        });
+        graphql.layer(axum::middleware::from_fn_with_state(
+            guard_state,
+            routing_guard::enforce_graphql_routing,
+        ))
+    } else {
+        graphql
+    };
     let app = rest
         .merge(graphql)
         .layer(tower_http::cors::CorsLayer::permissive())
@@ -984,7 +1488,43 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let base_url = format!("http://localhost:{port}");
         let client = reqwest::Client::new();
         tokio::spawn(async move { run_csat_metrics_loop(&client, &base_url, &token).await });
+
+        // Phase 4: when TICKET_ROUTING=tenant, TicketRated events also
+        // land in per-company tenant contexts. This second loop discovers
+        // those tenants from CompanyTenantProvisioned and polls each
+        // tenant's own TicketRated feed - so a RateTicket command routed
+        // into a tenant still records its rating as a metric.
+        if routing_mode == RoutingMode::Tenant {
+            let mt_config = MultiTenantCsatConfig {
+                company_tenant_provisioned_token: alerter_event_tokens["CompanyTenantProvisioned"]
+                    .clone(),
+                superadmin_subject: external_subject.clone(),
+            };
+            let mt_base_url = format!("http://localhost:{port}");
+            let mt_client = reqwest::Client::new();
+            tokio::spawn(async move {
+                run_multi_tenant_csat_loop(&mt_client, &mt_base_url, mt_config).await;
+            });
+        }
     }
+
+    // Keep each company's access grants mirrored into its own tenant -
+    // `src/tenant_access.rs`'s own module doc comment for why this has to
+    // exist before any traffic is routed there (skilj-graphql's
+    // `submitCommand` authorizes against the caller's mapping on the
+    // *named* context, so a tenant with no grant simply rejects
+    // everything).
+    //
+    // Runs on an interval rather than once at startup because a Role's
+    // grant can be added or revoked long after its tenant was
+    // provisioned - `SignUpCompany` creates no Roles at all, so at
+    // provisioning time there is usually nothing yet to mirror, and the
+    // first real grant arrives afterwards.
+    let reconciler_pool = pool.clone();
+    let reconciler_role = role.clone();
+    tokio::spawn(
+        async move { run_tenant_access_reconciler(reconciler_pool, reconciler_role).await },
+    );
 
     // Optional fake traffic - see this file's own module doc comment.
     // Reuses the exact CommandTokens just minted/printed above, so this
@@ -1014,11 +1554,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         let seed_base_url = format!("http://localhost:{port}");
         let seed_tokens = command_tokens.clone();
+        // Phase 4: when TICKET_ROUTING=tenant, the demo seed also needs a
+        // per-company tenant token cache so ticket commands route to the
+        // right tenant context (REST routes by token, so a shared token
+        // would always hit the shared `helpdesk` context).
+        let tenant_token_cache = if routing_mode == RoutingMode::Tenant {
+            let cache = DemoSeedTokenCache::new(
+                &seed_base_url,
+                &external_subject,
+                &alerter_event_tokens["CompanyTenantProvisioned"],
+            );
+            Some(Arc::new(tokio::sync::Mutex::new(cache)))
+        } else {
+            None
+        };
         tokio::spawn(async move {
             sign_up_demo_companies(&seed_base_url, &seed_tokens).await;
             for worker_index in 0..concurrency {
                 let base_url = seed_base_url.clone();
                 let tokens = seed_tokens.clone();
+                let tenant_cache = tenant_token_cache.clone();
                 // Staggers each worker's first tick evenly across one
                 // interval, rather than every worker firing in lockstep
                 // every `interval_ms` - a smoother, more realistic load
@@ -1032,6 +1587,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         worker_index,
                         base_url,
                         tokens,
+                        tenant_cache,
                         Duration::from_millis(interval_ms),
                     )
                     .await;
@@ -1115,6 +1671,7 @@ async fn run_demo_seed_loop(
     worker_index: usize,
     base_url: String,
     command_tokens: HashMap<&'static str, String>,
+    tenant_token_cache: Option<Arc<tokio::sync::Mutex<DemoSeedTokenCache>>>,
     interval: Duration,
 ) {
     let client = reqwest::Client::new();
@@ -1128,14 +1685,24 @@ async fn run_demo_seed_loop(
         tokio::time::sleep(interval).await;
         let action = demo_seed::next_action(&state, &mut rng);
         let (command_type_name, payload) = command_and_payload(&action);
-        match trigger_command(
-            &client,
-            &base_url,
-            &command_tokens[command_type_name],
-            payload,
-        )
-        .await
-        {
+        // Phase 4: when TICKET_ROUTING=tenant, resolve the per-company
+        // tenant token for this action's company instead of the always-
+        // shared one. Token resolution is itself async (tenant discovery +
+        // mint), so this only happens on the multi-tenant path.
+        let credential = if let Some(cache) = &tenant_token_cache {
+            let company_id = action.company_id(&state);
+            match company_id {
+                Some(cid) => {
+                    let mut cache = cache.lock().await;
+                    let fallback = command_tokens[command_type_name].clone();
+                    cache.get_or_mint(&client, cid, command_type_name, &fallback).await
+                }
+                None => command_tokens[command_type_name].clone(),
+            }
+        } else {
+            command_tokens[command_type_name].clone()
+        };
+        match trigger_command(&client, &base_url, &credential, payload).await {
             Ok(accepted) => {
                 demo_seed::apply_outcome(&mut state, &action, accepted);
                 tracing::info!(?action, accepted, "demo-seed: fired fake command");

@@ -15,8 +15,11 @@ pub mod alerting;
 pub mod demo_seed;
 pub mod helpdesk;
 pub mod marketing;
+pub mod routing;
+pub mod routing_guard;
 pub mod scheduling;
 pub mod telemetry;
+pub mod tenant_access;
 
 /// Registers every bounded context this crate defines. `auto_register()`
 /// alone still covers every `EventType`/`CommandType` in `helpdesk`,

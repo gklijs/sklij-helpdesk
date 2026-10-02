@@ -1,6 +1,7 @@
 use crate::{
     api, auth, config,
     model::{TicketInternalNote, TicketListEntry},
+    routing::TicketContext,
     theme::ThemeToggle,
 };
 use leptos::ev::SubmitEvent;
@@ -15,16 +16,24 @@ use web_sys::window;
 /// `helpdesk.rs`. Shared between the "Notes" toggle's own first fetch
 /// and `AddInternalNote`'s own re-fetch-after-success, rather than
 /// duplicated inline in each.
+///
+/// Takes the resolved `TicketContext` rather than naming a context
+/// itself: the notes projection is keyed by `ticket_id`, so nothing in
+/// this request identifies the company, and the context has to come from
+/// the one resolution the dashboard already did. Passing it down is what
+/// keeps this read on the same tenant as the `AddInternalNote` write
+/// that precedes it.
 async fn fetch_internal_notes(
     token: &str,
+    ticket_context: &TicketContext,
     ticket_id: &str,
 ) -> Result<Vec<TicketInternalNote>, String> {
     let json = api::query_projection(
         token,
-        config::BOUNDED_CONTEXT,
+        ticket_context.bounded_context(),
         "TicketInternalNotes",
         ticket_id,
-        "helpdesk_TicketInternalNotes",
+        &ticket_context.graphql_type("TicketInternalNotes"),
         "notes",
     )
     .await?;
@@ -114,17 +123,43 @@ pub fn Dashboard() -> impl IntoView {
     let (status, set_status) = signal(String::new());
     let (refresh, set_refresh) = signal(0u32);
 
+    // Where this company's Ticket traffic belongs, resolved once per
+    // session and then read by every ticket call below. Resolving here
+    // rather than per call is the point: reads and writes have to agree
+    // on the context or the dashboard shows one company's history while
+    // its writes land in another.
+    //
+    // Starts as `Resolving` and the fetch below waits on it, so the
+    // first load of a session can't read the shared context before the
+    // answer is known. Every ticket action is also gated on it - see
+    // `on_create` - because a write sent before resolution finished
+    // would be the one request the server refuses as misrouted.
+    let (ticket_context, set_ticket_context) = signal(TicketContext::Resolving);
+    {
+        let token = token.clone();
+        spawn_local(async move {
+            set_ticket_context.set(crate::routing::resolve(&token).await);
+        });
+    }
+
     let fetch_token = token.clone();
     Effect::new(move |_| {
         refresh.get();
+        // Track the resolved context as well as the refresh counter, so
+        // the first fetch happens once resolution lands rather than
+        // firing immediately against an unknown context.
+        let context = ticket_context.get();
+        if context == TicketContext::Resolving {
+            return;
+        }
         let token = fetch_token.clone();
         spawn_local(async move {
             let result = api::query_projection(
                 &token,
-                config::BOUNDED_CONTEXT,
+                context.bounded_context(),
                 "CompanyTicketList",
                 config::DEMO_COMPANY_ID,
-                "helpdesk_CompanyTicketList",
+                &context.graphql_type("CompanyTicketList"),
                 "tickets",
             )
             .await
@@ -147,6 +182,15 @@ pub fn Dashboard() -> impl IntoView {
     let create_requester = my_sub.clone();
     let on_create = move |ev: SubmitEvent| {
         ev.prevent_default();
+        // Refused while the context is still unknown rather than
+        // defaulted to the shared context: this is the one request that
+        // could otherwise open a session by writing to the wrong place.
+        let context = ticket_context.get();
+        if context == TicketContext::Resolving {
+            set_status
+                .set("still working out which context to use - try again in a moment".to_string());
+            return;
+        }
         let token = create_token.clone();
         let requester_id = create_requester.clone();
         let title = new_title.get();
@@ -163,7 +207,7 @@ pub fn Dashboard() -> impl IntoView {
                 "description": description,
                 "priority": priority,
             });
-            match api::submit_command(&token, config::BOUNDED_CONTEXT, "CreateTicket", &payload)
+            match api::submit_command(&token, context.bounded_context(), "CreateTicket", &payload)
                 .await
             {
                 Ok(_) => set_refresh.update(|n| *n += 1),
@@ -244,6 +288,7 @@ pub fn Dashboard() -> impl IntoView {
                                     is_staff=is_staff
                                     my_sub=my_sub.clone()
                                     token=token.clone()
+                                    ticket_context=ticket_context.get()
                                     set_refresh=set_refresh
                                     set_status=set_status
                                 />
@@ -264,6 +309,7 @@ fn TicketRow(
     is_staff: bool,
     my_sub: String,
     token: String,
+    ticket_context: TicketContext,
     set_refresh: WriteSignal<u32>,
     set_status: WriteSignal<String>,
 ) -> impl IntoView {
@@ -273,12 +319,22 @@ fn TicketRow(
     // their own copy of it too.
     let run = {
         let token = token.clone();
+        let ticket_context = ticket_context.clone();
         move |command_type_name: &'static str, payload: serde_json::Value| {
+            // Same gate as `on_create`: a ticket action taken before the
+            // context resolved must not default to the shared context.
+            if ticket_context == TicketContext::Resolving {
+                set_status.set(
+                    "still working out which context to use - try again in a moment".to_string(),
+                );
+                return;
+            }
             let token = token.clone();
+            let ticket_context = ticket_context.clone();
             spawn_local(async move {
                 match api::submit_command(
                     &token,
-                    config::BOUNDED_CONTEXT,
+                    ticket_context.bounded_context(),
                     command_type_name,
                     &payload,
                 )
@@ -403,14 +459,23 @@ fn TicketRow(
     let toggle_notes = {
         let ticket_id = ticket_id.clone();
         let token = token.clone();
+        let ticket_context = ticket_context.clone();
         move |_| {
             let opening = !notes_open.get();
             set_notes_open.set(opening);
             if opening {
                 let ticket_id = ticket_id.clone();
                 let token = token.clone();
+                let ticket_context = ticket_context.clone();
                 spawn_local(async move {
-                    match fetch_internal_notes(&token, &ticket_id).await {
+                    if ticket_context == TicketContext::Resolving {
+                        set_status.set(
+                            "still working out which context to use - try again in a moment"
+                                .to_string(),
+                        );
+                        return;
+                    }
+                    match fetch_internal_notes(&token, &ticket_context, &ticket_id).await {
                         Ok(list) => set_notes.set(list),
                         Err(e) => set_status.set(format!("couldn't load notes: {e}")),
                     }
@@ -422,29 +487,42 @@ fn TicketRow(
         let ticket_id = ticket_id.clone();
         let my_sub = my_sub.clone();
         let token = token.clone();
+        let ticket_context = ticket_context.clone();
         move |_| {
             let text = note_text.get();
             if text.trim().is_empty() {
+                return;
+            }
+            if ticket_context == TicketContext::Resolving {
+                set_status.set(
+                    "still working out which context to use - try again in a moment".to_string(),
+                );
                 return;
             }
             set_note_text.set(String::new());
             let ticket_id = ticket_id.clone();
             let staff_id = my_sub.clone();
             let token = token.clone();
+            let ticket_context = ticket_context.clone();
             spawn_local(async move {
                 let payload = serde_json::json!({ "ticket_id": ticket_id, "staff_id": staff_id, "note": text });
                 match api::submit_command(
                     &token,
-                    config::BOUNDED_CONTEXT,
+                    ticket_context.bounded_context(),
                     "AddInternalNote",
                     &payload,
                 )
                 .await
                 {
-                    Ok(_) => match fetch_internal_notes(&token, &ticket_id).await {
-                        Ok(list) => set_notes.set(list),
-                        Err(e) => set_status.set(format!("couldn't reload notes: {e}")),
-                    },
+                    // The re-fetch uses the same context as the write that
+                    // preceded it, so a note can never be written to one
+                    // context and read back from another.
+                    Ok(_) => {
+                        match fetch_internal_notes(&token, &ticket_context, &ticket_id).await {
+                            Ok(list) => set_notes.set(list),
+                            Err(e) => set_status.set(format!("couldn't reload notes: {e}")),
+                        }
+                    }
                     Err(e) => set_status.set(format!("AddInternalNote failed: {e}")),
                 }
             });
