@@ -19,6 +19,7 @@ frontend/dist/
 *.swp
 *.swo
 *~
+.mcp.json
 
 # OS cruft
 .DS_Store

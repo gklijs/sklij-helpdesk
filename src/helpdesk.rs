@@ -962,14 +962,24 @@ impl CommandType for SignUpCompany {
                 kind: "company_name_too_long".into(),
             };
         }
-        let email_parts: Vec<&str> = payload.contact_email.splitn(2, '@').collect();
-        if email_parts.len() != 2
-            || email_parts[0].is_empty()
-            || email_parts[1].is_empty()
-            || !email_parts[1].contains('.')
-        {
+        let valid_email = match payload.contact_email.split_once('@') {
+            Some((local, domain)) => {
+                !local.is_empty()
+                    && !domain.is_empty()
+                    && !domain.contains('@')
+                    && domain.contains('.')
+                    && !domain.starts_with('.')
+                    && !domain.ends_with('.')
+                    && !payload.contact_email.chars().any(char::is_whitespace)
+            }
+            None => false,
+        };
+        if !valid_email {
             return CommandDecision::Rejected {
-                reason: format!("contact_email {:?} is not a valid email address", payload.contact_email),
+                reason: format!(
+                    "contact_email {:?} is not a valid email address",
+                    payload.contact_email
+                ),
                 kind: "invalid_email".into(),
             };
         }
@@ -2713,5 +2723,69 @@ impl Projection for TenantDirectory {
         if let HelpdeskEvent::CompanyTenantProvisioned(p) = event {
             state.tenant_name = Some(p.tenant_name.clone());
         }
+    }
+}
+
+#[cfg(test)]
+mod sign_up_validation_tests {
+    use super::*;
+
+    fn decide(company_id: &str, name: &str, contact_email: &str) -> CommandDecision {
+        SignUpCompany::decide(
+            &SignUpCompanyPayload {
+                company_id: company_id.into(),
+                name: name.into(),
+                contact_email: contact_email.into(),
+            },
+            &[],
+        )
+    }
+
+    fn rejection_kind(decision: CommandDecision) -> Option<String> {
+        match decision {
+            CommandDecision::Rejected { kind, .. } => Some(kind),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn a_well_formed_sign_up_is_not_rejected() {
+        assert_eq!(
+            rejection_kind(decide("acme", "Acme", "a@acme.example")),
+            None
+        );
+    }
+
+    #[test]
+    fn malformed_contact_emails_are_rejected() {
+        for email in [
+            "",
+            "acme.example",
+            "@acme.example",
+            "a@",
+            "a@localhost",
+            "a@b@acme.example",
+            "a@.acme",
+            "a@acme.",
+            "a b@acme.example",
+        ] {
+            assert_eq!(
+                rejection_kind(decide("acme", "Acme", email)).as_deref(),
+                Some("invalid_email"),
+                "{email:?} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn empty_ids_and_names_are_rejected() {
+        assert_eq!(
+            rejection_kind(decide("", "Acme", "a@acme.example")).as_deref(),
+            Some("empty_company_id")
+        );
+        assert_eq!(
+            rejection_kind(decide("acme", "  ", "a@acme.example")).as_deref(),
+            Some("empty_company_name")
+        );
     }
 }

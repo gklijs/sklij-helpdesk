@@ -28,7 +28,9 @@
 //! so the demo exercises the same per-tenant path real traffic takes.
 //!
 //! Needs `DATABASE_URL` pointing at a real Postgres (`PORT` optionally
-//! overrides the default `8080`). Every run is safe to repeat against
+//! overrides the default `8080`; `BIND_ADDR` the default `127.0.0.1` -
+//! set it to `0.0.0.0` to serve beyond this machine, e.g. in a
+//! container). Every run is safe to repeat against
 //! the same database: the bounded context is only created if it doesn't
 //! exist yet, and each run mints its own fresh admin `Role` and tokens
 //! rather than reusing a previous run's.
@@ -47,7 +49,9 @@
 //! Leave it unset and this falls back to the same local JWKS/JWT
 //! shortcut `skilj-demo`'s own server uses, so `cargo run --bin server`
 //! alone still works with zero extra setup - the frontend's own login
-//! flow is what actually needs `OIDC_ISSUER_URL` set.
+//! flow is what actually needs `OIDC_ISSUER_URL` set. That shortcut's
+//! signing key is generated fresh on every start, so a JWT printed by
+//! one run stops verifying once the server restarts.
 //!
 //! The two demo identities `frontend/`'s login page offers
 //! (`customer@acme.example` / `customer-demo-pw`, `lead@acme.example` /
@@ -57,10 +61,15 @@
 //! exact config - `DEMO_CUSTOMER_SUB`/`DEMO_STAFF_LEAD_SUB` below -
 //! deterministic for that config, not something computed at runtime).
 
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine;
 use chrono::Utc;
 use jsonwebtoken::{EncodingKey, Header};
 use opentelemetry::metrics::Counter;
 use opentelemetry::KeyValue;
+use rsa::pkcs1::EncodeRsaPrivateKey;
+use rsa::traits::PublicKeyParts;
+use rsa::RsaPrivateKey;
 use serde_json::json;
 use skilj::{IdpConfig, SigningAlgorithm, Skilj};
 use skilj_core::access_control::{self, AccessLevel, Role, RoleAccessMapping, RoleStatus};
@@ -72,11 +81,6 @@ use skilj_helpdesk::demo_seed::{self, Rng, SeedAction, SeedState, DEMO_COMPANIES
 use skilj_helpdesk::helpdesk::BOUNDED_CONTEXT;
 use skilj_helpdesk::routing::RoutingMode;
 use skilj_helpdesk::routing_guard::{self, GuardState};
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use base64::Engine;
-use rsa::pkcs1::EncodeRsaPrivateKey;
-use rsa::traits::PublicKeyParts;
-use rsa::RsaPrivateKey;
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
@@ -103,15 +107,6 @@ static TICKET_RATINGS: LazyLock<Counter<u64>> = LazyLock::new(|| {
         .with_description("CSAT ratings recorded via RateTicket, by rating value (1-5).")
         .build()
 });
-
-// --- local JWKS/IdP shortcut - see this file's own doc comment above ---
-//
-// When `OIDC_ISSUER_URL` is unset, this binary falls back to its own
-// self-signed JWKS/JWT shortcut: it spins up a tiny local HTTP server that
-// serves a freshly generated RSA public key, and `sign_jwt` below signs
-// demo JWTs with the matching private key. The key pair is generated at
-// startup from a CSPRNG so no secret is ever committed to source — each
-// `cargo run` gets a new, unpredictable key.
 
 const TEST_ISSUER: &str = "https://idp.example.test/";
 // skilj 0.0.9 requires an explicit `aud` on every verified JWT
@@ -246,10 +241,7 @@ async fn serve_local_jwks(jwks: serde_json::Value) -> String {
 /// restrict this; the default here already prevents the worst case.
 fn cors_layer() -> tower_http::cors::CorsLayer {
     let allowed: Vec<axum::http::HeaderValue> = match std::env::var("CORS_ALLOWED_ORIGINS") {
-        Ok(s) if !s.is_empty() => s
-            .split(',')
-            .filter_map(|o| o.trim().parse().ok())
-            .collect(),
+        Ok(s) if !s.is_empty() => s.split(',').filter_map(|o| o.trim().parse().ok()).collect(),
         _ => ["http://localhost:8081", "http://127.0.0.1:8081"]
             .iter()
             .filter_map(|o| o.parse().ok())
@@ -722,7 +714,11 @@ struct MultiTenantCsatLoop {
 }
 
 impl MultiTenantCsatLoop {
-    fn new(config: &MultiTenantCsatConfig, base_url: &str, key_pair: Arc<GeneratedKeyPair>) -> Self {
+    fn new(
+        config: &MultiTenantCsatConfig,
+        base_url: &str,
+        key_pair: Arc<GeneratedKeyPair>,
+    ) -> Self {
         MultiTenantCsatLoop {
             base_url: base_url.to_string(),
             key_pair,
@@ -742,24 +738,19 @@ impl MultiTenantCsatLoop {
             &self.company_tenant_provisioned_token,
         )
         .await?;
-                let jwt = self.key_pair.sign_jwt(&self.superadmin_subject);
-                for tenant_name in discovered {
-                    if !self.tenant_tokens.contains_key(&tenant_name) {
-                        match mint_tenant_ticket_rated_token(
-                            client,
-                            &self.base_url,
-                            &jwt,
-                            &tenant_name,
-                        )
-                .await
+        let jwt = self.key_pair.sign_jwt(&self.superadmin_subject);
+        for tenant_name in discovered {
+            if !self.tenant_tokens.contains_key(&tenant_name) {
+                match mint_tenant_ticket_rated_token(client, &self.base_url, &jwt, &tenant_name)
+                    .await
                 {
                     Ok(token) => {
-                        println!(
-                            "csat metrics: minted TicketRated token for tenant {tenant_name}"
-                        );
+                        println!("csat metrics: minted TicketRated token for tenant {tenant_name}");
                         self.tenant_tokens.insert(tenant_name.clone(), token);
                     }
-                    Err(e) => eprintln!("csat metrics: minting TicketRated for tenant {tenant_name} failed: {e}"),
+                    Err(e) => eprintln!(
+                        "csat metrics: minting TicketRated for tenant {tenant_name} failed: {e}"
+                    ),
                 }
             }
         }
@@ -769,16 +760,14 @@ impl MultiTenantCsatLoop {
             match consume_ticket_rated(client, &self.base_url, token).await {
                 Ok(ratings) => {
                     for rating in ratings {
-                        TICKET_RATINGS.add(1, &[opentelemetry::KeyValue::new(
-                            "rating",
-                            i64::from(rating),
-                        )]);
+                        TICKET_RATINGS.add(
+                            1,
+                            &[opentelemetry::KeyValue::new("rating", i64::from(rating))],
+                        );
                     }
                 }
                 Err(e) => {
-                    eprintln!(
-                        "csat metrics: poll failed for tenant {tenant_name}: {e}"
-                    );
+                    eprintln!("csat metrics: poll failed for tenant {tenant_name}: {e}");
                 }
             }
         }
@@ -897,7 +886,7 @@ impl DemoSeedTokenCache {
         }
     }
 
-     /// Refresh the company -> tenant_name map from `CompanyTenantProvisioned`,
+    /// Refresh the company -> tenant_name map from `CompanyTenantProvisioned`,
     /// and pre-mint per-tenant command tokens for any newly discovered
     /// tenant (so the seed loop's first `CreateTicket` for that company
     /// doesn't block on a GraphQL round-trip per command type).
@@ -943,18 +932,13 @@ impl DemoSeedTokenCache {
                 if self.company_to_tenant.contains_key(cid) {
                     continue;
                 }
-                self.company_to_tenant.insert(cid.to_string(), tn.to_string());
+                self.company_to_tenant
+                    .insert(cid.to_string(), tn.to_string());
                 // Pre-mint all demo tenant command tokens for this tenant
                 // in one batch, so the seed loop can fire immediately.
                 for &command_type in DEMO_TENANT_COMMAND_TYPES {
-                    match mint_graphql_command_token(
-                        client,
-                        &self.base_url,
-                        &jwt,
-                        tn,
-                        command_type,
-                    )
-                    .await
+                    match mint_graphql_command_token(client, &self.base_url, &jwt, tn, command_type)
+                        .await
                     {
                         Ok(token) => {
                             self.command_tokens
@@ -1033,6 +1017,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok()
         .and_then(|p| p.parse().ok())
         .unwrap_or(8080);
+    let bind_addr: std::net::IpAddr = match std::env::var("BIND_ADDR") {
+        Ok(addr) => addr
+            .parse()
+            .map_err(|e| format!("BIND_ADDR {addr:?} is not an IP address: {e}"))?,
+        Err(_) => std::net::Ipv4Addr::LOCALHOST.into(),
+    };
 
     // db::connect's bare default (sqlx's own PgPoolOptions::new(), a
     // 10-connection cap) turned out to be the actual ceiling on this
@@ -1288,7 +1278,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("\nreal IdP: {url} - log in as customer@acme.example / customer-demo-pw");
         println!("or lead@acme.example / staff-demo-pw (see dex/config.yaml)");
     } else {
-        let key_pair = key_pair.as_ref().expect("key_pair is Some when no OIDC issuer is configured");
+        let key_pair = key_pair
+            .as_ref()
+            .expect("key_pair is Some when no OIDC issuer is configured");
         println!("\nGraphQL Role credential (send as `authorization: Bearer <jwt>`):");
         println!("  {}", key_pair.sign_jwt(&role.external_subject));
         println!("(local JWKS shortcut in use - set OIDC_ISSUER_URL to a running Dex for a real login flow)");
@@ -1390,7 +1382,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  # When the cutover is on, the alerter discovers per-company");
     println!("  # tenants from CompanyTenantProvisioned, then mints its own");
     println!("  # per-tenant tokens via GraphQL using this superadmin subject.");
-    println!("  export COMPANY_TENANT_PROVISIONED_TOKEN={}", alerter_event_tokens["CompanyTenantProvisioned"]);
+    println!(
+        "  export COMPANY_TENANT_PROVISIONED_TOKEN={}",
+        alerter_event_tokens["CompanyTenantProvisioned"]
+    );
     println!("  export ALERTER_SUPERADMIN_SUBJECT={external_subject}");
 
     println!("\nto run the provisioner against this server:");
@@ -1514,25 +1509,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         graphql
     };
-    let app = rest
-        .merge(graphql)
-        .layer(cors_layer())
-        .layer(
-            tower::ServiceBuilder::new()
-                .layer(axum::error_handling::HandleErrorLayer::new(
-                    |_: tower::BoxError| async {
-                        (
-                            axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                            "overloaded - too many in-flight requests, try again shortly",
-                        )
-                    },
-                ))
-                .load_shed()
-                .concurrency_limit(http_max_in_flight),
-        );
+    let app = rest.merge(graphql).layer(cors_layer()).layer(
+        tower::ServiceBuilder::new()
+            .layer(axum::error_handling::HandleErrorLayer::new(
+                |_: tower::BoxError| async {
+                    (
+                        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                        "overloaded - too many in-flight requests, try again shortly",
+                    )
+                },
+            ))
+            .load_shed()
+            .concurrency_limit(http_max_in_flight),
+    );
 
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
-    println!("\nskilj-helpdesk listening on http://localhost:{port} (REST under /v1/..., GraphQL at /graphql)");
+    let listener = tokio::net::TcpListener::bind((bind_addr, port)).await?;
+    println!("\nskilj-helpdesk listening on http://{bind_addr}:{port} (REST under /v1/..., GraphQL at /graphql)");
     println!("example - sign up a company:");
     println!(
         "  curl -H 'authorization: Bearer {}' -H 'content-type: application/json' \\\n\
@@ -1552,7 +1544,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // those tenants from CompanyTenantProvisioned and polls each
         // tenant's own TicketRated feed - so a RateTicket command routed
         // into a tenant still records its rating as a metric.
-        if routing_mode == RoutingMode::Tenant {
+        //
+        // It mints its per-tenant tokens with a JWT this process signs
+        // itself, so it only works with the local JWKS shortcut: a real
+        // IdP would never verify that JWT.
+        if routing_mode == RoutingMode::Tenant && key_pair.is_none() {
+            eprintln!(
+                "csat metrics: OIDC_ISSUER_URL is set, so tenant TicketRated feeds are not \
+                 polled (the per-tenant tokens need a locally signed JWT)"
+            );
+        }
+        if let (RoutingMode::Tenant, Some(mt_key_pair)) = (routing_mode, key_pair.clone()) {
             let mt_config = MultiTenantCsatConfig {
                 company_tenant_provisioned_token: alerter_event_tokens["CompanyTenantProvisioned"]
                     .clone(),
@@ -1560,10 +1562,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
             let mt_base_url = format!("http://localhost:{port}");
             let mt_client = reqwest::Client::new();
-            let mt_key_pair = key_pair
-                .as_ref()
-                .expect("key_pair is Some when TICKET_ROUTING=tenant in local shortcut mode")
-                .clone();
             tokio::spawn(async move {
                 run_multi_tenant_csat_loop(&mt_client, &mt_base_url, mt_config, mt_key_pair).await;
             });
@@ -1620,21 +1618,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // per-company tenant token cache so ticket commands route to the
         // right tenant context (REST routes by token, so a shared token
         // would always hit the shared `helpdesk` context).
-        let tenant_token_cache = if routing_mode == RoutingMode::Tenant {
-            let seed_key_pair = key_pair
-                .as_ref()
-                .expect("key_pair is Some when TICKET_ROUTING=tenant in local shortcut mode")
-                .clone();
-            let cache = DemoSeedTokenCache::new(
-                &seed_base_url,
-                seed_key_pair,
-                &external_subject,
-                &alerter_event_tokens["CompanyTenantProvisioned"],
+        // Same local-JWT limitation as the multi-tenant CSAT loop above:
+        // with a real IdP the seed falls back to the shared context.
+        if routing_mode == RoutingMode::Tenant && key_pair.is_none() {
+            eprintln!(
+                "demo seed: OIDC_ISSUER_URL is set, so seed traffic is not routed to tenants \
+                 (the per-tenant tokens need a locally signed JWT)"
             );
-            Some(Arc::new(tokio::sync::Mutex::new(cache)))
-        } else {
-            None
-        };
+        }
+        let tenant_token_cache =
+            if let (RoutingMode::Tenant, Some(seed_key_pair)) = (routing_mode, key_pair.clone()) {
+                let cache = DemoSeedTokenCache::new(
+                    &seed_base_url,
+                    seed_key_pair,
+                    &external_subject,
+                    &alerter_event_tokens["CompanyTenantProvisioned"],
+                );
+                Some(Arc::new(tokio::sync::Mutex::new(cache)))
+            } else {
+                None
+            };
         tokio::spawn(async move {
             sign_up_demo_companies(&seed_base_url, &seed_tokens).await;
             for worker_index in 0..concurrency {
@@ -1762,7 +1765,9 @@ async fn run_demo_seed_loop(
                 Some(cid) => {
                     let mut cache = cache.lock().await;
                     let fallback = command_tokens[command_type_name].clone();
-                    cache.get_or_mint(&client, cid, command_type_name, &fallback).await
+                    cache
+                        .get_or_mint(&client, cid, command_type_name, &fallback)
+                        .await
                 }
                 None => command_tokens[command_type_name].clone(),
             }

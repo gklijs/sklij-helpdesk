@@ -627,16 +627,20 @@ pub async fn enforce_graphql_routing(
     }
 
     let (parts, body) = request.into_parts();
-    let Ok(bytes) = axum::body::to_bytes(body, MAX_INSPECTED_BODY).await else {
-        // A body that cannot be read whole is passed on as-is. Failing
+    let bytes = match buffer_up_to(body, MAX_INSPECTED_BODY).await {
+        Buffered::Whole(bytes) => bytes,
+        // Too large to inspect: pass it on uninspected but intact - the
+        // prefix already read followed by the rest of the stream. Failing
         // closed here would turn this module into an outage cause for
         // requests it simply cannot see.
-        return next
-            .run(axum::extract::Request::from_parts(
-                parts,
-                axum::body::Body::empty(),
-            ))
-            .await;
+        Buffered::Overflow(rest) => {
+            return next
+                .run(axum::extract::Request::from_parts(parts, rest))
+                .await;
+        }
+        Buffered::Failed => {
+            return refusal_response("couldn't read the request body");
+        }
     };
 
     let refused = match serde_json::from_slice::<serde_json::Value>(&bytes) {
@@ -653,6 +657,41 @@ pub async fn enforce_graphql_routing(
         RewoundBody::from(bytes),
     ))
     .await
+}
+
+/// What `buffer_up_to` managed to read.
+enum Buffered {
+    /// The whole body, within the limit.
+    Whole(axum::body::Bytes),
+    /// The body exceeded the limit; this is an equivalent body (the bytes
+    /// already read, then whatever is left) to forward uninspected.
+    Overflow(RewoundBody),
+    /// The underlying stream errored.
+    Failed,
+}
+
+/// Read `body` until it ends or exceeds `limit` bytes.
+///
+/// Unlike `axum::body::to_bytes`, going over the limit does not lose what
+/// was read: the caller gets back a body that still yields every byte.
+async fn buffer_up_to(body: axum::body::Body, limit: usize) -> Buffered {
+    use futures_util::StreamExt;
+
+    let mut stream = body.into_data_stream();
+    let mut buffered = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let Ok(chunk) = chunk else {
+            return Buffered::Failed;
+        };
+        buffered.extend_from_slice(&chunk);
+        if buffered.len() > limit {
+            let prefix = futures_util::stream::once(async move {
+                Ok::<_, axum::Error>(axum::body::Bytes::from(buffered))
+            });
+            return Buffered::Overflow(RewoundBody::from_stream(prefix.chain(stream)));
+        }
+    }
+    Buffered::Whole(buffered.into())
 }
 
 /// Check one parsed GraphQL request, returning a refusal response if the
@@ -761,6 +800,33 @@ mod tests {
 
     fn ticket(name: &str) -> Guarded {
         Guarded::Command(name.to_string())
+    }
+
+    #[tokio::test]
+    async fn a_body_over_the_inspection_limit_is_forwarded_intact() {
+        // Two chunks, the first already over the limit, so the overflow
+        // path has to stitch the read prefix back onto the unread rest.
+        let chunks = vec![
+            Ok::<_, std::io::Error>(axum::body::Bytes::from(vec![b'a'; 10])),
+            Ok(axum::body::Bytes::from(vec![b'b'; 5])),
+        ];
+        let body = axum::body::Body::from_stream(futures_util::stream::iter(chunks));
+        let Buffered::Overflow(rest) = buffer_up_to(body, 8).await else {
+            panic!("a 15-byte body must overflow an 8-byte limit");
+        };
+        let forwarded = axum::body::to_bytes(rest, usize::MAX).await.unwrap();
+        let mut expected = vec![b'a'; 10];
+        expected.extend(vec![b'b'; 5]);
+        assert_eq!(forwarded.as_ref(), expected.as_slice());
+    }
+
+    #[tokio::test]
+    async fn a_body_within_the_limit_is_buffered_whole() {
+        let body = axum::body::Body::from("{}");
+        let Buffered::Whole(bytes) = buffer_up_to(body, 8).await else {
+            panic!("a 2-byte body fits an 8-byte limit");
+        };
+        assert_eq!(bytes.as_ref(), b"{}");
     }
 
     #[test]

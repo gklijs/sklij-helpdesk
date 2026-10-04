@@ -55,6 +55,16 @@ pub enum SyncAction {
     /// counterpart is gone. Only ever proposed for a mapping scoped to
     /// *this* company - see `sync_plan`.
     Revoke { role_id: String },
+    /// Both sides hold a company-scoped grant for this Role, but the
+    /// tenant's level or sensitive-read flag differs from the authority's.
+    /// Carried out as a revoke followed by a grant at the shared level, so
+    /// a downgrade on the shared context is never left stronger in the
+    /// tenant.
+    Regrant {
+        role_id: String,
+        level: AccessLevel,
+        can_read_sensitive: bool,
+    },
 }
 
 /// The reconciler's whole decision, as data: the grants and revokes that
@@ -67,6 +77,7 @@ pub enum SyncAction {
 pub struct SyncPlan {
     pub grants: Vec<SyncAction>,
     pub revokes: Vec<SyncAction>,
+    pub regrants: Vec<SyncAction>,
 }
 
 impl SyncPlan {
@@ -74,7 +85,7 @@ impl SyncPlan {
     /// overwhelmingly common case. Callers use it to stay quiet rather
     /// than log an empty tick every interval.
     pub fn is_noop(&self) -> bool {
-        self.grants.is_empty() && self.revokes.is_empty()
+        self.grants.is_empty() && self.revokes.is_empty() && self.regrants.is_empty()
     }
 }
 
@@ -118,15 +129,30 @@ pub fn sync_plan(
     let mut plan = SyncPlan::default();
 
     for shared in &shared_for_company {
-        if !tenant_for_company
+        match tenant_for_company
             .iter()
-            .any(|t| t.role.id == shared.role.id)
+            .find(|t| t.role.id == shared.role.id)
         {
-            plan.grants.push(SyncAction::Grant {
+            None => plan.grants.push(SyncAction::Grant {
                 role_id: shared.role.id.clone(),
                 level: shared.level,
                 can_read_sensitive: shared.can_read_sensitive,
-            });
+            }),
+            // Presence alone is not enough: a shared grant that was
+            // narrowed (lower level, sensitive reads switched off) must
+            // narrow the tenant copy too, or the projection keeps access
+            // the authority already took away.
+            Some(tenant)
+                if tenant.level != shared.level
+                    || tenant.can_read_sensitive != shared.can_read_sensitive =>
+            {
+                plan.regrants.push(SyncAction::Regrant {
+                    role_id: shared.role.id.clone(),
+                    level: shared.level,
+                    can_read_sensitive: shared.can_read_sensitive,
+                })
+            }
+            Some(_) => {}
         }
     }
 
@@ -151,6 +177,8 @@ pub struct SyncOutcome {
     pub tenant_name: String,
     pub granted: Vec<String>,
     pub revoked: Vec<String>,
+    /// Roles whose tenant grant was replaced to match the shared level.
+    pub regranted: Vec<String>,
     /// Something this reconciler declined to do or could not do. Non-empty
     /// means the tenant is *not* a faithful copy of the authority, which
     /// is worth surfacing rather than leaving access quietly wrong.
@@ -265,6 +293,44 @@ pub async fn reconcile_company_access(
             Err(e) => skip(
                 &mut outcome,
                 format!("revocation of {role_id} on {tenant_name:?} failed: {e}"),
+            ),
+        }
+    }
+
+    for action in plan.regrants {
+        let SyncAction::Regrant {
+            role_id,
+            level,
+            can_read_sensitive,
+        } = action
+        else {
+            unreachable!("sync_plan only ever puts Regrant in `regrants`")
+        };
+        // Revoke first: if the grant then fails the Role is left with no
+        // tenant access (retried next pass) rather than the stale,
+        // possibly stronger one.
+        if let Err(e) = revoke_one(pool, &role_id, tenant_name, company_id).await {
+            skip(
+                &mut outcome,
+                format!("regrant of {role_id} on {tenant_name:?} failed to revoke: {e}"),
+            );
+            continue;
+        }
+        match grant_one(
+            pool,
+            ops_role,
+            &role_id,
+            &tenant_bc,
+            level,
+            can_read_sensitive,
+            company_id,
+        )
+        .await
+        {
+            Ok(()) => outcome.regranted.push(role_id),
+            Err(e) => skip(
+                &mut outcome,
+                format!("regrant of {role_id} on {tenant_name:?} revoked but failed to grant: {e}"),
             ),
         }
     }
@@ -403,13 +469,17 @@ pub async fn reconcile_all_tenants(pool: &db::Pool, ops_role: &Role) -> Vec<Sync
     let mut outcomes = Vec::with_capacity(pairs.len());
     for (company_id, tenant_name) in pairs {
         let outcome = reconcile_company_access(pool, ops_role, &company_id, &tenant_name).await;
-        if !outcome.granted.is_empty() || !outcome.revoked.is_empty() {
+        if !outcome.granted.is_empty()
+            || !outcome.revoked.is_empty()
+            || !outcome.regranted.is_empty()
+        {
             println!(
-                "tenant-access: company {} / tenant {}: granted {}, revoked {}",
+                "tenant-access: company {} / tenant {}: granted {}, revoked {}, regranted {}",
                 outcome.company_id,
                 outcome.tenant_name,
                 outcome.granted.len(),
-                outcome.revoked.len()
+                outcome.revoked.len(),
+                outcome.regranted.len()
             );
         }
         for skipped in &outcome.skipped {
@@ -611,5 +681,36 @@ mod tests {
         );
         assert_eq!(plan.grants, vec![grant("cust-2")]);
         assert!(plan.revokes.is_empty());
+    }
+
+    #[test]
+    fn a_downgrade_on_the_shared_context_is_mirrored_into_the_tenant() {
+        // The tenant copy must never stay stronger than the authority: a
+        // customer narrowed to Read, or with sensitive reads switched off,
+        // has to lose that in their tenant too.
+        let shared = mapping("cust", BOUNDED_CONTEXT, Some("acme"));
+        let mut tenant = mapping("cust", "company-acme", Some("acme"));
+        tenant.level = AccessLevel::Admin;
+        tenant.can_read_sensitive = true;
+        let plan = sync_plan("acme", &[shared], &[tenant]);
+        assert_eq!(
+            plan.regrants,
+            vec![SyncAction::Regrant {
+                role_id: "cust".into(),
+                level: AccessLevel::Write,
+                can_read_sensitive: false,
+            }]
+        );
+        assert!(plan.grants.is_empty() && plan.revokes.is_empty());
+    }
+
+    #[test]
+    fn a_matching_tenant_grant_is_left_alone() {
+        let plan = sync_plan(
+            "acme",
+            &[mapping("cust", BOUNDED_CONTEXT, Some("acme"))],
+            &[mapping("cust", "company-acme", Some("acme"))],
+        );
+        assert!(plan.is_noop(), "{plan:?}");
     }
 }

@@ -42,7 +42,7 @@
 //!   only runs the suite once would keep reporting it as a flake.
 //!
 //! Serializing every test in the file is therefore the honest fix, and it
-//! is cheap: this file's seven tests share one already-migrated database
+//! is cheap: this file's eight tests share one already-migrated database
 //! and no per-test setup beyond `fixture()`, so running them one at a time
 //! costs a handful of seconds, not the minutes a naive read of "all the
 //! integration tests take ~3s each" would suggest. Softening an assertion
@@ -336,6 +336,70 @@ fn revoking_a_customer_on_the_shared_context_revokes_them_in_the_tenant_too() {
             "the reconciler must never revoke the provisioning identity"
         );
         drop(shared);
+    });
+}
+
+#[test]
+fn downgrading_a_customer_on_the_shared_context_downgrades_them_in_the_tenant_too() {
+    runtime().block_on(async {
+        if test_db().await.is_none() {
+            return;
+        }
+        let _guard = exclusive().await;
+        let (_graphql, _rest, pool, fixture) = fixture().await;
+        let customer = seed_role(&pool, "acme-customer").await;
+        seed_scoped_mapping(
+            &pool,
+            &customer,
+            AccessLevel::Write,
+            Some(fixture.company_id.clone()),
+        )
+        .await;
+        reconcile_company_access(
+            &pool,
+            &fixture.ops_role,
+            &fixture.company_id,
+            &fixture.tenant_name,
+        )
+        .await;
+
+        // The authority narrows the grant from Write to Read.
+        db::revoke_active_role_access_mapping(
+            &pool,
+            &customer.id,
+            BOUNDED_CONTEXT,
+            chrono::Utc::now(),
+        )
+        .await
+        .unwrap();
+        seed_scoped_mapping(
+            &pool,
+            &customer,
+            AccessLevel::Read,
+            Some(fixture.company_id.clone()),
+        )
+        .await;
+
+        let outcome = reconcile_company_access(
+            &pool,
+            &fixture.ops_role,
+            &fixture.company_id,
+            &fixture.tenant_name,
+        )
+        .await;
+        assert_eq!(
+            outcome.regranted,
+            vec![customer.id.clone()],
+            "a narrowed shared grant must narrow the tenant copy: {outcome:?}"
+        );
+        assert!(outcome.skipped.is_empty(), "skipped: {:?}", outcome.skipped);
+        let after = mappings_for(&pool, &fixture.tenant_name, &customer.id).await;
+        assert_eq!(after.len(), 1, "exactly one active tenant grant: {after:?}");
+        assert_eq!(
+            after[0].level,
+            AccessLevel::Read,
+            "the tenant copy must never stay stronger than the authority"
+        );
     });
 }
 

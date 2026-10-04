@@ -108,6 +108,11 @@ tower-http = { version = "0.6", features = ["cors"] }
 # makes the server fail fast (503) instead of queuing unboundedly many
 # in-flight requests in memory (see docs/load-test-report-2026-09-17.md).
 tower = { version = "0.5", features = ["limit", "load-shed"] }
+# src/routing_guard.rs only - buffers at most MAX_INSPECTED_BODY of a
+# GraphQL body and, when it is larger, hands the downstream router the
+# buffered prefix chained with the unread rest (already in the tree via
+# axum/reqwest).
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 # Telemetry (src/telemetry.rs, used by all three binaries) - versions
 # pinned to match ../skilj/Cargo.toml exactly. skilj-core/skilj-rest/
 # skilj only ever call opentelemetry::global::meter()/global tracer -
