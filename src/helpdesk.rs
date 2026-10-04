@@ -2226,9 +2226,7 @@ fn priority_str(priority: TicketPriority) -> &'static str {
 
 /// Keyed by `ticket_id`. `specs/skilj-helpdesk.allium`'s `unhandled`
 /// derived field is `status not in {resolved, closed}` - not stored
-/// here directly since `closed` never occurs in this pass
-/// (`TicketAutoCloses` is deferred); a caller derives it from `status`
-/// the same way.
+/// here directly; a caller derives it from `status`.
 pub struct TicketSummary;
 
 #[auto_register(BOUNDED_CONTEXT)]

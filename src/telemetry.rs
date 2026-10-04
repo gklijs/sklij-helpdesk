@@ -14,10 +14,11 @@
 //! call sites needed anywhere in this crate's own `helpdesk.rs` for any
 //! of the three.
 //!
-//! Shared across all three binaries (`server`/`alerter`/`engagement-watcher`),
-//! each passing its own `service_name` - so they show up as three
-//! distinct services in whatever OTLP backend is on the other end,
-//! rather than one undifferentiated blob. `cargo run` works with no
+//! Shared across every binary (`server`/`alerter`/`engagement-watcher`/
+//! `lifecycle-replicator`/`provisioner`), each passing its own
+//! `service_name` - so they show up as distinct services in whatever
+//! OTLP backend is on the other end, rather than one undifferentiated
+//! blob. `cargo run` works with no
 //! collector present either way.
 
 /// The three OTel SDK providers [`init`] builds when
