@@ -337,6 +337,12 @@ rule TicketAutoCloses {
         -- sequential event processing (whichever happens first is what
         -- the ticket's state reflects), noted here so it's not silently
         -- unspecified.
+        -- The timer runs from the latest `resolved_at`: a ticket resolved,
+        -- reopened and resolved again waits the full period from its
+        -- second resolution. `src/helpdesk.rs` keeps this by cancelling
+        -- a resolution's deadline when it is reopened
+        -- (`CancelTicketAutoCloseOnReopen`), not only by re-checking
+        -- status when the deadline fires.
 }
 
 -- Alerting. Resolved design note above: this only decides *when* a

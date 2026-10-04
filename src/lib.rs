@@ -34,9 +34,9 @@ pub mod tenant_access;
 /// `ScheduleCompanyTrialConversion` doc comment for the latter), so each
 /// of `specs/marketing.allium`'s three `CrossContextRoute`s and
 /// `helpdesk.rs`'s three `ScheduleDeadline`s is wired in here, by name,
-/// explicitly. No `CancelDeadline` registrations - `helpdesk.rs`'s own
-/// deadline reactors deliberately have none (see their own doc
-/// comments for why).
+/// explicitly, as is the one `CancelDeadline` (`helpdesk.rs`'s
+/// `CancelTicketAutoCloseOnReopen`). The trial deadlines have no cancel
+/// on purpose - see `ScheduleCompanyTrialConversion`'s own doc comment.
 pub fn register(builder: skilj::SkiljBuilder) -> skilj::SkiljBuilder {
     builder
         .auto_register()
@@ -46,4 +46,5 @@ pub fn register(builder: skilj::SkiljBuilder) -> skilj::SkiljBuilder {
         .schedule_deadline::<helpdesk::ScheduleCompanyTrialConversion>()
         .schedule_deadline::<helpdesk::ScheduleCompanyTrialExpiry>()
         .schedule_deadline::<helpdesk::ScheduleTicketAutoClose>()
+        .cancel_deadline::<helpdesk::CancelTicketAutoCloseOnReopen>()
 }

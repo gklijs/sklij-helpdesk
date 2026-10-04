@@ -26,7 +26,7 @@ fn ticket_summary_follows_a_ticket_through_its_whole_lifecycle() {
             TicketPriority::Low,
             TicketPriority::Medium,
         ))
-        .event(resolved("t1", "acme"))
+        .event(resolved("t1", "acme", 1))
         .event(rated("t1", "acme", 4))
         .event(closed("t1", "acme"))
         .then_state(TicketSummaryState {
@@ -48,7 +48,7 @@ fn ticket_summary_shows_each_intermediate_status() {
         (
             {
                 let mut events = resolved_ticket("t1", "acme");
-                events.push(reopened("t1", "acme"));
+                events.push(reopened("t1", "acme", 1));
                 events
             },
             "in_progress",
@@ -174,7 +174,7 @@ fn internal_notes_never_reach_the_customer_visible_ticket_list() {
 fn company_ticket_list_skips_events_for_tickets_it_never_saw_created() {
     GivenEvents::<CompanyTicketList>::new()
         .event(assigned("ghost", "acme", "staff-1"))
-        .event(resolved("ghost", "acme"))
+        .event(resolved("ghost", "acme", 1))
         .then(|state| assert!(state.tickets.is_empty()));
 }
 

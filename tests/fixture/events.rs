@@ -79,17 +79,19 @@ pub fn assigned(ticket_id: &str, company_id: &str, staff_id: &str) -> HelpdeskEv
     })
 }
 
-pub fn resolved(ticket_id: &str, company_id: &str) -> HelpdeskEvent {
+pub fn resolved(ticket_id: &str, company_id: &str, resolution: u32) -> HelpdeskEvent {
     HelpdeskEvent::TicketResolved(TicketResolvedPayload {
         ticket_id: ticket_id.into(),
         company_id: company_id.into(),
+        resolution: Some(resolution),
     })
 }
 
-pub fn reopened(ticket_id: &str, company_id: &str) -> HelpdeskEvent {
+pub fn reopened(ticket_id: &str, company_id: &str, resolution: u32) -> HelpdeskEvent {
     HelpdeskEvent::TicketReopened(TicketReopenedPayload {
         ticket_id: ticket_id.into(),
         company_id: company_id.into(),
+        resolution: Some(resolution),
     })
 }
 
@@ -178,7 +180,7 @@ pub fn waiting_ticket(ticket_id: &str, company_id: &str) -> Vec<HelpdeskEvent> {
 
 pub fn resolved_ticket(ticket_id: &str, company_id: &str) -> Vec<HelpdeskEvent> {
     let mut events = in_progress_ticket(ticket_id, company_id);
-    events.push(resolved(ticket_id, company_id));
+    events.push(resolved(ticket_id, company_id, 1));
     events
 }
 

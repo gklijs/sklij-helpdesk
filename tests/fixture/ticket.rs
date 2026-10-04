@@ -2,7 +2,7 @@
 //! rejection kind it can return.
 
 use serde_json::json;
-use skilj::ScheduleDeadline;
+use skilj::{CancelDeadline, ScheduleDeadline};
 use skilj_core::shared::Tag;
 use skilj_helpdesk::helpdesk::*;
 use skilj_helpdesk::scheduling;
@@ -152,7 +152,7 @@ fn an_in_progress_ticket_resolves() {
         })
         .then_accepted(vec![spec(
             "TicketResolved",
-            json!({ "ticket_id": "t1", "company_id": "acme" }),
+            json!({ "ticket_id": "t1", "company_id": "acme", "resolution": 1 }),
         )]);
 }
 
@@ -182,16 +182,31 @@ fn a_resolved_ticket_reopens_and_can_be_resolved_again() {
         })
         .then_accepted(vec![spec(
             "TicketReopened",
-            json!({ "ticket_id": "t1", "company_id": "acme" }),
+            json!({ "ticket_id": "t1", "company_id": "acme", "resolution": 1 }),
         )]);
     let mut history = resolved_ticket("t1", "acme");
-    history.push(reopened("t1", "acme"));
+    history.push(reopened("t1", "acme", 1));
     GivenEvents::<ResolveTicket>::new()
         .events(history)
         .when(ResolveTicketPayload {
             ticket_id: "t1".into(),
         })
-        .then(assert_accepted);
+        .then_accepted(vec![spec(
+            "TicketResolved",
+            json!({ "ticket_id": "t1", "company_id": "acme", "resolution": 2 }),
+        )]);
+    let mut history = resolved_ticket("t1", "acme");
+    history.push(reopened("t1", "acme", 1));
+    history.push(resolved("t1", "acme", 2));
+    GivenEvents::<ReopenTicket>::new()
+        .events(history)
+        .when(ReopenTicketPayload {
+            ticket_id: "t1".into(),
+        })
+        .then_accepted(vec![spec(
+            "TicketReopened",
+            json!({ "ticket_id": "t1", "company_id": "acme", "resolution": 2 }),
+        )]);
 }
 
 #[test]
@@ -225,10 +240,11 @@ fn a_resolved_ticket_closes() {
 
 #[test]
 fn an_auto_close_that_lost_the_race_to_a_reopen_is_rejected() {
-    // ScheduleTicketAutoClose has no CancelDeadline - this guard is what
-    // stops a reopened ticket from closing when its old deadline fires.
+    // CancelTicketAutoCloseOnReopen normally cancels the old deadline;
+    // this guard still covers a deadline scheduled before resolutions
+    // were numbered, which no reopen can cancel.
     let mut history = resolved_ticket("t1", "acme");
-    history.push(reopened("t1", "acme"));
+    history.push(reopened("t1", "acme", 1));
     GivenEvents::<CloseTicket>::new()
         .events(history)
         .when(CloseTicketPayload {
@@ -249,19 +265,77 @@ fn resolving_schedules_an_auto_close_for_that_ticket() {
     let deadline = ScheduleTicketAutoClose::schedule(&TicketResolvedPayload {
         ticket_id: "t1".into(),
         company_id: "acme".into(),
+        resolution: Some(2),
     })
     .expect("every resolution schedules an auto-close");
     let after = chrono::Utc::now();
     assert_eq!(deadline.payload.ticket_id, "t1");
     assert_eq!(
         deadline.tags,
+        vec![
+            Tag {
+                key: "ticket".into(),
+                value: Some("t1".into())
+            },
+            Tag {
+                key: "ticket_resolution".into(),
+                value: Some("t1#2".into())
+            },
+        ]
+    );
+    let wait = scheduling::auto_close_after();
+    assert!(deadline.fire_at >= before + wait && deadline.fire_at <= after + wait);
+
+    // A TicketResolved stored before resolutions were numbered.
+    let legacy = ScheduleTicketAutoClose::schedule(&TicketResolvedPayload {
+        ticket_id: "t1".into(),
+        company_id: "acme".into(),
+        resolution: None,
+    })
+    .expect("every resolution schedules an auto-close");
+    assert_eq!(
+        legacy.tags,
         vec![Tag {
             key: "ticket".into(),
             value: Some("t1".into())
         }]
     );
-    let wait = scheduling::auto_close_after();
-    assert!(deadline.fire_at >= before + wait && deadline.fire_at <= after + wait);
+}
+
+#[test]
+fn reopening_cancels_only_the_auto_close_of_the_resolution_it_undoes() {
+    let cancel = CancelTicketAutoCloseOnReopen::cancel_tags(&TicketReopenedPayload {
+        ticket_id: "t1".into(),
+        company_id: "acme".into(),
+        resolution: Some(1),
+    })
+    .expect("a numbered reopen cancels");
+    // Only the resolution tag: the deadline's `ticket` tag is shared with
+    // the next resolution's deadline, and skilj cancels on any tag match.
+    assert_eq!(
+        cancel,
+        vec![Tag {
+            key: "ticket_resolution".into(),
+            value: Some("t1#1".into())
+        }]
+    );
+    let next = ScheduleTicketAutoClose::schedule(&TicketResolvedPayload {
+        ticket_id: "t1".into(),
+        company_id: "acme".into(),
+        resolution: Some(2),
+    })
+    .unwrap();
+    assert!(cancel.iter().all(|tag| !next.tags.contains(tag)));
+
+    assert_eq!(
+        CancelTicketAutoCloseOnReopen::cancel_tags(&TicketReopenedPayload {
+            ticket_id: "t1".into(),
+            company_id: "acme".into(),
+            resolution: None,
+        }),
+        None,
+        "a reopen stored before resolutions were numbered has nothing to name"
+    );
 }
 
 // --- RequestInfoFromCustomer / CustomerRespondsToTicket ---
