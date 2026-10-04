@@ -13,10 +13,11 @@
 
 mod support;
 
-use skilj_helpdesk::helpdesk::BOUNDED_CONTEXT;
+use skilj_core::access_control::AccessLevel;
+use skilj_helpdesk::helpdesk::{BOUNDED_CONTEXT, STAFF_TEAM};
 use support::{
-    graphql_accepted, graphql_request, runtime, setup_graphql, submit_command_mutation, test_db,
-    unique_name,
+    graphql_accepted, graphql_request, runtime, seed_role, seed_scoped_mapping, setup_graphql,
+    sign_jwt, submit_command_mutation, test_db, unique_name,
 };
 
 #[test]
@@ -98,5 +99,77 @@ fn graphql_surfaces_a_business_rejection_as_typed_data_not_a_graphql_error() {
         assert!(response.get("errors").is_none(), "a business rejection is not a GraphQL error: {response:?}");
         assert_eq!(response["data"]["submitCommand"]["accepted"], false);
         assert_eq!(response["data"]["submitCommand"]["rejectionKind"], "company_not_found");
+    });
+}
+
+/// `#[requires_role("staff")]` on `AssignTicket` (and the other
+/// staff-only command types in `helpdesk.rs`): over GraphQL, a Role
+/// whose `name` isn't `STAFF_TEAM` is refused before `decide()` runs,
+/// however much access its mapping grants. REST triggering is not
+/// covered by this gate - a `CommandToken` is its own per-command grant.
+#[test]
+fn graphql_refuses_a_staff_only_command_from_a_non_staff_role() {
+    runtime().block_on(async {
+        if test_db().await.is_none() {
+            return;
+        }
+        let (skilj, pool, _mapping, admin_jwt) = setup_graphql().await;
+        let router = skilj.graphql_router().await.unwrap();
+        let company_id = unique_name("company");
+        let ticket_id = unique_name("ticket");
+
+        for (command, payload) in [
+            (
+                "SignUpCompany",
+                serde_json::json!({ "company_id": company_id, "name": "Acme", "contact_email": "a@acme.example" }),
+            ),
+            (
+                "CreateTicket",
+                serde_json::json!({
+                    "ticket_id": ticket_id, "company_id": company_id, "requester_id": unique_name("customer"),
+                    "logged_by_staff_id": null, "title": "t", "description": "d", "priority": "low",
+                }),
+            ),
+        ] {
+            let response =
+                graphql_request(&router, &admin_jwt, &submit_command_mutation(BOUNDED_CONTEXT, command, &payload)).await;
+            assert!(graphql_accepted(&response), "{command} should be accepted: {response:?}");
+        }
+
+        let customer = seed_role(&pool, "customer").await;
+        seed_scoped_mapping(&pool, &customer, AccessLevel::Write, Some(company_id.clone())).await;
+        let customer_jwt = sign_jwt(&customer.external_subject);
+
+        let staff = seed_role(&pool, STAFF_TEAM).await;
+        seed_scoped_mapping(&pool, &staff, AccessLevel::Write, None).await;
+        let staff_jwt = sign_jwt(&staff.external_subject);
+
+        let assign = submit_command_mutation(
+            BOUNDED_CONTEXT,
+            "AssignTicket",
+            &serde_json::json!({ "ticket_id": ticket_id, "staff_id": unique_name("staff") }),
+        );
+
+        // The company's own customer, and the unscoped "Test Admin" Role
+        // `setup_graphql` seeds: neither is named `STAFF_TEAM`.
+        for (who, jwt) in [("customer", &customer_jwt), ("admin", &admin_jwt)] {
+            let response = graphql_request(&router, jwt, &assign).await;
+            assert_eq!(
+                response["errors"][0]["extensions"]["code"], "insufficient_role",
+                "AssignTicket from the {who} Role must be refused by the role gate: {response:?}"
+            );
+        }
+
+        let response = graphql_request(&router, &staff_jwt, &assign).await;
+        assert!(graphql_accepted(&response), "AssignTicket from the staff Role should be accepted: {response:?}");
+
+        let query = format!(
+            r#"query {{ projection(boundedContext: {BOUNDED_CONTEXT:?}, name: "TicketSummary", key: {ticket_id:?}) {{ ... on helpdesk_TicketSummary {{ status }} }} }}"#
+        );
+        let response = graphql_request(&router, &admin_jwt, &query).await;
+        assert_eq!(
+            response["data"]["projection"]["status"], "in_progress",
+            "only the staff Role's AssignTicket should have taken effect: {response:?}"
+        );
     });
 }
