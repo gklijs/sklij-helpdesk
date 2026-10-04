@@ -144,6 +144,10 @@ real Slack workspace — that part's on you to point at your own.
 **Tests**: `cargo test` — real integration tests against a real (or
 [`postgresql_embedded`](https://crates.io/crates/postgresql_embedded))
 Postgres; DB-dependent ones skip cleanly if neither is reachable.
+`cargo test --test fixture` runs just the domain rules - every
+command's accept/reject paths and every projection fold, through
+`skilj-test-fixture`, with no database (`tests/fixture/`), so those
+never skip.
 `cd frontend && cargo test --target wasm32-unknown-unknown` isn't a
 thing (no frontend unit tests this pass) — it's verified by actually
 running it (see below).
