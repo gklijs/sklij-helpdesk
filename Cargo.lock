@@ -3393,6 +3393,7 @@ dependencies = [
  "serde_json",
  "skilj",
  "skilj-core",
+ "skilj-test-fixture",
  "tokio",
  "tower",
  "tower-http",
@@ -3432,6 +3433,14 @@ name = "skilj-retry"
 version = "0.0.9"
 dependencies = [
  "chrono",
+]
+
+[[package]]
+name = "skilj-test-fixture"
+version = "0.0.9"
+dependencies = [
+ "serde_json",
+ "skilj-core",
 ]
 
 [[package]]

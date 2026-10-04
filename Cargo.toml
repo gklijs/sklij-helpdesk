@@ -97,3 +97,9 @@ opentelemetry-appender-tracing = "0.33"
 postgresql_embedded = "0.21.0"
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
+# tests/fixture/ only - given/when/then tests for every decide()/project()
+# in this crate, with no database and no HTTP (docs/architecture.md §45
+# in the skilj repo). Complements, doesn't replace, the Postgres-backed
+# tests/*.rs suites, which still own persistence, DCB conflicts and
+# access control.
+skilj-test-fixture = { path = "../skilj/skilj-test-fixture" }
