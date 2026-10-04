@@ -67,10 +67,13 @@ simplifications (see "What's not built" below).
 | `src/helpdesk.rs` | Every `EventType`/`CommandType`/`Projection` — the actual domain logic |
 | `src/alerting.rs` | Pure decision logic `src/bin/alerter.rs` drives |
 | `src/scheduling.rs` | Env-driven durations + the mocked payment call `src/helpdesk.rs`'s own deadline reactors (`ScheduleCompanyTrialConversion`/`ScheduleTicketAutoClose`) use |
-| `src/telemetry.rs` | Shared OTel wiring all three binaries call into (see "Telemetry & dashboards" below) |
+| `src/telemetry.rs` | Shared OTel wiring every binary calls into (see "Telemetry & dashboards" below) |
 | `src/demo_seed.rs` | Pure decision logic behind the optional fake-traffic loop (`SEED_DEMO_TRAFFIC=1`) |
 | `src/bin/server.rs` | The runnable server (REST + GraphQL) |
 | `src/bin/alerter.rs` | Consumes the event feed, pages a lead on urgent tickets and escalates ones nobody's handled in time |
+| `src/bin/engagement-watcher.rs` | Sweeps for companies whose customers have gone quiet and records an engagement decline (`activity` context) |
+| `src/bin/provisioner.rs` | Reacts to `CompanySignedUp` by provisioning the company's own tenant bounded context |
+| `src/bin/lifecycle-replicator.rs` | Mirrors a company's lifecycle (trial/active/expired) into its tenant context |
 | `tests/` | Integration tests (real HTTP, real Postgres) — split into several files by concern; see `tests/company.rs`'s own doc comment for why |
 | `dex/config.yaml` | The real OIDC provider's config (two demo logins) |
 | `frontend/` | The Leptos (WASM) web app |

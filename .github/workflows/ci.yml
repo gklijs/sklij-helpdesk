@@ -56,17 +56,26 @@ jobs:
       # `skilj-core` the same way) - a sibling checkout, not a crates.io
       # version, matching this project's own local-dev convention
       # (README.md's own `[skilj](../skilj)` link assumes the same
-      # layout). No pinned commit: this tracks skilj's own `main`, the
-      # same thing a fresh local clone next to this repo would give you
-      # - if that ever proves too unstable for CI, pin a commit SHA here
-      # instead.
+      # layout). Pinned to a commit so a CI run is reproducible and a
+      # breaking change on skilj's `main` can't turn an unrelated PR
+      # red - bump SKILJ_COMMIT deliberately, in the same commit that
+      # adapts this crate to it. `git clone` can't take a SHA, hence
+      # init + a shallow fetch of exactly that commit.
       - name: Clone skilj (sibling path dependency)
-        run: git clone --depth 1 https://codeberg.org/gklijs/SklilJ.git ../skilj
+        env:
+          SKILJ_COMMIT: ee3086aa86ea37b439ac2820fc6d4f3a61140f52
+        run: |
+          git init -q ../skilj
+          git -C ../skilj fetch -q --depth 1 https://codeberg.org/gklijs/SkilJ.git "$SKILJ_COMMIT"
+          git -C ../skilj checkout -q FETCH_HEAD
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy
+          components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
+
+      - name: Rustfmt
+        run: cargo fmt --all -- --check
 
       # Fails fast, before waiting on Postgres below - `-D warnings`:
       # this crate's own clippy is already zero-warning across all
@@ -130,9 +139,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
+          components: rustfmt
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: frontend
+
+      - name: Rustfmt
+        run: cargo fmt --all -- --check
 
       - uses: jetli/trunk-action@v0.5.1
         with:
