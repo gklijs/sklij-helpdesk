@@ -60,7 +60,7 @@
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use skilj::{auto_register, CommandType, EventType, Projection, ScheduleDeadline};
+use skilj::{auto_register, requires_role, CommandType, EventType, Projection, ScheduleDeadline};
 use skilj_core::event_store::Event;
 use skilj_core::plugin::{BoundedContextEvent, DeadlinePollStartFrom, DeadlineSpec};
 use skilj_core::shared::{
@@ -74,7 +74,10 @@ pub const BOUNDED_CONTEXT: &str = "helpdesk";
 /// The one team name `TicketInternalNotes`'s own `TEAM_ONLY` and
 /// `AddInternalNote`/`TicketInternalNoteAdded`'s own `private_fields()`
 /// all compare `Role.name` against (see `TicketInternalNotes`'s own doc
-/// comment) - a shared constant rather than five independent string
+/// comment), as does `#[requires_role("staff")]` on the staff-only
+/// command types (that attribute only accepts a literal, so
+/// `staff_only_commands_require_the_staff_role` below pins it to this
+/// constant instead) - a shared constant rather than five independent string
 /// literals (this file, `server.rs`, both test files) so a future edit
 /// to one can't silently desync from the others and reopen exactly one
 /// of the two gates while the other still looks closed.
@@ -1532,6 +1535,7 @@ pub struct AssignTicket;
 /// `specs/skilj-helpdesk.allium`'s `rule StaffPicksUpTicket`:
 /// `requires: ticket.status = open`.
 #[auto_register(BOUNDED_CONTEXT)]
+#[requires_role("staff")]
 impl CommandType for AssignTicket {
     type Payload = AssignTicketPayload;
     type Event = HelpdeskEvent;
@@ -1580,6 +1584,7 @@ pub struct ResolveTicket;
 /// `specs/skilj-helpdesk.allium`'s `rule StaffResolvesTicket`:
 /// `requires: ticket.status = in_progress`.
 #[auto_register(BOUNDED_CONTEXT)]
+#[requires_role("staff")]
 impl CommandType for ResolveTicket {
     type Payload = ResolveTicketPayload;
     type Event = HelpdeskEvent;
@@ -1676,6 +1681,7 @@ pub struct RequestInfoFromCustomer;
 /// `specs/skilj-helpdesk.allium`'s `rule StaffRequestsInfo`: `requires:
 /// ticket.status = in_progress`.
 #[auto_register(BOUNDED_CONTEXT)]
+#[requires_role("staff")]
 impl CommandType for RequestInfoFromCustomer {
     type Payload = RequestInfoFromCustomerPayload;
     type Event = HelpdeskEvent;
@@ -1777,6 +1783,7 @@ pub struct CloseTicket;
 /// ticket.status = resolved`. Submitted by `ScheduleTicketAutoClose`
 /// below - see `TicketClosed`'s own doc comment.
 #[auto_register(BOUNDED_CONTEXT)]
+#[requires_role("staff")]
 impl CommandType for CloseTicket {
     type Payload = CloseTicketPayload;
     type Event = HelpdeskEvent;
@@ -1866,6 +1873,7 @@ pub struct EscalateTicket;
 /// `ScheduleTicketAutoClose` and `ConvertCompanyTrial` gets from
 /// `ScheduleCompanyTrialConversion`.
 #[auto_register(BOUNDED_CONTEXT)]
+#[requires_role("staff")]
 impl CommandType for EscalateTicket {
     type Payload = EscalateTicketPayload;
     type Event = HelpdeskEvent;
@@ -1946,6 +1954,7 @@ pub struct MergeTickets;
 /// entities' consistency at once. See `TicketsMerged`'s own doc comment
 /// for the event side of the same trick.
 #[auto_register(BOUNDED_CONTEXT)]
+#[requires_role("staff")]
 impl CommandType for MergeTickets {
     type Payload = MergeTicketsPayload;
     type Event = HelpdeskEvent;
@@ -2136,6 +2145,7 @@ pub struct AddInternalNote;
 /// here since "staff-only" is this feature's entire point, not a
 /// boundary meant to stop only customers.
 #[auto_register(BOUNDED_CONTEXT)]
+#[requires_role("staff")]
 impl CommandType for AddInternalNote {
     type Payload = AddInternalNotePayload;
     type Event = HelpdeskEvent;
@@ -2785,5 +2795,41 @@ mod sign_up_validation_tests {
             rejection_kind(decide("acme", "  ", "a@acme.example")).as_deref(),
             Some("empty_company_name")
         );
+    }
+}
+
+#[cfg(test)]
+mod required_role_tests {
+    use super::*;
+
+    /// `#[requires_role(...)]` only takes a string literal, so the seven
+    /// staff-only commands spell out `"staff"` rather than `STAFF_TEAM`.
+    /// This pins them to the constant, and pins the customer-facing and
+    /// background-only commands to no role gate at all.
+    #[test]
+    fn staff_only_commands_require_the_staff_role() {
+        let staff_only = [
+            AssignTicket::required_role(),
+            ResolveTicket::required_role(),
+            RequestInfoFromCustomer::required_role(),
+            CloseTicket::required_role(),
+            EscalateTicket::required_role(),
+            MergeTickets::required_role(),
+            AddInternalNote::required_role(),
+        ];
+        for required in staff_only {
+            assert_eq!(required, Some(STAFF_TEAM));
+        }
+
+        let ungated = [
+            CreateTicket::required_role(),
+            ReopenTicket::required_role(),
+            CustomerRespondsToTicket::required_role(),
+            RateTicket::required_role(),
+            SignUpCompany::required_role(),
+        ];
+        for required in ungated {
+            assert_eq!(required, None);
+        }
     }
 }
