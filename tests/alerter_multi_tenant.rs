@@ -31,7 +31,7 @@
 mod support;
 
 use skilj_core::db;
-use skilj_helpdesk::helpdesk::{TicketSummaryState, TenantDirectoryState, BOUNDED_CONTEXT};
+use skilj_helpdesk::helpdesk::{TenantDirectoryState, TicketSummaryState, BOUNDED_CONTEXT};
 use std::path::Path;
 use std::time::Duration;
 use support::{

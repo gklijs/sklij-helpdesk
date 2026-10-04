@@ -266,10 +266,9 @@ impl Config {
             Ok(s) => Some(PathBuf::from(s)),
             Err(_) => Some(PathBuf::from("alerter-state.json")),
         };
-        let routing_mode =
-            skilj_helpdesk::routing::RoutingMode::from_env_value(
-                std::env::var("TICKET_ROUTING").ok().as_deref()
-            );
+        let routing_mode = skilj_helpdesk::routing::RoutingMode::from_env_value(
+            std::env::var("TICKET_ROUTING").ok().as_deref(),
+        );
         let superadmin_subject = std::env::var("ALERTER_SUPERADMIN_SUBJECT").ok();
         let company_tenant_provisioned_token =
             std::env::var("COMPANY_TENANT_PROVISIONED_TOKEN").ok();
@@ -278,14 +277,12 @@ impl Config {
             superadmin_subject,
             &company_tenant_provisioned_token,
         ) {
-            (
-                skilj_helpdesk::routing::RoutingMode::Tenant,
-                Some(subj),
-                Some(_),
-            ) => Some(MultiTenantConfig {
-                superadmin_subject: subj,
-                company_tenant_provisioned_token: company_tenant_provisioned_token.unwrap(),
-            }),
+            (skilj_helpdesk::routing::RoutingMode::Tenant, Some(subj), Some(_)) => {
+                Some(MultiTenantConfig {
+                    superadmin_subject: subj,
+                    company_tenant_provisioned_token: company_tenant_provisioned_token.unwrap(),
+                })
+            }
             _ => None,
         };
         Config {
@@ -379,21 +376,20 @@ impl TenantTokenCache {
     /// Mint all tenant-scoped tokens for `tenant_name` in one batch, cache,
     /// and return a clone. A failed mint leaves the cache untouched, so a
     /// transient GraphQL failure doesn't permanently strand a tenant.
-    async fn get_or_mint(&mut self, client: &reqwest::Client, tenant_name: &str) -> Result<TenantTokens, String> {
+    async fn get_or_mint(
+        &mut self,
+        client: &reqwest::Client,
+        tenant_name: &str,
+    ) -> Result<TenantTokens, String> {
         if let Some(tokens) = self.cache.get(tenant_name) {
             return Ok(tokens.clone());
         }
         let jwt = sign_jwt(&self.superadmin_subject);
         let mut event_tokens = HashMap::with_capacity(ALERTER_EVENT_TYPES.len());
         for event_type in ALERTER_EVENT_TYPES {
-            let token = mint_graphql_event_token(
-                client,
-                &self.base_url,
-                &jwt,
-                tenant_name,
-                event_type,
-            )
-            .await?;
+            let token =
+                mint_graphql_event_token(client, &self.base_url, &jwt, tenant_name, event_type)
+                    .await?;
             event_tokens.insert(event_type.to_string(), token);
         }
         let escalate_ticket_token = mint_graphql_command_token(
@@ -424,7 +420,10 @@ async fn main() {
         None => State::default(),
     };
     let mut tenant_cache = match &config.multi_tenant {
-        Some(mt) => Some(TenantTokenCache::new(&config.base_url, &mt.superadmin_subject)),
+        Some(mt) => Some(TenantTokenCache::new(
+            &config.base_url,
+            &mt.superadmin_subject,
+        )),
         None => None,
     };
     println!(
@@ -492,8 +491,12 @@ async fn tick(
 ) -> Result<(), reqwest::Error> {
     // --- Phase 4: discover new tenants from the shared context ---
     if let Some(mt) = &config.multi_tenant {
-        for (_, payload, _) in
-            consume(client, &config.base_url, &mt.company_tenant_provisioned_token).await?
+        for (_, payload, _) in consume(
+            client,
+            &config.base_url,
+            &mt.company_tenant_provisioned_token,
+        )
+        .await?
         {
             if let Some(tenant_name) = payload["tenant_name"].as_str() {
                 state.discovered_tenants.insert(tenant_name.to_string());
@@ -502,14 +505,7 @@ async fn tick(
     }
 
     // --- shared context feeds (companies without a tenant) ---
-    process_ticket_created(
-        client,
-        config,
-        state,
-        None,
-        &config.ticket_created_token,
-    )
-    .await?;
+    process_ticket_created(client, config, state, None, &config.ticket_created_token).await?;
     process_state_update(
         client,
         config,
@@ -543,22 +539,8 @@ async fn tick(
         },
     )
     .await?;
-    process_ticket_escalated(
-        client,
-        config,
-        state,
-        None,
-        &config.ticket_escalated_token,
-    )
-    .await?;
-    process_tickets_merged(
-        client,
-        config,
-        state,
-        None,
-        &config.tickets_merged_token,
-    )
-    .await?;
+    process_ticket_escalated(client, config, state, None, &config.ticket_escalated_token).await?;
+    process_tickets_merged(client, config, state, None, &config.tickets_merged_token).await?;
 
     // --- per-tenant feeds (Phase 4: multi-tenant) ---
     if let Some(cache) = tenant_cache.as_mut() {
@@ -568,9 +550,7 @@ async fn tick(
             let tokens = match cache.get_or_mint(client, &tenant_name).await {
                 Ok(t) => t,
                 Err(e) => {
-                    eprintln!(
-                        "alerter: failed to mint tokens for tenant {tenant_name}: {e}"
-                    );
+                    eprintln!("alerter: failed to mint tokens for tenant {tenant_name}: {e}");
                     continue;
                 }
             };
@@ -643,8 +623,7 @@ async fn tick(
         .filter(|ticket_id| !state.escalated.contains(ticket_id.as_str()))
         .filter_map(|ticket_id| {
             let created_at = state.created_at.get(ticket_id)?;
-            is_overdue(*created_at, now, config.unhandled_alert_after)
-                .then(|| ticket_id.clone())
+            is_overdue(*created_at, now, config.unhandled_alert_after).then(|| ticket_id.clone())
         })
         .collect();
     for ticket_id in due {
