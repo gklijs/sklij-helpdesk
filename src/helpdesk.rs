@@ -60,7 +60,10 @@
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use skilj::{auto_register, requires_role, CommandType, EventType, Projection, ScheduleDeadline};
+use skilj::{
+    auto_register, requires_role, CancelDeadline, CommandType, EventType, Projection,
+    ScheduleDeadline,
+};
 use skilj_core::event_store::Event;
 use skilj_core::plugin::{BoundedContextEvent, DeadlinePollStartFrom, DeadlineSpec};
 use skilj_core::shared::{
@@ -128,6 +131,17 @@ fn ticket_tag_value(ticket_id: &str) -> Tag {
     Tag {
         key: "ticket".into(),
         value: Some(ticket_id.to_string()),
+    }
+}
+
+/// One resolution of one ticket, as a deadline tag - see
+/// `CancelTicketAutoCloseOnReopen` for why the auto-close deadline needs
+/// a tag narrower than `ticket_tag_value`. Only ever a deadline tag, never
+/// an event tag: no `TagMapping` produces it.
+fn ticket_resolution_tag_value(ticket_id: &str, resolution: u32) -> Tag {
+    Tag {
+        key: "ticket_resolution".into(),
+        value: Some(format!("{ticket_id}#{resolution}")),
     }
 }
 
@@ -387,6 +401,12 @@ impl EventType for TicketAssigned {
 pub struct TicketResolvedPayload {
     pub ticket_id: String,
     pub company_id: String,
+    /// Which resolution of this ticket this is: 1 for the first, 2 after
+    /// one reopen, and so on (see `resolution_count`). It tags the
+    /// auto-close deadline this schedules, so `CancelTicketAutoCloseOnReopen`
+    /// can cancel exactly this resolution's deadline and no later one.
+    /// `None` on events stored before the field existed.
+    pub resolution: Option<u32>,
 }
 
 pub struct TicketResolved;
@@ -409,6 +429,10 @@ impl EventType for TicketResolved {
 pub struct TicketReopenedPayload {
     pub ticket_id: String,
     pub company_id: String,
+    /// The `TicketResolved::resolution` this reopen undoes - what
+    /// `CancelTicketAutoCloseOnReopen` cancels by. `None` on events
+    /// stored before the field existed.
+    pub resolution: Option<u32>,
 }
 
 pub struct TicketReopened;
@@ -808,6 +832,18 @@ fn ticket_status(matching_events: &[HelpdeskEvent], ticket_id: &str) -> Option<T
         }
     }
     status
+}
+
+/// How many times this ticket has been resolved so far. Counts the
+/// events rather than reading `TicketResolved::resolution`, so a history
+/// that predates that field still numbers its next resolution correctly.
+fn resolution_count(matching_events: &[HelpdeskEvent], ticket_id: &str) -> u32 {
+    matching_events
+        .iter()
+        .filter(
+            |event| matches!(event, HelpdeskEvent::TicketResolved(p) if p.ticket_id == ticket_id),
+        )
+        .count() as u32
 }
 
 /// The one-tier priority bump `EscalateTicket` applies - covered by that
@@ -1332,12 +1368,13 @@ impl CommandType for ExpireCompanyTrial {
 /// today's date instead of its real one, worse than not scheduling it
 /// at all.
 ///
-/// No `CancelDeadline` counterpart, deliberately - see
-/// `ScheduleTicketAutoClose`'s own doc comment for why a stale pending
-/// row is a non-issue here too: `ConvertCompanyTrial`/`ExpireCompanyTrial`
-/// both already reject gracefully ("not trialing") against a company
-/// that converted, expired, or reactivated by some other path before its
-/// own deadline came due.
+/// No `CancelDeadline` counterpart, deliberately: a stale pending row
+/// fires once and `ConvertCompanyTrial`/`ExpireCompanyTrial` reject it
+/// ("not trialing") against a company that converted, expired, or
+/// reactivated by some other path before its own deadline came due.
+/// Unlike a ticket (see `CancelTicketAutoCloseOnReopen`), a company
+/// never returns to `trialing`, so an old deadline can't land on a newer
+/// trial.
 pub struct ScheduleCompanyTrialConversion;
 
 impl ScheduleDeadline for ScheduleCompanyTrialConversion {
@@ -1608,6 +1645,7 @@ impl CommandType for ResolveTicket {
                         "ticket_id": payload.ticket_id,
                         "company_id": company_id_for_ticket(matching_events, &payload.ticket_id)
                             .expect("a ticket with any status has a TicketCreated in its own history"),
+                        "resolution": resolution_count(matching_events, &payload.ticket_id) + 1,
                     }),
                 }],
             },
@@ -1655,6 +1693,7 @@ impl CommandType for ReopenTicket {
                         "ticket_id": payload.ticket_id,
                         "company_id": company_id_for_ticket(matching_events, &payload.ticket_id)
                             .expect("a ticket with any status has a TicketCreated in its own history"),
+                        "resolution": resolution_count(matching_events, &payload.ticket_id),
                     }),
                 }],
             },
@@ -1825,19 +1864,19 @@ impl CommandType for CloseTicket {
 /// same way `ScheduleCompanyTrialConversion` above is - see that one's
 /// doc comment for the `fire_at`/`START_FROM` reasoning, identical here.
 ///
-/// No `CancelDeadline` counterpart, deliberately: a resolved-then-
-/// reopened (or closed, or merged-away) ticket whose deadline still
-/// fires just gets rejected by `CloseTicket::decide()` itself ("not
-/// resolved - only a resolved ticket auto-closes") - a legitimate
-/// one-shot outcome, not a bug to guard against (docs/architecture.md
-/// §46: "a `Target` command that ... gets rejected by its own `decide()`
-/// is marked `fired` too"). The old `scheduler.rs`'s own
-/// `resolved_tickets` bookkeeping had to actively remove entries on
-/// `TicketReopened`/`TicketClosed`/`TicketsMerged` to stop *every
-/// 30-second poll tick* from resubmitting `CloseTicket` for the same
-/// stale ticket forever - a real bug that file found and fixed. That
-/// failure mode can't happen here: each deadline row fires exactly once,
-/// ever.
+/// A reopen cancels the deadline - see `CancelTicketAutoCloseOnReopen`.
+/// A ticket that is closed by hand or merged away while its deadline is
+/// pending needs no cancel: the deadline fires once and
+/// `CloseTicket::decide()` rejects it ("not resolved"), which
+/// docs/architecture.md §46 treats as a normal outcome ("a `Target`
+/// command that ... gets rejected by its own `decide()` is marked
+/// `fired` too").
+///
+/// Tagged twice: `ticket` like every other ticket deadline, and
+/// `ticket_resolution` for this one resolution, which is the only tag
+/// the cancel names. Events stored before `TicketResolved::resolution`
+/// existed get the `ticket` tag only, so a reopen never cancels them and
+/// `decide()` is their only guard, as before.
 pub struct ScheduleTicketAutoClose;
 
 impl ScheduleDeadline for ScheduleTicketAutoClose {
@@ -1848,13 +1887,58 @@ impl ScheduleDeadline for ScheduleTicketAutoClose {
     fn schedule(
         source_payload: &TicketResolvedPayload,
     ) -> Option<DeadlineSpec<CloseTicketPayload>> {
+        let mut tags = vec![ticket_tag_value(&source_payload.ticket_id)];
+        if let Some(resolution) = source_payload.resolution {
+            tags.push(ticket_resolution_tag_value(
+                &source_payload.ticket_id,
+                resolution,
+            ));
+        }
         Some(DeadlineSpec {
             fire_at: chrono::Utc::now() + scheduling::auto_close_after(),
-            tags: vec![ticket_tag_value(&source_payload.ticket_id)],
+            tags,
             payload: CloseTicketPayload {
                 ticket_id: source_payload.ticket_id.clone(),
             },
         })
+    }
+}
+
+/// Cancels a resolved ticket's pending auto-close when it is reopened -
+/// `specs/skilj-helpdesk.allium`'s `rule TicketReopened` ends the
+/// resolution `rule TicketAutoCloses` was waiting on.
+///
+/// `CloseTicket::decide()` alone is not enough here. Resolve, reopen and
+/// resolve again within `auto_close_after`, and the first resolution's
+/// deadline comes due while the ticket is `resolved` again: `decide()`
+/// accepts, and the ticket closes days before its second resolution's
+/// wait is up.
+///
+/// It cancels by `ticket_resolution` rather than by `ticket` because
+/// skilj's schedule and cancel loops keep separate cursors, and nothing
+/// stops the schedule loop running ahead (docs/architecture.md §130 only
+/// holds a cancel back until its schedule catches up, not the reverse).
+/// If the schedule loop has already turned the second `TicketResolved`
+/// into a deadline when this cancel reaches the reopen before it, a
+/// `ticket` tag would cancel that one too, and the ticket would never
+/// auto-close. The resolution number makes the reopen name only the
+/// deadline it actually ends. The opposite race - the deadline coming
+/// due before this cancel has run - is skilj's own to hold back (§131).
+pub struct CancelTicketAutoCloseOnReopen;
+
+impl CancelDeadline for CancelTicketAutoCloseOnReopen {
+    type Source = TicketReopened;
+    type Deadline = ScheduleTicketAutoClose;
+    const NAME: &'static str = "CancelTicketAutoCloseOnReopen";
+    /// Matches `ScheduleTicketAutoClose::START_FROM`: a reopen from
+    /// before this deploy has no deadline of this shape to cancel.
+    const START_FROM: DeadlinePollStartFrom = DeadlinePollStartFrom::Latest;
+    fn cancel_tags(source_payload: &TicketReopenedPayload) -> Option<Vec<Tag>> {
+        let resolution = source_payload.resolution?;
+        Some(vec![ticket_resolution_tag_value(
+            &source_payload.ticket_id,
+            resolution,
+        )])
     }
 }
 

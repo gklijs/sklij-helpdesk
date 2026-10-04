@@ -103,3 +103,8 @@ http-body-util = "0.1"
 # tests/*.rs suites, which still own persistence, DCB conflicts and
 # access control.
 skilj-test-fixture = { path = "../skilj/skilj-test-fixture" }
+# tests/ticket_auto_close_cancel.rs only - reads the `deadlines` table
+# directly, since no skilj API lists pending deadlines. Same version as
+# ../skilj/Cargo.toml, so it resolves to the copy skilj-core already
+# builds; features are unified with skilj-core's own.
+sqlx = { version = "0.9", default-features = false, features = ["postgres"] }

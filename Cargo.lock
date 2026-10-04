@@ -3394,6 +3394,7 @@ dependencies = [
  "skilj",
  "skilj-core",
  "skilj-test-fixture",
+ "sqlx",
  "tokio",
  "tower",
  "tower-http",
