@@ -20,7 +20,7 @@ async fn token(
 }
 
 /// The requester `create_ticket_payload` files a ticket for, which a
-/// `RateTicket` has to name - see `helpdesk::reject_unless_requester`.
+/// `RateTicket` has to name - see `helpdesk::TicketFacts::reject_unless_requester`.
 fn requester_of(ticket_id: &str) -> String {
     format!("customer-of-{ticket_id}")
 }

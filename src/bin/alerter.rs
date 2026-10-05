@@ -328,7 +328,7 @@ struct State {
     /// `specs/skilj-helpdesk.allium`'s own
     /// `unhandled: status not in {resolved, closed}` derived field, tracked
     /// directly - `merged` counts as handled too, for the same "nothing
-    /// left to do" reason `ticket_status`'s own catch-all treatment in
+    /// left to do" reason `TicketFacts`'s own catch-all treatment in
     /// `helpdesk.rs` gives it.
     unhandled: HashSet<String>,
     /// Ticket ids already escalated (this alerter's own submission, or
