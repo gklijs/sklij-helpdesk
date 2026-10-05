@@ -1013,6 +1013,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let database_url = std::env::var("DATABASE_URL")
         .map_err(|_| "DATABASE_URL must be set (a real Postgres, not embedded)")?;
+    // Required, not defaulted: a key generated at startup would make
+    // every customer's contact details unreadable after the next
+    // restart. See `parse_encryption_master_key`.
+    let encryption_master_key = std::env::var("ENCRYPTION_MASTER_KEY")
+        .map_err(|_| {
+            "ENCRYPTION_MASTER_KEY must be set (64 hex characters - `openssl rand -hex 32`), \
+             and kept the same across restarts"
+                .to_string()
+        })
+        .and_then(|hex| {
+            skilj_helpdesk::parse_encryption_master_key(&hex)
+                .map_err(|e| format!("ENCRYPTION_MASTER_KEY: {e}"))
+        })?;
     let port: u16 = std::env::var("PORT")
         .ok()
         .and_then(|p| p.parse().ok())
@@ -1167,7 +1180,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // cross-tenant read gap a security review found, and skilj's own
         // `docs/architecture.md` §23 for the mechanism): the demo
         // customer's own grant is scoped to its own company, so
-        // `TicketSummary`/`CompanyTicketList`/`TicketInternalNotes` -
+        // `TicketSummary`/`CompanyTicketQueue`/`CustomerTickets`/`TicketInternalNotes` -
         // every projection that declares `OWNER_TAG_KEY` - now rejects
         // any instance whose derived owner isn't `DEMO_COMPANY_ID`, not
         // just "this Role has some mapping on the bounded context."
@@ -1200,6 +1213,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 skilj_helpdesk::helpdesk::STAFF_TEAM,
             ),
         ] {
+            // Staff read every customer's ticket content, which is
+            // encrypted per customer (`helpdesk::CustomerTickets`). A
+            // customer needs no grant for their own: skilj decrypts a row
+            // keyed by the caller's own subject.
+            let can_read_sensitive = name == skilj_helpdesk::helpdesk::STAFF_TEAM;
+            let demo_mapping = |role: Role| RoleAccessMapping {
+                role,
+                bounded_context: mapping.bounded_context.clone(),
+                level: AccessLevel::Write,
+                can_read_sensitive,
+                scope: scope.clone(),
+                status: RoleStatus::Active,
+                created_at: Utc::now(),
+                revoked_at: None,
+            };
             if let Some(existing) = existing_roles
                 .iter()
                 .find(|r| r.external_subject == sub && r.status == RoleStatus::Active)
@@ -1224,6 +1252,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 } else {
                     println!("server: demo Role for {label} already exists (sub {sub:?})");
                 }
+                // A mapping seeded before customer data was encrypted
+                // lacks the grant above. A mapping can't be edited, only
+                // revoked and replaced; a replacement that fails leaves
+                // none active, which the next start inserts afresh.
+                let current = db::get_active_role_access_mapping(
+                    &pool,
+                    &existing.id,
+                    &mapping.bounded_context.name,
+                )
+                .await?;
+                match current {
+                    Some(current) if current.can_read_sensitive == can_read_sensitive => {}
+                    current => {
+                        if current.is_some() {
+                            db::revoke_active_role_access_mapping(
+                                &pool,
+                                &existing.id,
+                                &mapping.bounded_context.name,
+                                Utc::now(),
+                            )
+                            .await?;
+                        }
+                        let mut role = existing.clone();
+                        role.name = name.to_string();
+                        db::insert_role_access_mapping(&pool, &demo_mapping(role)).await?;
+                        println!(
+                            "server: re-granted demo Role for {label} (can_read_sensitive {can_read_sensitive})"
+                        );
+                    }
+                }
                 continue;
             }
             let demo_role = Role {
@@ -1236,17 +1294,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 revoked_at: None,
             };
             db::insert_role(&pool, &demo_role).await?;
-            let demo_mapping = RoleAccessMapping {
-                role: demo_role,
-                bounded_context: mapping.bounded_context.clone(),
-                level: AccessLevel::Write,
-                can_read_sensitive: false,
-                scope,
-                status: RoleStatus::Active,
-                created_at: Utc::now(),
-                revoked_at: None,
-            };
-            db::insert_role_access_mapping(&pool, &demo_mapping).await?;
+            db::insert_role_access_mapping(&pool, &demo_mapping(demo_role)).await?;
             println!("server: seeded demo Role for {label} (sub {sub:?})");
         }
     }
@@ -1254,6 +1302,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (skilj, report) = skilj_helpdesk::register(Skilj::builder(database_url))
         .reconciliation_role(external_subject.clone())
         .application_version(skilj_helpdesk::APPLICATION_VERSION)
+        .encryption_master_key(encryption_master_key)
         .identity_provider(IdpConfig::new(
             jwks_url
                 .parse()
@@ -1830,9 +1879,13 @@ fn command_and_payload(action: &SeedAction) -> (&'static str, serde_json::Value)
             ticket_id,
             staff_id,
             message,
+            requester_id,
         } => (
             "RequestInfoFromCustomer",
-            serde_json::json!({ "ticket_id": ticket_id, "staff_id": staff_id, "message": message }),
+            serde_json::json!({
+                "ticket_id": ticket_id, "staff_id": staff_id, "message": message,
+                "requester_id": requester_id,
+            }),
         ),
         SeedAction::CustomerResponds {
             ticket_id,
@@ -1858,9 +1911,13 @@ fn command_and_payload(action: &SeedAction) -> (&'static str, serde_json::Value)
             ticket_id,
             rating,
             comment,
+            requester_id,
         } => (
             "RateTicket",
-            serde_json::json!({ "ticket_id": ticket_id, "rating": rating, "comment": comment }),
+            serde_json::json!({
+                "ticket_id": ticket_id, "rating": rating, "comment": comment,
+                "requester_id": requester_id,
+            }),
         ),
         SeedAction::MergeTickets {
             primary_ticket_id,

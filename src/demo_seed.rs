@@ -245,6 +245,7 @@ pub enum SeedAction {
         ticket_id: String,
         staff_id: String,
         message: String,
+        requester_id: String,
     },
     CustomerResponds {
         ticket_id: String,
@@ -263,6 +264,7 @@ pub enum SeedAction {
         ticket_id: String,
         rating: u8,
         comment: Option<String>,
+        requester_id: String,
     },
     MergeTickets {
         primary_ticket_id: String,
@@ -359,6 +361,7 @@ pub fn next_action(state: &SeedState, rng: &mut Rng) -> SeedAction {
             SeedAction::ResolveTicket { ticket_id }
         }
         (SeedTicketStatus::InProgress, false) if rng.chance(1, 2) => SeedAction::RequestInfo {
+            requester_id: ticket.requester_id.clone(),
             ticket_id,
             staff_id,
             message: REQUEST_INFO_MESSAGES[rng.below(REQUEST_INFO_MESSAGES.len())].to_string(),
@@ -386,6 +389,7 @@ pub fn next_action(state: &SeedState, rng: &mut Rng) -> SeedAction {
             SeedAction::ReopenTicket { ticket_id }
         }
         (SeedTicketStatus::Resolved, false) if rng.chance(1, 3) => SeedAction::RateTicket {
+            requester_id: ticket.requester_id.clone(),
             ticket_id,
             rating: 1 + rng.below(5) as u8,
             comment: RATING_COMMENTS[rng.below(RATING_COMMENTS.len())].map(str::to_string),
@@ -643,6 +647,7 @@ mod tests {
                 ticket_id: "t1".into(),
                 staff_id: "staff".into(),
                 message: "?".into(),
+                requester_id: "cust".into(),
             },
             true,
         );

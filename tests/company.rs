@@ -9,9 +9,9 @@
 //! file is its own compiled binary with its own `TEST_DB` and its own
 //! embedded Postgres instance, and each `#[test]`'s own `setup()` builds
 //! a brand new `Skilj` (its own connection pool, never explicitly torn
-//! down between tests - `postgresql_embedded::PostgreSQL`'s cleanup
-//! relies on process exit, and `static TEST_DB`'s contents are never
-//! dropped even then). Enough accumulated tests sharing one embedded
+//! down between tests - `static TEST_DB`'s contents are never dropped,
+//! so the cluster is only stopped once the process is gone, by
+//! `support::spawn_reaper`). Enough accumulated tests sharing one embedded
 //! instance exhausts it (`PoolTimedOut`, reproducible, not a race) -
 //! confirmed by comparing against `skilj-demo`'s own suite, which never
 //! puts more than 6 tests in one binary and never hits this. Keeping

@@ -49,14 +49,23 @@ const TENANT_DIRECTORY: &str = "TenantDirectory";
 /// recognised as ticket traffic.
 ///
 /// An exhaustive list rather than a prefix rule: `helpdesk.rs` names
-/// Ticket projections `TicketSummary`, `CompanyTicketList` and
-/// `TicketInternalNotes` - inconsistently, because one is per-ticket, one
-/// is per-company and one is per-ticket-with-a-company-key. A
-/// `name.starts_with("Ticket")` rule would catch two of the three and
-/// miss `CompanyTicketList`, which is precisely the read the dashboard
-/// makes on every load, so the miss would be invisible until a company
-/// with a tenant loaded an empty dashboard.
-const TICKET_PROJECTIONS: &[&str] = &["TicketSummary", "CompanyTicketList", "TicketInternalNotes"];
+/// Ticket projections `TicketSummary`, `CompanyTicketQueue`,
+/// `CustomerTickets` and `TicketInternalNotes` - inconsistently, because
+/// they're keyed per ticket, per company and per customer. A
+/// `name.starts_with("Ticket")` rule would catch two of the four and
+/// miss `CompanyTicketQueue`/`CustomerTickets`, precisely the reads the
+/// dashboard makes on every load, so the miss would be invisible until a
+/// company with a tenant loaded an empty dashboard.
+const TICKET_PROJECTIONS: &[&str] = &[
+    "TicketSummary",
+    "CompanyTicketQueue",
+    "CustomerTickets",
+    "TicketInternalNotes",
+];
+
+/// The one ticket projection keyed by customer - see
+/// `Subject::OwnerOfRow`.
+const CUSTOMER_TICKETS: &str = "CustomerTickets";
 
 /// What a rejected request was actually trying to do, so the refusal
 /// names the traffic rather than just failing.
@@ -123,8 +132,15 @@ pub fn classify_projection_name(name: &str) -> NameClass {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Subject {
     /// The request names a company directly - `CreateTicket`'s payload
-    /// carries `company_id`, and `CompanyTicketList` is keyed by it.
+    /// carries `company_id`, and `CompanyTicketQueue` is keyed by it.
     Company(String),
+    /// A read of this projection row, whose company is the row's owner.
+    ///
+    /// `CustomerTickets` is keyed by customer, which names no company, but
+    /// skilj records each row's owner (`OWNER_TAG_KEY = "company"`), so
+    /// unlike a `ticket_id` this lookup does exist. `check_request`
+    /// resolves it to `Company` before `check` sees it.
+    OwnerOfRow { projection: String, key: String },
     /// The request only names a `ticket_id`, so the company behind it
     /// cannot be determined without a lookup that does not exist.
     Unattributed,
@@ -193,7 +209,9 @@ pub fn check(
         Subject::Company(company_id) => company_id,
         // Refused regardless of `tenant_of_company`, which is `None` here
         // by construction - there is no company to have looked one up for.
-        Subject::Unattributed => {
+        // An `OwnerOfRow` should have been resolved by the caller; one that
+        // wasn't is no better attributed than a bare `ticket_id`.
+        Subject::Unattributed | Subject::OwnerOfRow { .. } => {
             return Verdict::Misrouted {
                 traffic: traffic.clone(),
                 company_id: None,
@@ -308,10 +326,10 @@ pub async fn tenant_for_company(
 ///
 /// Only `company_id` is looked for, and only at the top level. That is
 /// enough for `CreateTicket` - the one command that both names a company
-/// and starts a company's ticket history - and for the `CompanyTicketList`
-/// read. Everything else reports `Unattributed`, which the caller then
-/// refuses conservatively rather than guessing a company from a
-/// `ticket_id`.
+/// and starts a company's ticket history - and for the `CompanyTicketQueue`
+/// read. A `CustomerTickets` read reports the row whose owner to look up.
+/// Everything else reports `Unattributed`, which the caller then refuses
+/// conservatively rather than guessing a company from a `ticket_id`.
 pub fn subject_of(
     traffic: &Guarded,
     payload: Option<&serde_json::Value>,
@@ -322,8 +340,14 @@ pub fn subject_of(
             .and_then(|payload| payload["company_id"].as_str())
             .map(|company_id| Subject::Company(company_id.to_string()))
             .unwrap_or(Subject::Unattributed),
-        Guarded::Projection(name) if name == "CompanyTicketList" => projection_key
+        Guarded::Projection(name) if name == "CompanyTicketQueue" => projection_key
             .map(|key| Subject::Company(key.to_string()))
+            .unwrap_or(Subject::Unattributed),
+        Guarded::Projection(name) if name == CUSTOMER_TICKETS => projection_key
+            .map(|key| Subject::OwnerOfRow {
+                projection: name.clone(),
+                key: key.to_string(),
+            })
             .unwrap_or(Subject::Unattributed),
         // Every other ticket projection is keyed by `ticket_id`, which
         // says nothing about which company owns it.
@@ -710,9 +734,40 @@ async fn check_request(
         }
     };
 
+    // A row's owner is one lookup more. A row that doesn't exist yet
+    // (a customer before their first ticket) holds nothing, so reading it
+    // from the shared context can neither split nor leak a history: it is
+    // let through. A company with a tenant that does this still gets its
+    // misrouting refused, on the `CompanyTicketQueue` read the dashboard
+    // makes alongside it.
+    let subject = match subject {
+        Subject::OwnerOfRow { projection, key } => {
+            match skilj_core::db::get_projection_state_and_owner(
+                &state.pool,
+                BOUNDED_CONTEXT,
+                &projection,
+                &key,
+            )
+            .await
+            {
+                Ok(None) => return None,
+                Ok(Some((_, Some(owner)))) => Subject::Company(owner),
+                Ok(Some((_, None))) => Subject::Unattributed,
+                Err(e) => {
+                    eprintln!("routing-guard: {e}");
+                    return Some(refusal_response(&format!(
+                        "couldn't determine which company this {projection} row belongs to, so \
+                         the read was refused rather than served from the shared context: {e}"
+                    )));
+                }
+            }
+        }
+        subject => subject,
+    };
+
     // Only a named company costs a lookup; `Unattributed` is refused
     // without one, so the per-request database hit is confined to the
-    // two company-keyed operations.
+    // company-attributable operations.
     let tenant = match &subject {
         Subject::Company(company_id) => match tenant_for_company(&state.pool, company_id).await {
             Ok(tenant) => tenant,
@@ -728,7 +783,7 @@ async fn check_request(
                 )));
             }
         },
-        Subject::Unattributed => None,
+        Subject::Unattributed | Subject::OwnerOfRow { .. } => None,
     };
 
     match check(
@@ -874,7 +929,12 @@ mod tests {
     #[test]
     fn a_company_with_a_tenant_cannot_read_tickets_from_the_shared_context() {
         // Both of the frontend's company-keyed and ticket-keyed reads.
-        for name in ["CompanyTicketList", "TicketInternalNotes", "TicketSummary"] {
+        for name in [
+            "CompanyTicketQueue",
+            "CustomerTickets",
+            "TicketInternalNotes",
+            "TicketSummary",
+        ] {
             let verdict = check(
                 RoutingMode::Tenant,
                 &Guarded::Projection(name.to_string()),
@@ -998,13 +1058,13 @@ mod tests {
 
         let query = format!(
             "query {{ projection(boundedContext: {BOUNDED_CONTEXT:?}, name: \
-             \"CompanyTicketList\", key: {COMPANY:?}) {{ ... on helpdesk_CompanyTicketList \
+             \"CompanyTicketQueue\", key: {COMPANY:?}) {{ ... on helpdesk_CompanyTicketQueue \
              {{ tickets }} }} }}"
         );
         assert_eq!(
             intention(&serde_json::json!({ "query": query })),
             Intention::SharedContext {
-                traffic: Guarded::Projection("CompanyTicketList".into()),
+                traffic: Guarded::Projection("CompanyTicketQueue".into()),
                 subject: Subject::Company(COMPANY.into()),
             }
         );
@@ -1175,11 +1235,40 @@ mod tests {
         assert_eq!(created, Subject::Company(COMPANY.into()));
 
         let listed = subject_of(
-            &Guarded::Projection("CompanyTicketList".into()),
+            &Guarded::Projection("CompanyTicketQueue".into()),
             None,
             Some(COMPANY),
         );
         assert_eq!(listed, Subject::Company(COMPANY.into()));
+    }
+
+    #[test]
+    fn a_customer_keyed_read_is_attributed_through_its_rows_owner() {
+        assert_eq!(
+            subject_of(
+                &Guarded::Projection(CUSTOMER_TICKETS.into()),
+                None,
+                Some("customer-1")
+            ),
+            Subject::OwnerOfRow {
+                projection: CUSTOMER_TICKETS.into(),
+                key: "customer-1".into(),
+            }
+        );
+        // Left unresolved, it is refused like any unattributed read.
+        assert!(matches!(
+            check(
+                RoutingMode::Tenant,
+                &Guarded::Projection(CUSTOMER_TICKETS.into()),
+                CommandClass::Ticket,
+                &Subject::OwnerOfRow {
+                    projection: CUSTOMER_TICKETS.into(),
+                    key: "customer-1".into(),
+                },
+                None,
+            ),
+            Verdict::Misrouted { .. }
+        ));
     }
 
     #[test]
@@ -1215,7 +1304,12 @@ mod tests {
         // projection names `helpdesk.rs` declares - a new Ticket
         // projection there that isn't listed here would silently skip the
         // guard and split a company's reads across two contexts.
-        for name in ["TicketSummary", "CompanyTicketList", "TicketInternalNotes"] {
+        for name in [
+            "TicketSummary",
+            "CompanyTicketQueue",
+            "CustomerTickets",
+            "TicketInternalNotes",
+        ] {
             assert_eq!(
                 classify_projection_name(name),
                 NameClass::Ticket,

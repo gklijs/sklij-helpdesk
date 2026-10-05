@@ -37,6 +37,9 @@ use support::{
 struct Fixture {
     company_id: String,
     tenant_name: String,
+    /// A customer of the company with a ticket in the shared context, so
+    /// a `CustomerTickets` row owned by the company exists there.
+    requester_id: String,
 }
 
 /// A company with a real, recorded tenant and a real, created context.
@@ -54,6 +57,7 @@ async fn fixture() -> (axum::Router, db::Pool, Fixture) {
     let sign_up = mint_command_token(&pool, &mapping, BOUNDED_CONTEXT, "SignUpCompany").await;
     let record_tenant =
         mint_command_token(&pool, &mapping, BOUNDED_CONTEXT, "RecordCompanyTenant").await;
+    let create_ticket = mint_command_token(&pool, &mapping, BOUNDED_CONTEXT, "CreateTicket").await;
 
     // No tenant yet for this one test, which is the fallback case: a
     // company that never signed up for isolation must keep working.
@@ -65,6 +69,19 @@ async fn fixture() -> (axum::Router, db::Pool, Fixture) {
         serde_json::json!({ "company_id": company_id, "name": "Acme", "contact_email": "a@acme.example" }),
     )
     .await;
+    // Filed over REST before the tenant is recorded, as a pre-cutover
+    // ticket would have been.
+    let requester_id = unique_name("customer");
+    let response = trigger(
+        &rest,
+        &create_ticket,
+        serde_json::json!({
+            "ticket_id": unique_name("ticket"), "company_id": company_id, "requester_id": requester_id,
+            "logged_by_staff_id": null, "title": "t", "description": "d", "priority": "low",
+        }),
+    )
+    .await;
+    assert!(response["accepted"].as_bool() == Some(true), "{response:?}");
     let response = trigger(
         &rest,
         &record_tenant,
@@ -97,6 +114,7 @@ async fn fixture() -> (axum::Router, db::Pool, Fixture) {
         Fixture {
             company_id,
             tenant_name,
+            requester_id,
         },
     )
 }
@@ -125,10 +143,17 @@ fn create_ticket_query(company_id: &str, context: &str) -> String {
     )
 }
 
-/// A `CompanyTicketList` read exactly as the frontend spells it.
+/// A `CompanyTicketQueue` read exactly as the frontend spells it.
 fn ticket_list_query(company_id: &str, context: &str) -> String {
     format!(
-        r#"query {{ projection(boundedContext: {context:?}, name: "CompanyTicketList", key: {company_id:?}) {{ ... on helpdesk_CompanyTicketList {{ tickets }} }} }}"#
+        r#"query {{ projection(boundedContext: {context:?}, name: "CompanyTicketQueue", key: {company_id:?}) {{ ... on helpdesk_CompanyTicketQueue {{ tickets }} }} }}"#
+    )
+}
+
+/// A `CustomerTickets` read exactly as the frontend spells it.
+fn customer_tickets_query(requester_id: &str, context: &str) -> String {
+    format!(
+        r#"query {{ projection(boundedContext: {context:?}, name: "CustomerTickets", key: {requester_id:?}) {{ ... on helpdesk_CustomerTickets {{ tickets }} }} }}"#
     )
 }
 
@@ -190,6 +215,33 @@ fn ticket_traffic_naming_the_shared_context_is_refused_once_the_cutover_is_on() 
             refusal_code(&response),
             Some("ticket_routing_error"),
             "a misrouted read must be refused too: {response:?}"
+        );
+
+        // A customer-keyed read names no company, but its row's owner
+        // does - so it is refused the same way.
+        let response = graphql_request(
+            &router,
+            &jwt,
+            &customer_tickets_query(&fixture.requester_id, BOUNDED_CONTEXT),
+        )
+        .await;
+        assert_eq!(
+            refusal_code(&response),
+            Some("ticket_routing_error"),
+            "a misrouted customer read must be refused: {response:?}"
+        );
+        // A row that doesn't exist holds nothing to split or leak.
+        let response = graphql_request(
+            &router,
+            &jwt,
+            &customer_tickets_query(&unique_name("no-tickets-yet"), BOUNDED_CONTEXT),
+        )
+        .await;
+        // (skilj itself may still refuse this caller - just not the guard.)
+        assert_ne!(
+            refusal_code(&response),
+            Some("ticket_routing_error"),
+            "{response:?}"
         );
     });
 }

@@ -72,6 +72,8 @@ mod tests {
             title: "t".into(),
             description: "d".into(),
             priority,
+            requester_name: None,
+            requester_email: None,
         }
     }
 

@@ -27,8 +27,8 @@ name = "provisioner"
 path = "src/bin/provisioner.rs"
 
 [dependencies]
-skilj = { path = "../skilj/skilj" }
-skilj-core = { path = "../skilj/skilj-core" }
+skilj = "0.0.9"
+skilj-core = "0.0.9"
 tokio = { version = "1", features = ["full"] }
 axum = "0.8"
 chrono = { version = "0.4", features = ["serde"] }
@@ -72,7 +72,7 @@ tower = { version = "0.5", features = ["limit", "load-shed"] }
 # axum/reqwest).
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 # Telemetry (src/telemetry.rs, used by every binary) - versions
-# pinned to match ../skilj/Cargo.toml exactly. skilj-core/skilj-rest/
+# pinned to match skilj 0.0.9's own Cargo.toml exactly. skilj-core/skilj-rest/
 # skilj only ever call opentelemetry::global::meter()/global tracer -
 # they never install a subscriber or MeterProvider themselves (see
 # docs/architecture.md's tracing section) - init_telemetry below is
@@ -102,9 +102,9 @@ http-body-util = "0.1"
 # in the skilj repo). Complements, doesn't replace, the Postgres-backed
 # tests/*.rs suites, which still own persistence, DCB conflicts and
 # access control.
-skilj-test-fixture = { path = "../skilj/skilj-test-fixture" }
+skilj-test-fixture = "0.0.9"
 # tests/ticket_auto_close_cancel.rs only - reads the `deadlines` table
 # directly, since no skilj API lists pending deadlines. Same version as
-# ../skilj/Cargo.toml, so it resolves to the copy skilj-core already
+# skilj 0.0.9's own Cargo.toml, so it resolves to the copy skilj-core already
 # builds; features are unified with skilj-core's own.
 sqlx = { version = "0.9", default-features = false, features = ["postgres"] }

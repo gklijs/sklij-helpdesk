@@ -19,9 +19,15 @@ async fn token(
     mint_command_token(pool, mapping, BOUNDED_CONTEXT, command_type_name).await
 }
 
+/// The requester `create_ticket_payload` files a ticket for, which a
+/// `RateTicket` has to name - see `helpdesk::reject_unless_requester`.
+fn requester_of(ticket_id: &str) -> String {
+    format!("customer-of-{ticket_id}")
+}
+
 fn create_ticket_payload(ticket_id: &str, company_id: &str, priority: &str) -> serde_json::Value {
     serde_json::json!({
-        "ticket_id": ticket_id, "company_id": company_id, "requester_id": unique_name("customer"),
+        "ticket_id": ticket_id, "company_id": company_id, "requester_id": requester_of(ticket_id),
         "logged_by_staff_id": null, "title": "t", "description": "d", "priority": priority,
     })
 }
@@ -49,7 +55,7 @@ fn rating_a_resolved_ticket_is_accepted() {
         trigger(&router, &assign_ticket, serde_json::json!({ "ticket_id": ticket_id, "staff_id": unique_name("staff") })).await;
         trigger(&router, &resolve_ticket, serde_json::json!({ "ticket_id": ticket_id })).await;
 
-        let response = trigger(&router, &rate_ticket, serde_json::json!({ "ticket_id": ticket_id, "rating": 5, "comment": "Great support!" })).await;
+        let response = trigger(&router, &rate_ticket, serde_json::json!({ "ticket_id": ticket_id, "rating": 5, "comment": "Great support!", "requester_id": requester_of(&ticket_id) })).await;
         assert!(accepted(&response), "rating a resolved ticket should be accepted: {response:?}");
         let state: TicketSummaryState = projection_state(&pool, BOUNDED_CONTEXT, "TicketSummary", &ticket_id).await;
         assert_eq!(state.rating, Some(5), "the frontend needs this to stop re-showing the rating form");
@@ -73,7 +79,7 @@ fn rating_a_ticket_that_is_still_open_is_rejected() {
         trigger(&router, &sign_up, serde_json::json!({ "company_id": company_id, "name": "Acme", "contact_email": "a@acme.example" })).await;
         trigger(&router, &create_ticket, create_ticket_payload(&ticket_id, &company_id, "low")).await;
 
-        let response = trigger(&router, &rate_ticket, serde_json::json!({ "ticket_id": ticket_id, "rating": 5, "comment": null })).await;
+        let response = trigger(&router, &rate_ticket, serde_json::json!({ "ticket_id": ticket_id, "rating": 5, "comment": null, "requester_id": requester_of(&ticket_id) })).await;
         assert!(!accepted(&response), "should be rejected: {response:?}");
         assert_eq!(rejection_kind(&response), "ticket_not_ratable");
     });
@@ -100,7 +106,7 @@ fn rating_a_resolved_ticket_out_of_range_is_rejected() {
         trigger(&router, &assign_ticket, serde_json::json!({ "ticket_id": ticket_id, "staff_id": unique_name("staff") })).await;
         trigger(&router, &resolve_ticket, serde_json::json!({ "ticket_id": ticket_id })).await;
 
-        let response = trigger(&router, &rate_ticket, serde_json::json!({ "ticket_id": ticket_id, "rating": 0, "comment": null })).await;
+        let response = trigger(&router, &rate_ticket, serde_json::json!({ "ticket_id": ticket_id, "rating": 0, "comment": null, "requester_id": requester_of(&ticket_id) })).await;
         assert!(!accepted(&response), "should be rejected: {response:?}");
         assert_eq!(rejection_kind(&response), "invalid_rating");
     });
@@ -126,9 +132,9 @@ fn rating_the_same_ticket_twice_is_rejected() {
         trigger(&router, &create_ticket, create_ticket_payload(&ticket_id, &company_id, "low")).await;
         trigger(&router, &assign_ticket, serde_json::json!({ "ticket_id": ticket_id, "staff_id": unique_name("staff") })).await;
         trigger(&router, &resolve_ticket, serde_json::json!({ "ticket_id": ticket_id })).await;
-        trigger(&router, &rate_ticket, serde_json::json!({ "ticket_id": ticket_id, "rating": 4, "comment": null })).await;
+        trigger(&router, &rate_ticket, serde_json::json!({ "ticket_id": ticket_id, "rating": 4, "comment": null, "requester_id": requester_of(&ticket_id) })).await;
 
-        let response = trigger(&router, &rate_ticket, serde_json::json!({ "ticket_id": ticket_id, "rating": 2, "comment": null })).await;
+        let response = trigger(&router, &rate_ticket, serde_json::json!({ "ticket_id": ticket_id, "rating": 2, "comment": null, "requester_id": requester_of(&ticket_id) })).await;
         assert!(!accepted(&response), "should be rejected: {response:?}");
         assert_eq!(rejection_kind(&response), "already_rated");
     });
@@ -163,7 +169,7 @@ fn adding_an_internal_note_to_an_open_ticket_is_accepted() {
         assert!(accepted(&response), "should be accepted: {response:?}");
 
         // The one place this note is actually readable back - never
-        // folded into TicketSummary/CompanyTicketList, see
+        // folded into TicketSummary/CompanyTicketQueue/CustomerTickets, see
         // TicketInternalNoteAdded's own doc comment.
         let notes: TicketInternalNotesState =
             projection_state(&pool, BOUNDED_CONTEXT, "TicketInternalNotes", &ticket_id).await;

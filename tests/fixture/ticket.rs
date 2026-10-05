@@ -21,6 +21,8 @@ fn create(ticket_id: &str) -> CreateTicketPayload {
         title: "Login broken".into(),
         description: "Can't log in since this morning".into(),
         priority: TicketPriority::High,
+        requester_name: Some("Jane Doe".into()),
+        requester_email: Some("jane@customer.example".into()),
     }
 }
 
@@ -41,6 +43,8 @@ fn a_trialing_company_can_create_tickets() {
                 "title": "Login broken",
                 "description": "Can't log in since this morning",
                 "priority": "high",
+                "requester_name": "Jane Doe",
+                "requester_email": "jane@customer.example",
             }),
         )]);
 }
@@ -152,7 +156,7 @@ fn an_in_progress_ticket_resolves() {
         })
         .then_accepted(vec![spec(
             "TicketResolved",
-            json!({ "ticket_id": "t1", "company_id": "acme", "resolution": 1 }),
+            json!({ "ticket_id": "t1", "company_id": "acme", "resolution": 1, "requester_id": "customer-1" }),
         )]);
 }
 
@@ -193,7 +197,7 @@ fn a_resolved_ticket_reopens_and_can_be_resolved_again() {
         })
         .then_accepted(vec![spec(
             "TicketResolved",
-            json!({ "ticket_id": "t1", "company_id": "acme", "resolution": 2 }),
+            json!({ "ticket_id": "t1", "company_id": "acme", "resolution": 2, "requester_id": "customer-1" }),
         )]);
     let mut history = resolved_ticket("t1", "acme");
     history.push(reopened("t1", "acme", 1));
@@ -231,6 +235,8 @@ fn a_resolved_ticket_closes() {
         .events(resolved_ticket("t1", "acme"))
         .when(CloseTicketPayload {
             ticket_id: "t1".into(),
+            requester_id: Some("customer-1".into()),
+            requester_email: None,
         })
         .then_accepted(vec![spec(
             "TicketClosed",
@@ -249,12 +255,16 @@ fn an_auto_close_that_lost_the_race_to_a_reopen_is_rejected() {
         .events(history)
         .when(CloseTicketPayload {
             ticket_id: "t1".into(),
+            requester_id: Some("customer-1".into()),
+            requester_email: None,
         })
         .then_rejected("ticket_not_resolved");
     GivenEvents::<CloseTicket>::new()
         .events(closed_ticket("t1", "acme"))
         .when(CloseTicketPayload {
             ticket_id: "t1".into(),
+            requester_id: Some("customer-1".into()),
+            requester_email: None,
         })
         .then_rejected("ticket_not_resolved");
 }
@@ -266,10 +276,15 @@ fn resolving_schedules_an_auto_close_for_that_ticket() {
         ticket_id: "t1".into(),
         company_id: "acme".into(),
         resolution: Some(2),
+        requester_id: Some("customer-1".into()),
     })
     .expect("every resolution schedules an auto-close");
     let after = chrono::Utc::now();
     assert_eq!(deadline.payload.ticket_id, "t1");
+    // Names its customer, so forgetSubject can find it - and carries no
+    // email, which it could only have copied as ciphertext.
+    assert_eq!(deadline.payload.requester_id.as_deref(), Some("customer-1"));
+    assert_eq!(deadline.payload.requester_email, None);
     assert_eq!(
         deadline.tags,
         vec![
@@ -291,6 +306,7 @@ fn resolving_schedules_an_auto_close_for_that_ticket() {
         ticket_id: "t1".into(),
         company_id: "acme".into(),
         resolution: None,
+        requester_id: None,
     })
     .expect("every resolution schedules an auto-close");
     assert_eq!(
@@ -323,6 +339,7 @@ fn reopening_cancels_only_the_auto_close_of_the_resolution_it_undoes() {
         ticket_id: "t1".into(),
         company_id: "acme".into(),
         resolution: Some(2),
+        requester_id: Some("customer-1".into()),
     })
     .unwrap();
     assert!(cancel.iter().all(|tag| !next.tags.contains(tag)));
@@ -348,10 +365,11 @@ fn staff_ask_and_the_customer_answers() {
             ticket_id: "t1".into(),
             staff_id: "staff-1".into(),
             message: "Which browser?".into(),
+            requester_id: Some("customer-1".into()),
         })
         .then_accepted(vec![spec(
             "TicketInfoRequested",
-            json!({ "ticket_id": "t1", "company_id": "acme", "staff_id": "staff-1", "message": "Which browser?" }),
+            json!({ "ticket_id": "t1", "company_id": "acme", "staff_id": "staff-1", "message": "Which browser?", "requester_id": "customer-1" }),
         )]);
     GivenEvents::<CustomerRespondsToTicket>::new()
         .events(waiting_ticket("t1", "acme"))
@@ -367,6 +385,38 @@ fn staff_ask_and_the_customer_answers() {
 }
 
 #[test]
+fn customer_text_is_only_accepted_under_the_tickets_own_requester() {
+    // The text is encrypted under the key `requester_id` names, so a
+    // wrong or missing one would file it under someone else.
+    for requester_id in [None, Some("customer-2")] {
+        GivenEvents::<RequestInfoFromCustomer>::new()
+            .events(in_progress_ticket("t1", "acme"))
+            .when(RequestInfoFromCustomerPayload {
+                ticket_id: "t1".into(),
+                staff_id: "staff-1".into(),
+                message: "?".into(),
+                requester_id: requester_id.map(Into::into),
+            })
+            .then_rejected("requester_mismatch");
+        GivenEvents::<RateTicket>::new()
+            .events(resolved_ticket("t1", "acme"))
+            .when(RateTicketPayload {
+                requester_id: requester_id.map(Into::into),
+                ..rate(5)
+            })
+            .then_rejected("requester_mismatch");
+    }
+    GivenEvents::<CustomerRespondsToTicket>::new()
+        .events(waiting_ticket("t1", "acme"))
+        .when(CustomerRespondsToTicketPayload {
+            ticket_id: "t1".into(),
+            requester_id: "customer-2".into(),
+            message: "not my ticket".into(),
+        })
+        .then_rejected("requester_mismatch");
+}
+
+#[test]
 fn info_can_only_be_requested_on_an_in_progress_ticket() {
     for history in [
         open_ticket("t1", "acme"),
@@ -379,6 +429,7 @@ fn info_can_only_be_requested_on_an_in_progress_ticket() {
                 ticket_id: "t1".into(),
                 staff_id: "staff-1".into(),
                 message: "?".into(),
+                requester_id: Some("customer-1".into()),
             })
             .then_rejected("ticket_not_in_progress");
     }
@@ -562,6 +613,7 @@ fn rate(rating: u8) -> RateTicketPayload {
         ticket_id: "t1".into(),
         rating,
         comment: Some("quick fix".into()),
+        requester_id: Some("customer-1".into()),
     }
 }
 
@@ -573,7 +625,7 @@ fn a_resolved_or_closed_ticket_can_be_rated() {
             .when(rate(5))
             .then_accepted(vec![spec(
                 "TicketRated",
-                json!({ "ticket_id": "t1", "company_id": "acme", "rating": 5, "comment": "quick fix" }),
+                json!({ "ticket_id": "t1", "company_id": "acme", "rating": 5, "comment": "quick fix", "requester_id": "customer-1" }),
             )]);
     }
 }
@@ -658,6 +710,8 @@ fn every_ticket_command_rejects_an_unknown_ticket() {
     GivenEvents::<CloseTicket>::new()
         .when(CloseTicketPayload {
             ticket_id: "t1".into(),
+            requester_id: Some("customer-1".into()),
+            requester_email: None,
         })
         .then_rejected("ticket_not_found");
     GivenEvents::<RequestInfoFromCustomer>::new()
@@ -665,6 +719,7 @@ fn every_ticket_command_rejects_an_unknown_ticket() {
             ticket_id: "t1".into(),
             staff_id: "staff-1".into(),
             message: "?".into(),
+            requester_id: Some("customer-1".into()),
         })
         .then_rejected("ticket_not_found");
     GivenEvents::<CustomerRespondsToTicket>::new()

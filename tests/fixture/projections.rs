@@ -1,7 +1,7 @@
 //! Every helpdesk projection's fold. `skilj-test-fixture` folds all given
 //! events into one state under the key `""`, without applying `keys()` -
 //! so each test gives only events for one instance (one ticket for
-//! `TicketSummary`, one company for `CompanyTicketList`), and the one
+//! `TicketSummary`, one company for `CompanyTicketQueue`, one customer for `CustomerTickets`), and the one
 //! fold that reads its key (`TicketSummary` on `TicketsMerged`) is tested
 //! through `Projection::project` directly.
 
@@ -104,11 +104,11 @@ fn a_merge_marks_only_the_duplicate_ticket_as_merged() {
     assert_eq!(duplicate.status.as_deref(), Some("merged"));
 }
 
-// --- CompanyTicketList ---
+// --- CompanyTicketQueue ---
 
 #[test]
-fn company_ticket_list_keeps_every_ticket_with_its_conversation() {
-    GivenEvents::<CompanyTicketList>::new()
+fn company_ticket_queue_follows_every_ticket_of_the_company() {
+    GivenEvents::<CompanyTicketQueue>::new()
         .events(open_ticket("t1", "acme"))
         .events(open_ticket("t2", "acme"))
         .event(assigned("t1", "acme", "staff-1"))
@@ -120,28 +120,41 @@ fn company_ticket_list_keeps_every_ticket_with_its_conversation() {
             let t1 = &state.tickets["t1"];
             assert_eq!(t1.status, "in_progress");
             assert_eq!(t1.assigned_staff_id.as_deref(), Some("staff-1"));
-            let thread: Vec<_> = t1
-                .messages
-                .iter()
-                .map(|m| (m.from_staff, m.author_id.as_str(), m.text.as_str()))
-                .collect();
-            assert_eq!(
-                thread,
-                vec![
-                    (true, "staff-1", "which version?"),
-                    (false, "customer-1", "2.1"),
-                ]
-            );
+            assert_eq!(t1.requester_id, "customer-1");
             let t2 = &state.tickets["t2"];
             assert_eq!(t2.status, "open");
-            assert_eq!(t2.title, "t2 title");
             assert_eq!(t2.rating, Some(3));
         });
 }
 
 #[test]
-fn company_ticket_list_marks_the_duplicate_of_a_merge() {
-    GivenEvents::<CompanyTicketList>::new()
+fn company_ticket_queue_holds_nothing_a_customer_wrote() {
+    // That text is encrypted under each customer's own key, which a
+    // company-keyed row could never decrypt - see `CompanyTicketQueue`.
+    GivenEvents::<CompanyTicketQueue>::new()
+        .events(open_ticket("t1", "acme"))
+        .event(assigned("t1", "acme", "staff-1"))
+        .event(info_requested("t1", "acme", "which version?"))
+        .event(customer_responded("t1", "acme", "2.1"))
+        .event(resolved("t1", "acme", 1))
+        .event(rated("t1", "acme", 3))
+        .then(|state| {
+            let rendered = serde_json::to_string(state).expect("state serializes");
+            for text in [
+                "t1 title",
+                "t1 description",
+                "which version?",
+                "2.1",
+                "t1 comment",
+            ] {
+                assert!(!rendered.contains(text), "{text:?} in {rendered}");
+            }
+        });
+}
+
+#[test]
+fn company_ticket_queue_marks_the_duplicate_of_a_merge() {
+    GivenEvents::<CompanyTicketQueue>::new()
         .events(open_ticket("t1", "acme"))
         .events(open_ticket("t2", "acme"))
         .event(escalated(
@@ -160,22 +173,88 @@ fn company_ticket_list_marks_the_duplicate_of_a_merge() {
 }
 
 #[test]
-fn internal_notes_never_reach_the_customer_visible_ticket_list() {
-    GivenEvents::<CompanyTicketList>::new()
+fn company_ticket_queue_skips_events_for_tickets_it_never_saw_created() {
+    GivenEvents::<CompanyTicketQueue>::new()
+        .event(assigned("ghost", "acme", "staff-1"))
+        .event(resolved("ghost", "acme", 1))
+        .then(|state| assert!(state.tickets.is_empty()));
+}
+
+// --- CustomerTickets ---
+
+#[test]
+fn customer_tickets_keeps_each_ticket_with_its_conversation() {
+    GivenEvents::<CustomerTickets>::new()
         .events(open_ticket("t1", "acme"))
-        .event(note_added("t1", "acme", "staff eyes only"))
+        .events(open_ticket("t2", "acme"))
+        .event(assigned("t1", "acme", "staff-1"))
+        .event(info_requested("t1", "acme", "which version?"))
+        .event(customer_responded("t1", "acme", "2.1"))
+        .event(rated("t2", "acme", 3))
         .then(|state| {
-            let rendered = serde_json::to_string(state).expect("state serializes");
-            assert!(!rendered.contains("staff eyes only"), "{rendered}");
+            assert_eq!(state.tickets.len(), 2);
+            let t1 = &state.tickets["t1"];
+            assert_eq!(t1.title, "t1 title");
+            assert_eq!(t1.description, "t1 description");
+            let thread: Vec<_> = t1
+                .messages
+                .iter()
+                .map(|m| (m.from_staff, m.author_id.as_str(), m.text.as_str()))
+                .collect();
+            assert_eq!(
+                thread,
+                vec![
+                    (true, "staff-1", "which version?"),
+                    (false, "customer-1", "2.1"),
+                ]
+            );
+            assert_eq!(
+                state.tickets["t2"].rating_comment.as_deref(),
+                Some("t2 comment")
+            );
         });
 }
 
 #[test]
-fn company_ticket_list_skips_events_for_tickets_it_never_saw_created() {
-    GivenEvents::<CompanyTicketList>::new()
-        .event(assigned("ghost", "acme", "staff-1"))
-        .event(resolved("ghost", "acme", 1))
-        .then(|state| assert!(state.tickets.is_empty()));
+fn customer_tickets_is_keyed_by_the_customer_the_text_is_encrypted_under() {
+    for event in [
+        created("t1", "acme", TicketPriority::Low),
+        info_requested("t1", "acme", "?"),
+        customer_responded("t1", "acme", "!"),
+        rated("t1", "acme", 5),
+    ] {
+        assert_eq!(
+            CustomerTickets::keys(&event),
+            vec!["customer-1".to_string()]
+        );
+    }
+    // Stored before these events named their requester: no row to put
+    // them in.
+    let HelpdeskEvent::TicketInfoRequested(mut legacy) = info_requested("t1", "acme", "?") else {
+        unreachable!()
+    };
+    legacy.requester_id = None;
+    assert!(CustomerTickets::keys(&HelpdeskEvent::TicketInfoRequested(legacy)).is_empty());
+    assert!(CustomerTickets::keys(&assigned("t1", "acme", "staff-1")).is_empty());
+}
+
+#[test]
+fn internal_notes_never_reach_a_customer_visible_projection() {
+    let note = || note_added("t1", "acme", "staff eyes only");
+    GivenEvents::<CompanyTicketQueue>::new()
+        .events(open_ticket("t1", "acme"))
+        .event(note())
+        .then(|state| {
+            let rendered = serde_json::to_string(state).expect("state serializes");
+            assert!(!rendered.contains("staff eyes only"), "{rendered}");
+        });
+    GivenEvents::<CustomerTickets>::new()
+        .events(open_ticket("t1", "acme"))
+        .event(note())
+        .then(|state| {
+            let rendered = serde_json::to_string(state).expect("state serializes");
+            assert!(!rendered.contains("staff eyes only"), "{rendered}");
+        });
 }
 
 // --- TicketInternalNotes / TenantDirectory ---

@@ -3305,6 +3305,8 @@ checksum = "8ee5873ec9cce0195efcb7a4e9507a04cd49aec9c83d0389df45b1ef7ba2e649"
 [[package]]
 name = "skilj"
 version = "0.0.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8d131962b35dc8c23c041afcf7b48df70afbc2c7d0221974536e509ddc69956d"
 dependencies = [
  "arc-swap",
  "axum",
@@ -3326,6 +3328,8 @@ dependencies = [
 [[package]]
 name = "skilj-core"
 version = "0.0.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cd3e1f2ada7062ed0185ccd5d6cca3d93fa39073a94f9867f86c29b1f50f8dbe"
 dependencies = [
  "arc-swap",
  "base64 0.23.1",
@@ -3353,6 +3357,8 @@ dependencies = [
 [[package]]
 name = "skilj-graphql"
 version = "0.0.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a351aaa3e5e3638e7cd8ebd0e415a28603400e64d8c491ad067048925ca82bcb"
 dependencies = [
  "arc-swap",
  "async-graphql",
@@ -3406,6 +3412,8 @@ dependencies = [
 [[package]]
 name = "skilj-macros"
 version = "0.0.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c057c244b8c9713001ab5aae7dd3e77c48e4fd1496856230085a40211c0b5476"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3415,6 +3423,8 @@ dependencies = [
 [[package]]
 name = "skilj-rest"
 version = "0.0.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a051de1ed473f8c471a93e98eae829934e0bcb92fd582cdf27d3ccb2d5e5be54"
 dependencies = [
  "axum",
  "axum-extra",
@@ -3432,6 +3442,8 @@ dependencies = [
 [[package]]
 name = "skilj-retry"
 version = "0.0.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f5218cc9c281608c87697cbd0e627abeafe247b9bacb4d662e5da0fc309dbc56"
 dependencies = [
  "chrono",
 ]
@@ -3439,6 +3451,8 @@ dependencies = [
 [[package]]
 name = "skilj-test-fixture"
 version = "0.0.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dfc34681625db26af2e266f8b23e9f29edf830b1e545f6cfa960f0e0899338d8"
 dependencies = [
  "serde_json",
  "skilj-core",
