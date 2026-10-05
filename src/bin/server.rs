@@ -1820,10 +1820,7 @@ async fn run_demo_seed_loop(
     interval: Duration,
 ) {
     let client = reqwest::Client::new();
-    let mut state = SeedState::new(
-        companies,
-        format!("seed-ticket-w{worker_index}"),
-    );
+    let mut state = SeedState::new(companies, format!("seed-ticket-w{worker_index}"));
     let mut rng = Rng::from_clock_and_worker(worker_index);
 
     loop {

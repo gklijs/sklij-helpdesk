@@ -38,11 +38,11 @@ mod support;
 
 use skilj_core::access_control::AccessLevel;
 use skilj_helpdesk::helpdesk::{BOUNDED_CONTEXT, STAFF_TEAM};
+use std::time::Duration;
 use support::{
     graphql_request, mint_command_token, seed_role, seed_scoped_mapping, setup_graphql, sign_jwt,
     test_db, trigger, unique_name, wait_until,
 };
-use std::time::Duration;
 
 fn projection_query(name: &str, key: &str, graphql_type: &str, field: &str) -> String {
     format!(
