@@ -21,6 +21,20 @@ pub mod scheduling;
 pub mod telemetry;
 pub mod tenant_access;
 
+/// This build's `SkiljBuilder::application_version` (docs/architecture.md
+/// §104 in the skilj repo), set by `src/bin/server.rs`. Five binaries and
+/// three bounded contexts share one database, so during a rolling deploy
+/// an old and a new `server` start against the same registration tables:
+/// with this set, a lower-versioned startup leaves the newer one's
+/// `EventType`/`CommandType`/`Projection` rows exactly as they are
+/// (reported in `ReconciliationReport::kept_newer`) instead of reverting
+/// them - a projection's consumed event types flipping back and forth is
+/// a full rebuild each time. `tests/application_version.rs` proves it.
+///
+/// Must only ever increase: bump it in any change that alters a
+/// registered shape (a new consumed event type, a flag, a new field).
+pub const APPLICATION_VERSION: u64 = 1;
+
 /// Registers every bounded context this crate defines. `auto_register()`
 /// alone still covers every `EventType`/`CommandType` in `helpdesk`,
 /// `activity` and `marketing` - each `#[auto_register]`-tagged type

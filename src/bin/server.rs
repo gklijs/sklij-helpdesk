@@ -1253,6 +1253,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let (skilj, report) = skilj_helpdesk::register(Skilj::builder(database_url))
         .reconciliation_role(external_subject.clone())
+        .application_version(skilj_helpdesk::APPLICATION_VERSION)
         .identity_provider(IdpConfig::new(
             jwks_url
                 .parse()
@@ -1271,6 +1272,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!(
             "server: reconciliation skipped (no access yet): {:?}",
             report.skipped_no_access
+        );
+    }
+    if !report.kept_newer.is_empty() {
+        println!(
+            "server: reconciliation kept registrations from a newer version than {} (rolling deploy in progress?): {:?}",
+            skilj_helpdesk::APPLICATION_VERSION,
+            report.kept_newer
         );
     }
 
