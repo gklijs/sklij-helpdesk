@@ -534,7 +534,13 @@ mod tests {
         assert_eq!(demo_companies(2), ["wonka-industries", "stark-labs"]);
         assert_eq!(
             demo_companies(5),
-            ["wonka-industries", "stark-labs", "hooli", "demo-company-4", "demo-company-5"]
+            [
+                "wonka-industries",
+                "stark-labs",
+                "hooli",
+                "demo-company-4",
+                "demo-company-5"
+            ]
         );
     }
 
