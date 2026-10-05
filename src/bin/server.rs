@@ -21,7 +21,9 @@
 //! load - each worker paces itself independently and staggers its first
 //! tick, so `concurrency` workers is roughly `concurrency`x one
 //! worker's own request rate, spread smoothly rather than bursting in
-//! lockstep. Unset (the default), nothing about this file's behaviour
+//! lockstep. `SEED_DEMO_COMPANIES` (default `3`) spreads the tickets
+//! over more companies, for a load test of a company-keyed partitioned
+//! projection. Unset (the default), nothing about this file's behaviour
 //! changes. When `TICKET_ROUTING=tenant` is also set, each worker routes
 //! ticket commands to the company's own tenant (discovered from
 //! `CompanyTenantProvisioned` and per-tenant tokens minted via GraphQL),
@@ -77,7 +79,7 @@ use skilj_core::bootstrap::ContextCreator;
 use skilj_core::db;
 use skilj_core::event_store::{BoundedContext, BoundedContextStatus};
 use skilj_core::shared::{generate_token_id, generate_token_secret};
-use skilj_helpdesk::demo_seed::{self, Rng, SeedAction, SeedState, DEMO_COMPANIES};
+use skilj_helpdesk::demo_seed::{self, Rng, SeedAction, SeedState};
 use skilj_helpdesk::helpdesk::BOUNDED_CONTEXT;
 use skilj_helpdesk::routing::RoutingMode;
 use skilj_helpdesk::routing_guard::{self, GuardState};
@@ -1180,7 +1182,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // cross-tenant read gap a security review found, and skilj's own
         // `docs/architecture.md` §23 for the mechanism): the demo
         // customer's own grant is scoped to its own company, so
-        // `TicketSummary`/`CompanyTicketQueue`/`CustomerTickets`/`TicketInternalNotes` -
+        // `TicketSummary`/`CompanyActiveTickets`/`CustomerTickets`/`TicketInternalNotes` -
         // every projection that declares `OWNER_TAG_KEY` - now rejects
         // any instance whose derived owner isn't `DEMO_COMPANY_ID`, not
         // just "this Role has some mapping on the bounded context."
@@ -1665,6 +1667,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .and_then(|v| v.parse().ok())
             .filter(|&n| n > 0)
             .unwrap_or(1);
+        // How many companies the tickets spread over - only a load test
+        // needs more than the default three, see `demo_seed::demo_companies`.
+        let companies = demo_seed::demo_companies(
+            std::env::var("SEED_DEMO_COMPANIES")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .filter(|&n| n > 0)
+                .unwrap_or(demo_seed::DEMO_COMPANIES.len()),
+        );
         println!(
             "\nSEED_DEMO_TRAFFIC=1: starting {concurrency} fake-traffic worker(s), each every \
              {interval_ms}ms, against http://localhost:{port} (see src/demo_seed.rs)"
@@ -1696,9 +1707,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 None
             };
         tokio::spawn(async move {
-            sign_up_demo_companies(&seed_base_url, &seed_tokens).await;
+            sign_up_demo_companies(&seed_base_url, &seed_tokens, &companies).await;
             for worker_index in 0..concurrency {
                 let base_url = seed_base_url.clone();
+                let companies = companies.clone();
                 let tokens = seed_tokens.clone();
                 let tenant_cache = tenant_token_cache.clone();
                 // Staggers each worker's first tick evenly across one
@@ -1712,6 +1724,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     tokio::time::sleep(stagger).await;
                     run_demo_seed_loop(
                         worker_index,
+                        companies,
                         base_url,
                         tokens,
                         tenant_cache,
@@ -1761,7 +1774,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 // pure `next_action`/`apply_outcome`, this is just the I/O loop around
 // them ---
 
-/// Signs up `demo_seed::DEMO_COMPANIES` once - tolerating
+/// Signs up `companies` (`demo_seed::demo_companies`) once - tolerating
 /// `already_signed_up` (the same idempotent treatment this file's own
 /// demo-Role seeding above already gets), which now matters twice over:
 /// a repeat run of `server` itself, and every `SEED_DEMO_CONCURRENCY`
@@ -1769,9 +1782,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// concurrently the moment this loop starts (harmless, since it's just
 /// this - see `run_demo_seed_loop`'s own doc comment for why per-worker
 /// *ticket* state doesn't get the same "just let it collide" treatment).
-async fn sign_up_demo_companies(base_url: &str, command_tokens: &HashMap<&'static str, String>) {
+async fn sign_up_demo_companies(
+    base_url: &str,
+    command_tokens: &HashMap<&'static str, String>,
+    companies: &[String],
+) {
     let client = reqwest::Client::new();
-    for company_id in DEMO_COMPANIES {
+    for company_id in companies {
         let payload = serde_json::json!({
             "company_id": company_id,
             "name": company_display_name(company_id),
@@ -1796,6 +1813,7 @@ async fn sign_up_demo_companies(base_url: &str, command_tokens: &HashMap<&'stati
 /// processes.
 async fn run_demo_seed_loop(
     worker_index: usize,
+    companies: Vec<String>,
     base_url: String,
     command_tokens: HashMap<&'static str, String>,
     tenant_token_cache: Option<Arc<tokio::sync::Mutex<DemoSeedTokenCache>>>,
@@ -1803,7 +1821,7 @@ async fn run_demo_seed_loop(
 ) {
     let client = reqwest::Client::new();
     let mut state = SeedState::new(
-        DEMO_COMPANIES.iter().map(|s| s.to_string()).collect(),
+        companies,
         format!("seed-ticket-w{worker_index}"),
     );
     let mut rng = Rng::from_clock_and_worker(worker_index);

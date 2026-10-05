@@ -1,7 +1,7 @@
 //! Every helpdesk projection's fold. `skilj-test-fixture` folds all given
 //! events into one state under the key `""`, without applying `keys()` -
 //! so each test gives only events for one instance (one ticket for
-//! `TicketSummary`, one company for `CompanyTicketQueue`, one customer for `CustomerTickets`), and the one
+//! `TicketSummary`, one company for `CompanyActiveTickets`, one customer for `CustomerTickets`), and the one
 //! fold that reads its key (`TicketSummary` on `TicketsMerged`) is tested
 //! through `Projection::project` directly.
 
@@ -104,11 +104,11 @@ fn a_merge_marks_only_the_duplicate_ticket_as_merged() {
     assert_eq!(duplicate.status.as_deref(), Some("merged"));
 }
 
-// --- CompanyTicketQueue ---
+// --- CompanyActiveTickets ---
 
 #[test]
-fn company_ticket_queue_follows_every_ticket_of_the_company() {
-    GivenEvents::<CompanyTicketQueue>::new()
+fn company_active_tickets_follows_every_ticket_of_the_company() {
+    GivenEvents::<CompanyActiveTickets>::new()
         .events(open_ticket("t1", "acme"))
         .events(open_ticket("t2", "acme"))
         .event(assigned("t1", "acme", "staff-1"))
@@ -128,10 +128,10 @@ fn company_ticket_queue_follows_every_ticket_of_the_company() {
 }
 
 #[test]
-fn company_ticket_queue_holds_nothing_a_customer_wrote() {
+fn company_active_tickets_holds_nothing_a_customer_wrote() {
     // That text is encrypted under each customer's own key, which a
-    // company-keyed row could never decrypt - see `CompanyTicketQueue`.
-    GivenEvents::<CompanyTicketQueue>::new()
+    // company-keyed row could never decrypt - see `CompanyActiveTickets`.
+    GivenEvents::<CompanyActiveTickets>::new()
         .events(open_ticket("t1", "acme"))
         .event(assigned("t1", "acme", "staff-1"))
         .event(info_requested("t1", "acme", "which version?"))
@@ -153,8 +153,8 @@ fn company_ticket_queue_holds_nothing_a_customer_wrote() {
 }
 
 #[test]
-fn company_ticket_queue_marks_the_duplicate_of_a_merge() {
-    GivenEvents::<CompanyTicketQueue>::new()
+fn company_active_tickets_drops_the_duplicate_of_a_merge() {
+    GivenEvents::<CompanyActiveTickets>::new()
         .events(open_ticket("t1", "acme"))
         .events(open_ticket("t2", "acme"))
         .event(escalated(
@@ -168,13 +168,47 @@ fn company_ticket_queue_marks_the_duplicate_of_a_merge() {
             assert_eq!(state.tickets["t1"].status, "open");
             assert_eq!(state.tickets["t1"].priority, "high");
             assert!(state.tickets["t1"].escalated);
-            assert_eq!(state.tickets["t2"].status, "merged");
+            assert!(!state.tickets.contains_key("t2"));
         });
 }
 
 #[test]
-fn company_ticket_queue_skips_events_for_tickets_it_never_saw_created() {
-    GivenEvents::<CompanyTicketQueue>::new()
+fn company_active_tickets_drops_a_closed_ticket_once_it_is_rated() {
+    // Rated while resolved, then closed (by staff or auto-close).
+    GivenEvents::<CompanyActiveTickets>::new()
+        .events(open_ticket("t1", "acme"))
+        .event(assigned("t1", "acme", "staff-1"))
+        .event(resolved("t1", "acme", 1))
+        .event(rated("t1", "acme", 4))
+        .event(closed("t1", "acme"))
+        .then(|state| assert!(state.tickets.is_empty()));
+    // Closed first, rated afterwards - `CustomerRatesTicket` allows both.
+    GivenEvents::<CompanyActiveTickets>::new()
+        .events(open_ticket("t1", "acme"))
+        .event(assigned("t1", "acme", "staff-1"))
+        .event(resolved("t1", "acme", 1))
+        .event(closed("t1", "acme"))
+        .event(rated("t1", "acme", 4))
+        .then(|state| assert!(state.tickets.is_empty()));
+}
+
+#[test]
+fn company_active_tickets_keeps_a_closed_ticket_until_it_is_rated() {
+    // It's the read the customer rates from.
+    GivenEvents::<CompanyActiveTickets>::new()
+        .events(open_ticket("t1", "acme"))
+        .event(assigned("t1", "acme", "staff-1"))
+        .event(resolved("t1", "acme", 1))
+        .event(closed("t1", "acme"))
+        .then(|state| {
+            assert_eq!(state.tickets["t1"].status, "closed");
+            assert_eq!(state.tickets["t1"].rating, None);
+        });
+}
+
+#[test]
+fn company_active_tickets_skips_events_for_tickets_it_never_saw_created() {
+    GivenEvents::<CompanyActiveTickets>::new()
         .event(assigned("ghost", "acme", "staff-1"))
         .event(resolved("ghost", "acme", 1))
         .then(|state| assert!(state.tickets.is_empty()));
@@ -241,7 +275,7 @@ fn customer_tickets_is_keyed_by_the_customer_the_text_is_encrypted_under() {
 #[test]
 fn internal_notes_never_reach_a_customer_visible_projection() {
     let note = || note_added("t1", "acme", "staff eyes only");
-    GivenEvents::<CompanyTicketQueue>::new()
+    GivenEvents::<CompanyActiveTickets>::new()
         .events(open_ticket("t1", "acme"))
         .event(note())
         .then(|state| {

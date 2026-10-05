@@ -8,7 +8,22 @@ use leptos::ev::SubmitEvent;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use std::collections::HashMap;
+use std::time::Duration;
 use web_sys::window;
+
+/// Refetches now, and again once skilj's background catch-up has had a
+/// tick to fold the write in. `CompanyActiveTickets` is async (issue #15),
+/// so the immediate refetch usually still misses what was just
+/// written; `CustomerTickets` is sync and is already current. 750ms is
+/// skilj's default `async_projection_poll_interval` (500ms) plus room
+/// for the fold itself.
+fn refresh_after_write(set_refresh: WriteSignal<u32>) {
+    set_refresh.update(|n| *n += 1);
+    set_timeout(
+        move || set_refresh.update(|n| *n += 1),
+        Duration::from_millis(750),
+    );
+}
 
 /// `TicketInternalNotes` is its own projection, queried on demand, not
 /// as part of the eager ticket fetch `Dashboard` already does - see that projection's own doc comment in
@@ -134,7 +149,7 @@ pub fn Dashboard() -> impl IntoView {
 
     // `api::query_projection` already resolves down to the `tickets`
     // field's own inner JSON (a plain ticket_id -> entry map, per
-    // `CompanyTicketQueueState`'s own shape on the backend) - deserialize
+    // `CompanyActiveTicketsState`'s own shape on the backend) - deserialize
     // into that map directly, not the struct that wraps it. Found by
     // running the real thing in a real browser: every fetch failed with
     // "missing field `tickets`", not intermittently - an earlier
@@ -181,9 +196,9 @@ pub fn Dashboard() -> impl IntoView {
             let result = api::query_projection(
                 &token,
                 context.bounded_context(),
-                "CompanyTicketQueue",
+                "CompanyActiveTickets",
                 config::DEMO_COMPANY_ID,
-                &context.graphql_type("CompanyTicketQueue"),
+                &context.graphql_type("CompanyActiveTickets"),
                 "tickets",
             )
             .await
@@ -263,7 +278,7 @@ pub fn Dashboard() -> impl IntoView {
             match api::submit_command(&token, context.bounded_context(), "CreateTicket", &payload)
                 .await
             {
-                Ok(_) => set_refresh.update(|n| *n += 1),
+                Ok(_) => refresh_after_write(set_refresh),
                 Err(e) => set_status.set(format!("couldn't create ticket: {e}")),
             }
         });
@@ -397,7 +412,7 @@ fn TicketRow(
                 )
                 .await
                 {
-                    Ok(_) => set_refresh.update(|n| *n += 1),
+                    Ok(_) => refresh_after_write(set_refresh),
                     Err(e) => set_status.set(format!("{command_type_name} failed: {e}")),
                 }
             });

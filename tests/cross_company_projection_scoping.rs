@@ -4,7 +4,7 @@
 //! `RoleAccessMapping` on this bounded context" - never whether the
 //! specific instance queried belonged to that caller. Since every
 //! company here shares one `helpdesk` bounded context, any
-//! authenticated customer could read `TicketSummary`/`CompanyTicketList` (now `CompanyTicketQueue`/`CustomerTickets`)
+//! authenticated customer could read `TicketSummary`/`CompanyTicketList` (now `CompanyActiveTickets`/`CustomerTickets`)
 //! (and `TicketInternalNotes`) for a company they had nothing to do
 //! with.
 //!
@@ -14,7 +14,7 @@
 //! events' tags is its "owner" dimension - a scoped grant is rejected
 //! reading any instance whose derived owner doesn't match, fail-closed
 //! on an instance whose owner can't be derived at all (a never-touched
-//! key included). Adopted here: `TicketSummary`/`CompanyTicketList` (now `CompanyTicketQueue`/`CustomerTickets`)/
+//! key included). Adopted here: `TicketSummary`/`CompanyTicketList` (now `CompanyActiveTickets`/`CustomerTickets`)/
 //! `TicketInternalNotes` all declare `OWNER_TAG_KEY = Some("company")`
 //! (see each one's own doc comment in `src/helpdesk.rs`), and
 //! `server.rs`'s demo customer Role is scoped to its own company.
@@ -40,8 +40,9 @@ use skilj_core::access_control::AccessLevel;
 use skilj_helpdesk::helpdesk::{BOUNDED_CONTEXT, STAFF_TEAM};
 use support::{
     graphql_request, mint_command_token, seed_role, seed_scoped_mapping, setup_graphql, sign_jwt,
-    test_db, trigger, unique_name,
+    test_db, trigger, unique_name, wait_until,
 };
+use std::time::Duration;
 
 fn projection_query(name: &str, key: &str, graphql_type: &str, field: &str) -> String {
     format!(
@@ -153,11 +154,26 @@ fn a_customer_scoped_to_one_company_cannot_read_another_companys_projections() {
             "unscoped staff should still read every company's own ticket: {staff_read_b:?}"
         );
 
-        // --- CompanyTicketQueue (keyed by company_id itself) ---
+        // --- CompanyActiveTickets (keyed by company_id itself) ---
+        // Async (issue #15): an instance only exists, and so only has an
+        // owner, once the background catch-up has folded its
+        // `TicketCreated`. Until then a read returns the default (empty)
+        // state - so wait for the ticket itself via an unscoped read,
+        // otherwise `list_b` below would pass merely because nothing is
+        // there yet.
+        for (company, ticket) in [(&company_a, &ticket_a), (&company_b, &ticket_b)] {
+            let query = projection_query("CompanyActiveTickets", company, "helpdesk_CompanyActiveTickets", "tickets");
+            wait_until(Duration::from_secs(10), "CompanyActiveTickets catch-up", || async {
+                graphql_request(&router, &staff_jwt, &query).await["data"]["projection"]["tickets"]
+                    .as_str()
+                    .is_some_and(|tickets| tickets.contains(ticket.as_str()))
+            })
+            .await;
+        }
         let list_a = graphql_request(
             &router,
             &customer_a_jwt,
-            &projection_query("CompanyTicketQueue", &company_a, "helpdesk_CompanyTicketQueue", "tickets"),
+            &projection_query("CompanyActiveTickets", &company_a, "helpdesk_CompanyActiveTickets", "tickets"),
         )
         .await;
         assert!(succeeded(&list_a, "tickets"), "company A's own customer should read company A's own list: {list_a:?}");
@@ -165,7 +181,7 @@ fn a_customer_scoped_to_one_company_cannot_read_another_companys_projections() {
         let list_b = graphql_request(
             &router,
             &customer_a_jwt,
-            &projection_query("CompanyTicketQueue", &company_b, "helpdesk_CompanyTicketQueue", "tickets"),
+            &projection_query("CompanyActiveTickets", &company_b, "helpdesk_CompanyActiveTickets", "tickets"),
         )
         .await;
         assert!(

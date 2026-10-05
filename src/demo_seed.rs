@@ -76,6 +76,20 @@ impl Rng {
 
 pub const DEMO_COMPANIES: &[&str] = &["wonka-industries", "stark-labs", "hooli"];
 
+/// `count` company ids for the seed to spread its tickets over -
+/// `DEMO_COMPANIES` first, then `demo-company-4`, `demo-company-5`, ...
+/// Only a load test needs more than the default three: a projection
+/// keyed by company (`CompanyActiveTickets`) can only spread its work over
+/// as many `PARTITION_COUNT` partitions as there are companies.
+pub fn demo_companies(count: usize) -> Vec<String> {
+    (0..count)
+        .map(|i| match DEMO_COMPANIES.get(i) {
+            Some(name) => name.to_string(),
+            None => format!("demo-company-{}", i + 1),
+        })
+        .collect()
+}
+
 const CUSTOMER_HANDLES: &[&str] = &[
     "seed-customer-1",
     "seed-customer-2",
@@ -514,6 +528,15 @@ pub fn apply_outcome(state: &mut SeedState, action: &SeedAction, accepted: bool)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn demo_companies_extends_the_named_cast_with_numbered_ones() {
+        assert_eq!(demo_companies(2), ["wonka-industries", "stark-labs"]);
+        assert_eq!(
+            demo_companies(5),
+            ["wonka-industries", "stark-labs", "hooli", "demo-company-4", "demo-company-5"]
+        );
+    }
 
     #[test]
     fn rng_is_deterministic_given_a_seed() {

@@ -309,16 +309,25 @@ fn forgetting_a_customer_erases_their_data_and_pending_auto_close() {
             }
         }
 
-        // The queue the whole company reads holds none of it.
-        let queue = graphql_request(
-            &graphql,
-            &staff_jwt,
-            &format!(
-                "query {{ projection(boundedContext: {BOUNDED_CONTEXT:?}, name: \"CompanyTicketQueue\", key: {company_id:?}) {{ ... on helpdesk_CompanyTicketQueue {{ tickets }} }} }}"
-            ),
-        )
+        // The queue the whole company reads holds none of it. Async
+        // (issue #15), so wait until it has folded the forgotten
+        // customer's last event (`TicketRated`) before checking.
+        let queue_query = format!(
+            "query {{ projection(boundedContext: {BOUNDED_CONTEXT:?}, name: \"CompanyActiveTickets\", key: {company_id:?}) {{ ... on helpdesk_CompanyActiveTickets {{ tickets }} }} }}"
+        );
+        let read_queue = || async {
+            let response = graphql_request(&graphql, &staff_jwt, &queue_query).await;
+            response["data"]["projection"]["tickets"].as_str().map(str::to_owned)
+        };
+        wait_until(Duration::from_secs(10), "CompanyActiveTickets catch-up", || async {
+            read_queue().await.is_some_and(|queue| {
+                serde_json::from_str::<serde_json::Value>(&queue).unwrap()[&forgotten.ticket_id]["rating"]
+                    .is_number()
+            })
+        })
         .await;
-        let queue = queue["data"]["projection"]["tickets"].as_str().unwrap();
+        let queue = read_queue().await.unwrap();
+        let queue = queue.as_str();
         assert!(queue.contains(&forgotten.ticket_id), "{queue}");
         for text in forgotten.texts() {
             assert!(!queue.contains(&text), "{text:?} in {queue}");

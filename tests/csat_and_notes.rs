@@ -169,7 +169,7 @@ fn adding_an_internal_note_to_an_open_ticket_is_accepted() {
         assert!(accepted(&response), "should be accepted: {response:?}");
 
         // The one place this note is actually readable back - never
-        // folded into TicketSummary/CompanyTicketQueue/CustomerTickets, see
+        // folded into TicketSummary/CompanyActiveTickets/CustomerTickets, see
         // TicketInternalNoteAdded's own doc comment.
         let notes: TicketInternalNotesState =
             projection_state(&pool, BOUNDED_CONTEXT, "TicketInternalNotes", &ticket_id).await;
