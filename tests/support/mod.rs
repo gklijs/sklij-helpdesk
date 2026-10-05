@@ -81,6 +81,7 @@ async fn provision() -> Option<TestDb> {
             eprintln!("skipping: embedded PostgreSQL failed to start: {e}");
             return None;
         }
+        spawn_reaper(server.settings());
         let database_name = "skilj_helpdesk_test";
         if let Err(e) = server.create_database(database_name).await {
             eprintln!("skipping: embedded PostgreSQL create_database failed: {e}");
@@ -101,6 +102,69 @@ async fn provision() -> Option<TestDb> {
         pool,
         _embedded: None,
     })
+}
+
+/// Stops the embedded cluster and deletes its files once this test
+/// process is gone, however it ends.
+///
+/// `PostgreSQL`'s own `Drop` would do this, but it never runs: the handle
+/// lives in `static TEST_DB`, and Rust never drops statics - so every
+/// test binary used to leave a running postmaster and its data directory
+/// behind (dozens per `cargo test`). A panic hook or an exit handler
+/// would still miss a Ctrl-C or a `kill -9`, so this is a separate
+/// process instead: a shell that polls for this process's pid, then runs
+/// the same `pg_ctl stop` + removal `Drop` would have - plus the
+/// password file's own temp directory, which even `Drop` leaves behind
+/// (`rmdir`, so only once it's empty). `setsid` puts it
+/// in its own session, so the Ctrl-C that stops `cargo test` doesn't stop
+/// it too. Cleanup lands within a second of the process ending.
+fn spawn_reaper(settings: &postgresql_embedded::Settings) {
+    // The removal below is `rm -rf` on these paths, so only for a
+    // throwaway cluster, and never on anything that looks like a root.
+    let data_dir = &settings.data_dir;
+    if !settings.temporary || data_dir.parent().is_none_or(|p| p.parent().is_none()) {
+        eprintln!("not reaping embedded PostgreSQL at {data_dir:?}: not a temporary cluster");
+        return;
+    }
+    let socket_dir = settings
+        .socket_dir
+        .as_ref()
+        .map(|dir| dir.display().to_string())
+        .unwrap_or_default();
+    let script = r#"
+        while kill -0 "$1" 2>/dev/null; do sleep 1; done
+        "$2/pg_ctl" stop -D "$3" -m fast -w >/dev/null 2>&1
+        rm -rf -- "$3"
+        rm -f -- "$4"
+        rmdir -- "$(dirname -- "$4")" 2>/dev/null
+        if [ -n "$5" ]; then rm -rf -- "$5"; fi
+    "#;
+    let args = [
+        std::process::id().to_string(),
+        settings.binary_dir().display().to_string(),
+        data_dir.display().to_string(),
+        settings.password_file.display().to_string(),
+        socket_dir,
+    ];
+    let mut command = if Path::new("/usr/bin/setsid").exists() || Path::new("/bin/setsid").exists()
+    {
+        let mut command = Command::new("setsid");
+        command.arg("sh");
+        command
+    } else {
+        Command::new("sh")
+    };
+    command
+        .arg("-c")
+        .arg(script)
+        .arg("embedded-postgres-reaper")
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    if let Err(e) = command.spawn() {
+        eprintln!("couldn't start the embedded PostgreSQL reaper - {data_dir:?} will outlive this run: {e}");
+    }
 }
 
 pub fn unique_name(prefix: &str) -> String {
@@ -341,6 +405,13 @@ pub async fn seed_mapping_for(
     mapping
 }
 
+/// What every test `Skilj` encrypts customer contact details under - see
+/// `skilj_helpdesk::parse_encryption_master_key`. Fixed, so a test that
+/// builds a second `Skilj` against the same database can still read them.
+pub fn test_master_key() -> skilj::EncryptionMasterKey {
+    skilj::EncryptionMasterKey::from_bytes([7u8; 32])
+}
+
 /// A fully-built `Skilj` with the helpdesk bounded context reconciled -
 /// a `#[test]` mints its own `CommandToken`s from the returned mapping.
 pub async fn setup() -> (Skilj, Pool, RoleAccessMapping) {
@@ -351,6 +422,7 @@ pub async fn setup() -> (Skilj, Pool, RoleAccessMapping) {
     let external_subject = mapping.role.external_subject.clone();
 
     let (skilj, report) = skilj_helpdesk::register(Skilj::builder(database_url))
+        .encryption_master_key(test_master_key())
         .reconciliation_role(external_subject)
         .build()
         .await
@@ -400,6 +472,7 @@ pub async fn setup_all_contexts() -> (Skilj, Pool, AllContextMappings) {
 
     let external_subject = role.external_subject.clone();
     let (skilj, report) = skilj_helpdesk::register(Skilj::builder(database_url))
+        .encryption_master_key(test_master_key())
         .reconciliation_role(external_subject)
         .build()
         .await
@@ -665,6 +738,7 @@ pub async fn setup_graphql() -> (Skilj, Pool, RoleAccessMapping, String) {
     let jwks_url = serve_jwks().await;
 
     let (skilj, report) = skilj_helpdesk::register(Skilj::builder(database_url))
+        .encryption_master_key(test_master_key())
         .reconciliation_role(external_subject.clone())
         .identity_provider(IdpConfig::new(
             jwks_url.parse().unwrap(),

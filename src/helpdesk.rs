@@ -50,13 +50,15 @@
 //! varied traffic to show, grounded in how real helpdesk tools work
 //! (SLA-breach escalation, ticket merging, CSAT, internal notes), not
 //! invented for their own sake. `TicketInternalNoteAdded` is the one
-//! deliberately kept out of `CompanyTicketList`/`TicketSummary` below -
-//! that projection's own doc comment claims "nothing here is actually
-//! customer-only data," which is only true because an internal note
-//! never enters it; folding one in and relying on the frontend to filter
-//! it back out (not touched this pass - no wasm toolchain to verify
-//! against in this sandbox) would make that claim false with no
-//! server-side enforcement behind it.
+//! deliberately kept out of `CompanyTicketQueue`/`CustomerTickets`/
+//! `TicketSummary` below - both of the frontend's eager reads are visible
+//! to customers, so an internal note in either, relying on the frontend
+//! to filter it back out, would reach them with no server-side
+//! enforcement behind it.
+//!
+//! Customer data is GDPR-erasable: everything a customer wrote, and
+//! their contact details, is a skilj `sensitive_field` encrypted under
+//! their own key - see `CUSTOMER_SUBJECT` and `CustomerTickets`.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -67,7 +69,7 @@ use skilj::{
 use skilj_core::event_store::Event;
 use skilj_core::plugin::{BoundedContextEvent, DeadlinePollStartFrom, DeadlineSpec};
 use skilj_core::shared::{
-    CommandDecision, EventSpec, PrivateField, PrivateFieldKind, Tag, TagMapping,
+    CommandDecision, EventSpec, PrivateField, PrivateFieldKind, SensitiveField, Tag, TagMapping,
 };
 
 use crate::scheduling;
@@ -98,6 +100,42 @@ pub const STAFF_TEAM: &str = "staff";
 /// `"RecordTenantLifecycle"` in that binary could - the same reasoning
 /// `STAFF_TEAM` above exists for.
 pub const RECORD_TENANT_LIFECYCLE_COMMAND: &str = "RecordTenantLifecycle";
+
+/// The `subject_key` a customer's personal data is encrypted under, with
+/// `requester_id` as the subject value - what an admin passes to skilj's
+/// own `forgetSubject(boundedContext: "helpdesk", subjectKey: "customer",
+/// subjectValue: <requester_id>)` to erase one customer (GDPR art. 17).
+/// That destroys the customer's key, so every field below that was
+/// written under it reads back as ciphertext from then on, and resolves
+/// any pending deadline naming them as `forgotten` (see `CloseTicket`).
+pub const CUSTOMER_SUBJECT: &str = "customer";
+
+/// `fields` of a payload, each encrypted under the customer named by the
+/// payload's own `requester_id`. That field itself stays plaintext - it's
+/// the subject the key is found by.
+///
+/// Readable afterwards only to a caller with `can_read_sensitive` (staff)
+/// or whose IdP subject is that `requester_id` (the customer). Projections
+/// fold the ciphertext as is, and skilj decrypts a projection row only
+/// against its own key, so every one of these fields lives in
+/// `CustomerTickets`, keyed by `requester_id`, and none in the
+/// company-keyed `CompanyTicketQueue`.
+fn customer_fields(fields: &[&str]) -> Vec<SensitiveField> {
+    fields
+        .iter()
+        .map(|field| SensitiveField {
+            field: (*field).into(),
+            subject_key: CUSTOMER_SUBJECT.into(),
+            subject_field: "requester_id".into(),
+        })
+        .collect()
+}
+
+/// Everything a ticket's creation says about its customer: what they wrote
+/// and how to reach them.
+fn ticket_created_customer_fields() -> Vec<SensitiveField> {
+    customer_fields(&["title", "description", "requester_name", "requester_email"])
+}
 
 fn company_tag() -> Vec<TagMapping> {
     vec![TagMapping {
@@ -343,6 +381,11 @@ pub struct TicketCreatedPayload {
     pub title: String,
     pub description: String,
     pub priority: TicketPriority,
+    /// Encrypted under the requester's key, like `title`/`description` -
+    /// see `customer_fields`.
+    pub requester_name: Option<String>,
+    /// Encrypted under the requester's key - see `customer_fields`.
+    pub requester_email: Option<String>,
 }
 
 pub struct TicketCreated;
@@ -377,6 +420,9 @@ impl EventType for TicketCreated {
     fn event_read_allowed() -> bool {
         true
     }
+    fn sensitive_fields() -> Vec<SensitiveField> {
+        ticket_created_customer_fields()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -407,6 +453,11 @@ pub struct TicketResolvedPayload {
     /// can cancel exactly this resolution's deadline and no later one.
     /// `None` on events stored before the field existed.
     pub resolution: Option<u32>,
+    /// The ticket's requester, copied from its `TicketCreated` so the
+    /// auto-close deadline this schedules can name them (see
+    /// `CloseTicketPayload::requester_id`). `None` on events stored
+    /// before the field existed.
+    pub requester_id: Option<String>,
 }
 
 pub struct TicketResolved;
@@ -456,7 +507,14 @@ pub struct TicketInfoRequestedPayload {
     pub ticket_id: String,
     pub company_id: String,
     pub staff_id: String,
+    /// Encrypted under the requester's key: a question to the customer
+    /// is part of their ticket's conversation.
     pub message: String,
+    /// The ticket's requester, whose key `message` is encrypted under and
+    /// whose `CustomerTickets` row it lands in. `None` on events stored
+    /// before the field existed, whose message stays plaintext and is in
+    /// no `CustomerTickets` row.
+    pub requester_id: Option<String>,
 }
 
 pub struct TicketInfoRequested;
@@ -469,6 +527,9 @@ impl EventType for TicketInfoRequested {
     const NAME: &'static str = "TicketInfoRequested";
     fn tag_mappings() -> Vec<TagMapping> {
         ticket_tag()
+    }
+    fn sensitive_fields() -> Vec<SensitiveField> {
+        customer_fields(&["message"])
     }
 }
 
@@ -490,6 +551,9 @@ impl EventType for TicketCustomerResponded {
     const NAME: &'static str = "TicketCustomerResponded";
     fn tag_mappings() -> Vec<TagMapping> {
         ticket_tag()
+    }
+    fn sensitive_fields() -> Vec<SensitiveField> {
+        customer_fields(&["message"])
     }
 }
 
@@ -602,7 +666,11 @@ pub struct TicketRatedPayload {
     pub ticket_id: String,
     pub company_id: String,
     pub rating: u8,
+    /// Encrypted under the requester's key.
     pub comment: Option<String>,
+    /// The customer who rated, whose key `comment` is encrypted under -
+    /// see `TicketInfoRequestedPayload::requester_id`.
+    pub requester_id: Option<String>,
 }
 
 pub struct TicketRated;
@@ -615,6 +683,9 @@ impl EventType for TicketRated {
     const NAME: &'static str = "TicketRated";
     fn tag_mappings() -> Vec<TagMapping> {
         ticket_tag()
+    }
+    fn sensitive_fields() -> Vec<SensitiveField> {
+        customer_fields(&["comment"])
     }
     /// `src/csat_metrics.rs` reads this via an `EventReadToken` to
     /// record the rating *value* as a real metric - see
@@ -638,11 +709,10 @@ pub struct TicketInternalNoteAddedPayload {
 pub struct TicketInternalNoteAdded;
 
 /// Not in the original spec - a staff-only note. Deliberately never
-/// folded into `CompanyTicketList`/`TicketSummary` (see this file's own
-/// module doc comment on why keeping it structurally separate, rather
-/// than tagging entries "internal" for the frontend to filter, is what
-/// actually keeps `CompanyTicketList`'s own "nothing here is customer-
-/// only data" claim true).
+/// folded into `CompanyTicketQueue`/`CustomerTickets`/`TicketSummary`
+/// (see this file's own module doc comment on why keeping it structurally
+/// separate, rather than tagging entries "internal" for the frontend to
+/// filter, is what keeps it from customers).
 ///
 /// `private_fields()` below closes the same admin-tooling surface
 /// `AddInternalNote`'s own doc comment describes for the command side -
@@ -665,7 +735,7 @@ impl EventType for TicketInternalNoteAdded {
     /// projection's own doc comment) needs a "company" tag on *some*
     /// consuming event to derive an owner from, and this is the only
     /// one it consumes at all - `TicketCreated`'s own "company" tag
-    /// alone isn't enough here, since `TicketSummary`/`CompanyTicketList`
+    /// alone isn't enough here, since `TicketSummary`/`CompanyTicketQueue`
     /// consume `TicketCreated` but `TicketInternalNotes` deliberately
     /// doesn't (see this file's own module doc comment on why).
     fn tag_mappings() -> Vec<TagMapping> {
@@ -934,7 +1004,7 @@ fn company_tenant(matching_events: &[HelpdeskEvent], company_id: &str) -> Option
 /// `TicketCreated` carries both the "ticket" and "company" tags - see
 /// its own `tag_mappings` doc comment). Every ticket-lifecycle command
 /// past creation itself uses this to stamp `company_id` onto the event
-/// it emits, which is what lets `CompanyTicketList` below fold every
+/// it emits, which is what lets `CompanyTicketQueue` below fold every
 /// ticket event for one ticket into the correct per-company projection
 /// instance - `AssignTicket`/`ResolveTicket`/etc.'s own payloads never
 /// carried `company_id` as caller input (there's no reason to trust a
@@ -943,6 +1013,38 @@ fn company_tenant(matching_events: &[HelpdeskEvent], company_id: &str) -> Option
 fn company_id_for_ticket(matching_events: &[HelpdeskEvent], ticket_id: &str) -> Option<String> {
     matching_events.iter().find_map(|event| match event {
         HelpdeskEvent::TicketCreated(p) if p.ticket_id == ticket_id => Some(p.company_id.clone()),
+        _ => None,
+    })
+}
+
+/// Rejects a command whose `requester_id` isn't this ticket's requester.
+///
+/// The command's free text is encrypted under the key its own
+/// `requester_id` names, so a wrong one would file the text under another
+/// customer: readable to them, and out of reach of the real customer's
+/// erasure. Only meaningful once the ticket is known to exist.
+fn reject_unless_requester(
+    matching_events: &[HelpdeskEvent],
+    ticket_id: &str,
+    requester_id: Option<&str>,
+) -> Option<CommandDecision> {
+    let actual = requester_id_for_ticket(matching_events, ticket_id);
+    if requester_id.is_some() && requester_id == actual.as_deref() {
+        return None;
+    }
+    Some(CommandDecision::Rejected {
+        reason: format!("requester_id {requester_id:?} is not ticket {ticket_id}'s requester"),
+        kind: "requester_mismatch".into(),
+    })
+}
+
+/// `company_id_for_ticket`'s counterpart for the requester. Safe to copy
+/// out of history, unlike `requester_name`/`requester_email`: those are
+/// stored, and so seen here, as ciphertext, and copying them into a new
+/// sensitive field would encrypt them a second time.
+fn requester_id_for_ticket(matching_events: &[HelpdeskEvent], ticket_id: &str) -> Option<String> {
+    matching_events.iter().find_map(|event| match event {
+        HelpdeskEvent::TicketCreated(p) if p.ticket_id == ticket_id => Some(p.requester_id.clone()),
         _ => None,
     })
 }
@@ -1487,6 +1589,10 @@ pub struct CreateTicketPayload {
     pub title: String,
     pub description: String,
     pub priority: TicketPriority,
+    /// See `TicketCreatedPayload::requester_name`.
+    pub requester_name: Option<String>,
+    /// See `TicketCreatedPayload::requester_email`.
+    pub requester_email: Option<String>,
 }
 
 pub struct CreateTicket;
@@ -1515,6 +1621,11 @@ impl CommandType for CreateTicket {
     const NAME: &'static str = "CreateTicket";
     fn tag_mappings() -> Vec<TagMapping> {
         company_tag()
+    }
+    /// The stored command holds the same customer data as the event it
+    /// produces, so it needs the same protection.
+    fn sensitive_fields() -> Vec<SensitiveField> {
+        ticket_created_customer_fields()
     }
     fn rest_trigger_allowed() -> bool {
         true
@@ -1555,6 +1666,8 @@ impl CommandType for CreateTicket {
                     "title": payload.title,
                     "description": payload.description,
                     "priority": payload.priority,
+                    "requester_name": payload.requester_name,
+                    "requester_email": payload.requester_email,
                 }),
             }],
         }
@@ -1646,6 +1759,7 @@ impl CommandType for ResolveTicket {
                         "company_id": company_id_for_ticket(matching_events, &payload.ticket_id)
                             .expect("a ticket with any status has a TicketCreated in its own history"),
                         "resolution": resolution_count(matching_events, &payload.ticket_id) + 1,
+                        "requester_id": requester_id_for_ticket(matching_events, &payload.ticket_id),
                     }),
                 }],
             },
@@ -1712,7 +1826,12 @@ impl CommandType for ReopenTicket {
 pub struct RequestInfoFromCustomerPayload {
     pub ticket_id: String,
     pub staff_id: String,
+    /// Encrypted under the requester's key, here and in the event.
     pub message: String,
+    /// The ticket's requester. Required, though optional in the schema
+    /// (a field added later must be): without it the stored command would
+    /// hold `message` in plaintext. See `reject_unless_requester`.
+    pub requester_id: Option<String>,
 }
 
 pub struct RequestInfoFromCustomer;
@@ -1728,11 +1847,24 @@ impl CommandType for RequestInfoFromCustomer {
     fn tag_mappings() -> Vec<TagMapping> {
         ticket_tag()
     }
+    fn sensitive_fields() -> Vec<SensitiveField> {
+        customer_fields(&["message"])
+    }
     fn rest_trigger_allowed() -> bool {
         true
     }
     fn decide(payload: &Self::Payload, matching_events: &[Self::Event]) -> CommandDecision {
-        match ticket_status(matching_events, &payload.ticket_id) {
+        let status = ticket_status(matching_events, &payload.ticket_id);
+        if status.is_some() {
+            if let Some(rejected) = reject_unless_requester(
+                matching_events,
+                &payload.ticket_id,
+                payload.requester_id.as_deref(),
+            ) {
+                return rejected;
+            }
+        }
+        match status {
             None => CommandDecision::Rejected {
                 reason: format!("ticket {} does not exist", payload.ticket_id),
                 kind: "ticket_not_found".into(),
@@ -1746,6 +1878,7 @@ impl CommandType for RequestInfoFromCustomer {
                             .expect("a ticket with any status has a TicketCreated in its own history"),
                         "staff_id": payload.staff_id,
                         "message": payload.message,
+                        "requester_id": payload.requester_id,
                     }),
                 }],
             },
@@ -1763,7 +1896,9 @@ impl CommandType for RequestInfoFromCustomer {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct CustomerRespondsToTicketPayload {
     pub ticket_id: String,
+    /// Must be the ticket's requester - see `reject_unless_requester`.
     pub requester_id: String,
+    /// Encrypted under the requester's key, here and in the event.
     pub message: String,
 }
 
@@ -1779,11 +1914,24 @@ impl CommandType for CustomerRespondsToTicket {
     fn tag_mappings() -> Vec<TagMapping> {
         ticket_tag()
     }
+    fn sensitive_fields() -> Vec<SensitiveField> {
+        customer_fields(&["message"])
+    }
     fn rest_trigger_allowed() -> bool {
         true
     }
     fn decide(payload: &Self::Payload, matching_events: &[Self::Event]) -> CommandDecision {
-        match ticket_status(matching_events, &payload.ticket_id) {
+        let status = ticket_status(matching_events, &payload.ticket_id);
+        if status.is_some() {
+            if let Some(rejected) = reject_unless_requester(
+                matching_events,
+                &payload.ticket_id,
+                Some(&payload.requester_id),
+            ) {
+                return rejected;
+            }
+        }
+        match status {
             None => CommandDecision::Rejected {
                 reason: format!("ticket {} does not exist", payload.ticket_id),
                 kind: "ticket_not_found".into(),
@@ -1814,6 +1962,20 @@ impl CommandType for CustomerRespondsToTicket {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct CloseTicketPayload {
     pub ticket_id: String,
+    /// Whose ticket this is - set by `ScheduleTicketAutoClose` from
+    /// `TicketResolvedPayload::requester_id`, so a pending auto-close
+    /// deadline names its customer. skilj's `forgetSubject` finds the
+    /// deadlines to resolve as `forgotten` through the target command's
+    /// `sensitive_fields` subjects, which is why `CloseTicket` declares
+    /// `requester_email` below.
+    pub requester_id: Option<String>,
+    /// Where a closure notice would go, encrypted under the requester's
+    /// key. The auto-close deadline leaves it `None`: the only email it
+    /// could copy is `TicketCreated`'s, which it sees as ciphertext (see
+    /// `requester_id_for_ticket`). Declaring it is what ties a
+    /// `CloseTicket` payload to its customer for `forgetSubject` -
+    /// skilj has no way to declare a subject without a sensitive field.
+    pub requester_email: Option<String>,
 }
 
 pub struct CloseTicket;
@@ -1829,6 +1991,13 @@ impl CommandType for CloseTicket {
     const NAME: &'static str = "CloseTicket";
     fn tag_mappings() -> Vec<TagMapping> {
         ticket_tag()
+    }
+    fn sensitive_fields() -> Vec<SensitiveField> {
+        vec![SensitiveField {
+            field: "requester_email".into(),
+            subject_key: CUSTOMER_SUBJECT.into(),
+            subject_field: "requester_id".into(),
+        }]
     }
     fn rest_trigger_allowed() -> bool {
         true
@@ -1899,6 +2068,8 @@ impl ScheduleDeadline for ScheduleTicketAutoClose {
             tags,
             payload: CloseTicketPayload {
                 ticket_id: source_payload.ticket_id.clone(),
+                requester_id: source_payload.requester_id.clone(),
+                requester_email: None,
             },
         })
     }
@@ -2122,7 +2293,11 @@ impl CommandType for MergeTickets {
 pub struct RateTicketPayload {
     pub ticket_id: String,
     pub rating: u8,
+    /// Encrypted under the requester's key, here and in the event.
     pub comment: Option<String>,
+    /// The ticket's requester - required, see
+    /// `RequestInfoFromCustomerPayload::requester_id`.
+    pub requester_id: Option<String>,
 }
 
 pub struct RateTicket;
@@ -2139,11 +2314,24 @@ impl CommandType for RateTicket {
     fn tag_mappings() -> Vec<TagMapping> {
         ticket_tag()
     }
+    fn sensitive_fields() -> Vec<SensitiveField> {
+        customer_fields(&["comment"])
+    }
     fn rest_trigger_allowed() -> bool {
         true
     }
     fn decide(payload: &Self::Payload, matching_events: &[Self::Event]) -> CommandDecision {
-        match ticket_status(matching_events, &payload.ticket_id) {
+        let status = ticket_status(matching_events, &payload.ticket_id);
+        if status.is_some() {
+            if let Some(rejected) = reject_unless_requester(
+                matching_events,
+                &payload.ticket_id,
+                payload.requester_id.as_deref(),
+            ) {
+                return rejected;
+            }
+        }
+        match status {
             None => CommandDecision::Rejected {
                 reason: format!("ticket {} does not exist", payload.ticket_id),
                 kind: "ticket_not_found".into(),
@@ -2173,6 +2361,7 @@ impl CommandType for RateTicket {
                                 .expect("a ticket with any status has a TicketCreated in its own history"),
                             "rating": payload.rating,
                             "comment": payload.comment,
+                            "requester_id": payload.requester_id,
                         }),
                     }],
                 }
@@ -2443,7 +2632,7 @@ impl Projection for TicketSummary {
     }
 }
 
-// --- company-wide ticket list, for the frontend ---
+// --- the frontend's two ticket reads ---
 
 /// One turn of the `StaffRequestsInfo`/`CustomerReplies` back-and-forth
 /// (`rule StaffRequestsInfo`/`CustomerReplies` in the spec) - the actual
@@ -2458,16 +2647,15 @@ pub struct TicketMessage {
     pub text: String,
 }
 
+/// A ticket's lifecycle, with nothing its customer wrote - see
+/// `CompanyTicketQueue`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
-pub struct TicketListEntry {
+pub struct TicketQueueEntry {
     pub ticket_id: String,
-    pub title: String,
-    pub description: String,
     pub status: String,
     pub priority: String,
     pub requester_id: String,
     pub assigned_staff_id: Option<String>,
-    pub messages: Vec<TicketMessage>,
     /// See `TicketSummaryState::escalated`/`::rating`'s own doc comments -
     /// identical reasoning, mirrored here since `frontend/` reads this
     /// projection, not `TicketSummary`.
@@ -2476,24 +2664,33 @@ pub struct TicketListEntry {
 }
 
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
-pub struct CompanyTicketListState {
-    pub tickets: std::collections::HashMap<String, TicketListEntry>,
+pub struct CompanyTicketQueueState {
+    pub tickets: std::collections::HashMap<String, TicketQueueEntry>,
 }
 
-/// Keyed by `company_id`. What `frontend/` actually queries to render
-/// both sides of the app: the staff dashboard shows every entry, the
-/// customer view filters client-side to `requester_id = self` (the
-/// `StaffTicketQueue`/`CustomerPortal` surfaces `specs/skilj-helpdesk.allium`
-/// describes at the domain level - this is their real implementation,
-/// merged into one projection since nothing here is actually customer-
-/// only data; the split is presentation, not access control).
-pub struct CompanyTicketList;
+/// Keyed by `company_id`: every ticket of one company, for the staff
+/// queue and for the customer view's status column.
+///
+/// Holds no customer-written text, on purpose. That text is encrypted
+/// under each customer's own key (`customer_fields`), and skilj decrypts
+/// a projection row only against the row's own key - a company here - so
+/// any of it folded in would read as ciphertext to everyone. It lives in
+/// `CustomerTickets` instead; the frontend joins the two by `ticket_id`.
+///
+/// Replaces `CompanyTicketList`, which held that text in plaintext. A
+/// registered projection can't lose a field (skilj's schema compatibility
+/// rule), so this is a new projection rather than a slimmed-down old one;
+/// the old one's stored state is no longer registered or updated.
+///
+/// What a customer still sees through this: the ids, statuses and
+/// requester ids of their company's other tickets, never their content.
+pub struct CompanyTicketQueue;
 
 #[auto_register(BOUNDED_CONTEXT)]
-impl Projection for CompanyTicketList {
-    type State = CompanyTicketListState;
+impl Projection for CompanyTicketQueue {
+    type State = CompanyTicketQueueState;
     type Event = HelpdeskEvent;
-    const NAME: &'static str = "CompanyTicketList";
+    const NAME: &'static str = "CompanyTicketQueue";
     /// See `TicketSummary`'s own doc comment - identical fix, identical
     /// reasoning. Keyed by `company_id` itself here (unlike
     /// `TicketSummary`'s `ticket_id`), so the derived owner ends up
@@ -2534,7 +2731,7 @@ impl Projection for CompanyTicketList {
             // not: `keys` only decides which instances to touch, and
             // `consumed_event_types()` is what decides whether `project`
             // runs at all - returning a key for an unconsumed event
-            // would fold a lifecycle fact into a ticket list under the
+            // would fold a lifecycle fact into a ticket queue under the
             // "an event lacking the tag leaves it untouched" contract
             // this projection otherwise keeps.
             | HelpdeskEvent::CompanyLifecycleMirrored(_)
@@ -2563,27 +2760,29 @@ impl Projection for CompanyTicketList {
         }
     }
     fn project(state: &mut Self::State, event: &Self::Event, _key: &str) {
+        let mut set_status = |ticket_id: &str, status: &str| {
+            if let Some(entry) = state.tickets.get_mut(ticket_id) {
+                entry.status = status.into();
+            }
+        };
         match event {
             HelpdeskEvent::CompanySignedUp(_)
             | HelpdeskEvent::CompanyActivated(_)
             | HelpdeskEvent::CompanyExpired(_)
             | HelpdeskEvent::CompanyTenantProvisioned(_)
             // A lifecycle mirror carries no ticket - see
-            // `CompanyTicketList::keys`'s own comment on the same event.
+            // `CompanyTicketQueue::keys`'s own comment on the same event.
             | HelpdeskEvent::CompanyLifecycleMirrored(_)
             | HelpdeskEvent::TicketInternalNoteAdded(_) => {}
             HelpdeskEvent::TicketCreated(p) => {
                 state.tickets.insert(
                     p.ticket_id.clone(),
-                    TicketListEntry {
+                    TicketQueueEntry {
                         ticket_id: p.ticket_id.clone(),
-                        title: p.title.clone(),
-                        description: p.description.clone(),
                         status: "open".into(),
                         priority: priority_str(p.priority).to_string(),
                         requester_id: p.requester_id.clone(),
                         assigned_staff_id: None,
-                        messages: Vec::new(),
                         escalated: false,
                         rating: None,
                     },
@@ -2595,41 +2794,14 @@ impl Projection for CompanyTicketList {
                     entry.assigned_staff_id = Some(p.staff_id.clone());
                 }
             }
-            HelpdeskEvent::TicketResolved(p) => {
-                if let Some(entry) = state.tickets.get_mut(&p.ticket_id) {
-                    entry.status = "resolved".into();
-                }
-            }
-            HelpdeskEvent::TicketReopened(p) => {
-                if let Some(entry) = state.tickets.get_mut(&p.ticket_id) {
-                    entry.status = "in_progress".into();
-                }
-            }
+            HelpdeskEvent::TicketResolved(p) => set_status(&p.ticket_id, "resolved"),
+            HelpdeskEvent::TicketReopened(p) => set_status(&p.ticket_id, "in_progress"),
             HelpdeskEvent::TicketInfoRequested(p) => {
-                if let Some(entry) = state.tickets.get_mut(&p.ticket_id) {
-                    entry.status = "waiting_on_customer".into();
-                    entry.messages.push(TicketMessage {
-                        author_id: p.staff_id.clone(),
-                        from_staff: true,
-                        text: p.message.clone(),
-                    });
-                }
+                set_status(&p.ticket_id, "waiting_on_customer")
             }
-            HelpdeskEvent::TicketCustomerResponded(p) => {
-                if let Some(entry) = state.tickets.get_mut(&p.ticket_id) {
-                    entry.status = "in_progress".into();
-                    entry.messages.push(TicketMessage {
-                        author_id: p.requester_id.clone(),
-                        from_staff: false,
-                        text: p.message.clone(),
-                    });
-                }
-            }
-            HelpdeskEvent::TicketClosed(p) => {
-                if let Some(entry) = state.tickets.get_mut(&p.ticket_id) {
-                    entry.status = "closed".into();
-                }
-            }
+            HelpdeskEvent::TicketCustomerResponded(p) => set_status(&p.ticket_id, "in_progress"),
+            HelpdeskEvent::TicketClosed(p) => set_status(&p.ticket_id, "closed"),
+            HelpdeskEvent::TicketsMerged(p) => set_status(&p.duplicate_ticket_id, "merged"),
             HelpdeskEvent::TicketEscalated(p) => {
                 if let Some(entry) = state.tickets.get_mut(&p.ticket_id) {
                     entry.priority = priority_str(p.new_priority).to_string();
@@ -2641,11 +2813,128 @@ impl Projection for CompanyTicketList {
                     entry.rating = Some(p.rating);
                 }
             }
-            HelpdeskEvent::TicketsMerged(p) => {
-                if let Some(entry) = state.tickets.get_mut(&p.duplicate_ticket_id) {
-                    entry.status = "merged".into();
+        }
+    }
+}
+
+/// What one customer wrote, or was asked, on one ticket - see
+/// `CustomerTickets`. Every string here is held encrypted under that
+/// customer's key.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub struct CustomerTicketContent {
+    pub ticket_id: String,
+    pub title: String,
+    pub description: String,
+    pub messages: Vec<TicketMessage>,
+    pub rating_comment: Option<String>,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
+pub struct CustomerTicketsState {
+    pub tickets: std::collections::HashMap<String, CustomerTicketContent>,
+}
+
+/// Keyed by `requester_id`: the content of every ticket one customer
+/// filed - title, description, the conversation and their rating comment.
+///
+/// Keyed by the customer because that's what makes it readable. Each
+/// field is folded in as the ciphertext it's stored as (`customer_fields`),
+/// and skilj decrypts a projection row only when the caller may read the
+/// row's own key's data: with `can_read_sensitive` (staff, see
+/// `server.rs`), or as the subject itself, which the customer is - their
+/// IdP subject is their `requester_id`. Another customer of the same
+/// company can read the row (`OWNER_TAG_KEY` scopes it to the company, no
+/// further) but only ever sees ciphertext. And once the customer is
+/// forgotten (`CUSTOMER_SUBJECT`), nobody can decrypt it any more.
+///
+/// Only the four events that carry customer text are consumed; status and
+/// the rest come from `CompanyTicketQueue`. Events stored before
+/// `TicketInfoRequested`/`TicketRated` carried a `requester_id` are
+/// skipped - their plaintext isn't erasable either way.
+pub struct CustomerTickets;
+
+#[auto_register(BOUNDED_CONTEXT)]
+impl Projection for CustomerTickets {
+    type State = CustomerTicketsState;
+    type Event = HelpdeskEvent;
+    const NAME: &'static str = "CustomerTickets";
+    /// `TicketCreated`'s "company" tag sets the owner, as for
+    /// `TicketSummary`. A customer belongs to one company
+    /// (`specs/skilj-helpdesk.allium`'s `entity Customer`), so their row
+    /// has one owner.
+    const OWNER_TAG_KEY: Option<&'static str> = Some("company");
+    fn consumed_event_types() -> Vec<&'static str> {
+        vec![
+            "TicketCreated",
+            "TicketInfoRequested",
+            "TicketCustomerResponded",
+            "TicketRated",
+        ]
+    }
+    fn sync() -> bool {
+        true
+    }
+    fn keys(event: &Self::Event) -> Vec<String> {
+        match event {
+            HelpdeskEvent::TicketCreated(p) => vec![p.requester_id.clone()],
+            HelpdeskEvent::TicketCustomerResponded(p) => vec![p.requester_id.clone()],
+            HelpdeskEvent::TicketInfoRequested(p) => p.requester_id.iter().cloned().collect(),
+            HelpdeskEvent::TicketRated(p) => p.requester_id.iter().cloned().collect(),
+            // Not consumed - see `TicketSummary::keys` on why the match
+            // still has to name them.
+            HelpdeskEvent::CompanySignedUp(_)
+            | HelpdeskEvent::CompanyActivated(_)
+            | HelpdeskEvent::CompanyExpired(_)
+            | HelpdeskEvent::CompanyTenantProvisioned(_)
+            | HelpdeskEvent::CompanyLifecycleMirrored(_)
+            | HelpdeskEvent::TicketAssigned(_)
+            | HelpdeskEvent::TicketResolved(_)
+            | HelpdeskEvent::TicketReopened(_)
+            | HelpdeskEvent::TicketClosed(_)
+            | HelpdeskEvent::TicketEscalated(_)
+            | HelpdeskEvent::TicketsMerged(_)
+            | HelpdeskEvent::TicketInternalNoteAdded(_) => vec![],
+        }
+    }
+    fn project(state: &mut Self::State, event: &Self::Event, _key: &str) {
+        match event {
+            HelpdeskEvent::TicketCreated(p) => {
+                state.tickets.insert(
+                    p.ticket_id.clone(),
+                    CustomerTicketContent {
+                        ticket_id: p.ticket_id.clone(),
+                        title: p.title.clone(),
+                        description: p.description.clone(),
+                        messages: Vec::new(),
+                        rating_comment: None,
+                    },
+                );
+            }
+            HelpdeskEvent::TicketInfoRequested(p) => {
+                if let Some(entry) = state.tickets.get_mut(&p.ticket_id) {
+                    entry.messages.push(TicketMessage {
+                        author_id: p.staff_id.clone(),
+                        from_staff: true,
+                        text: p.message.clone(),
+                    });
                 }
             }
+            HelpdeskEvent::TicketCustomerResponded(p) => {
+                if let Some(entry) = state.tickets.get_mut(&p.ticket_id) {
+                    entry.messages.push(TicketMessage {
+                        author_id: p.requester_id.clone(),
+                        from_staff: false,
+                        text: p.message.clone(),
+                    });
+                }
+            }
+            HelpdeskEvent::TicketRated(p) => {
+                if let Some(entry) = state.tickets.get_mut(&p.ticket_id) {
+                    entry.rating_comment = p.comment.clone();
+                }
+            }
+            // Not consumed - see `keys`.
+            _ => {}
         }
     }
 }
@@ -2664,18 +2953,18 @@ pub struct TicketInternalNotesState {
 }
 
 /// Keyed by `ticket_id`. A *separate* projection from `TicketSummary`/
-/// `CompanyTicketList`, on purpose: those two are what `frontend/`'s
-/// single "fetch everything" call returns to render a ticket at all, so
-/// keeping `TicketInternalNoteAdded` out of both is what actually keeps
-/// `CompanyTicketList`'s own "nothing here is customer-only data" claim
-/// true (see that event's own doc comment). This projection exists
+/// `CompanyTicketQueue`/`CustomerTickets`, on purpose: those are what
+/// `frontend/` fetches eagerly to render a ticket at all, for customers
+/// too, so keeping `TicketInternalNoteAdded` out of them is what keeps
+/// it from customers (see that event's own doc comment). This projection exists
 /// purely so staff have something to fetch on demand (`frontend/`'s own
 /// "Notes" toggle, a second, separate query - not folded into the
 /// eager one).
 ///
 /// **Both the cross-company and the same-company staff-vs-customer gaps
 /// are now closed.** A security review found this projection (and
-/// `TicketSummary`/`CompanyTicketList`) readable by any Role with *any*
+/// `TicketSummary`/`CompanyTicketList`, since replaced by
+/// `CompanyTicketQueue`/`CustomerTickets`) readable by any Role with *any*
 /// mapping on the bounded context, regardless of which company the
 /// queried key actually belonged to - `skilj-graphql`'s
 /// `require_read_mapping` checked only that. skilj's own fix
@@ -2786,7 +3075,7 @@ pub struct TenantDirectory;
 ///
 /// **Not an access-control boundary.** It carries no `OWNER_TAG_KEY`,
 /// deliberately: this is an infrastructure mapping, and unlike
-/// `CompanyTicketList`/`TicketSummary` there is no company data in it to
+/// `CompanyTicketQueue`/`TicketSummary` there is no company data in it to
 /// protect - it says which bounded context holds a company, not anything
 /// about the company. It is readable by anyone with an Admin mapping on
 /// the shared `helpdesk` context, which is the same audience that can

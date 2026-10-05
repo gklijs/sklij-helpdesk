@@ -84,6 +84,20 @@ if [ -z "${DATABASE_URL:-}" ]; then
     pg_ctl -D "$PG_DATA_DIR" -o "-p $PG_PORT -k /tmp" -l "$PG_DATA_DIR/log.txt" start >/dev/null
     createdb -h /tmp -p "$PG_PORT" -U postgres skilj_helpdesk_dev
     export DATABASE_URL="postgres:///skilj_helpdesk_dev?host=/tmp&port=${PG_PORT}&user=postgres"
+    # A fresh key is fine for a database that dies with this run.
+    if [ -z "${ENCRYPTION_MASTER_KEY:-}" ]; then
+        ENCRYPTION_MASTER_KEY="$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')"
+        export ENCRYPTION_MASTER_KEY
+    fi
+fi
+
+# --- Encryption master key: your own DATABASE_URL needs the key its
+#     customer data was written under, so this never invents one for it ---
+if [ -z "${ENCRYPTION_MASTER_KEY:-}" ]; then
+    echo "dev.sh: DATABASE_URL is set but ENCRYPTION_MASTER_KEY isn't." >&2
+    echo "        Set the key this database was used with, or a new one for a fresh database:" >&2
+    echo "        export ENCRYPTION_MASTER_KEY=\$(openssl rand -hex 32)" >&2
+    exit 1
 fi
 
 # --- Dex: only if a built binary is actually found - never built here,

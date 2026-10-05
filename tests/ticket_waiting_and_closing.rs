@@ -88,7 +88,7 @@ fn ticket_can_go_to_waiting_on_customer_and_back() {
         trigger(&router, &assign_ticket, serde_json::json!({ "ticket_id": ticket_id, "staff_id": staff_id })).await;
 
         // in_progress -> waiting_on_customer
-        let response = trigger(&router, &request_info, serde_json::json!({ "ticket_id": ticket_id, "staff_id": staff_id, "message": "Which browser are you using?" })).await;
+        let response = trigger(&router, &request_info, serde_json::json!({ "ticket_id": ticket_id, "staff_id": staff_id, "message": "Which browser are you using?", "requester_id": requester_id })).await;
         assert!(accepted(&response), "requesting info should be accepted: {response:?}");
         let state: TicketSummaryState = projection_state(&pool, BOUNDED_CONTEXT, "TicketSummary", &ticket_id).await;
         assert_eq!(state.status.as_deref(), Some("waiting_on_customer"));
@@ -115,19 +115,20 @@ fn requesting_info_on_a_ticket_that_is_not_in_progress_is_rejected() {
         let company_id = unique_name("company");
         let ticket_id = unique_name("ticket");
 
+        let requester_id = unique_name("customer");
         trigger(&router, &sign_up, serde_json::json!({ "company_id": company_id, "name": "Acme", "contact_email": "a@acme.example" })).await;
         trigger(
             &router,
             &create_ticket,
             serde_json::json!({
-                "ticket_id": ticket_id, "company_id": company_id, "requester_id": unique_name("customer"),
+                "ticket_id": ticket_id, "company_id": company_id, "requester_id": requester_id,
                 "logged_by_staff_id": null, "title": "t", "description": "d", "priority": "low",
             }),
         )
         .await;
 
         // still open - never assigned
-        let response = trigger(&router, &request_info, serde_json::json!({ "ticket_id": ticket_id, "staff_id": unique_name("staff"), "message": "?" })).await;
+        let response = trigger(&router, &request_info, serde_json::json!({ "ticket_id": ticket_id, "staff_id": unique_name("staff"), "message": "?", "requester_id": requester_id })).await;
         assert!(!accepted(&response), "requesting info on an open ticket should be rejected: {response:?}");
         assert_eq!(rejection_kind(&response), "ticket_not_in_progress");
     });

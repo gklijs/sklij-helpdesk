@@ -4,7 +4,7 @@
 //! `RoleAccessMapping` on this bounded context" - never whether the
 //! specific instance queried belonged to that caller. Since every
 //! company here shares one `helpdesk` bounded context, any
-//! authenticated customer could read `TicketSummary`/`CompanyTicketList`
+//! authenticated customer could read `TicketSummary`/`CompanyTicketList` (now `CompanyTicketQueue`/`CustomerTickets`)
 //! (and `TicketInternalNotes`) for a company they had nothing to do
 //! with.
 //!
@@ -14,7 +14,7 @@
 //! events' tags is its "owner" dimension - a scoped grant is rejected
 //! reading any instance whose derived owner doesn't match, fail-closed
 //! on an instance whose owner can't be derived at all (a never-touched
-//! key included). Adopted here: `TicketSummary`/`CompanyTicketList`/
+//! key included). Adopted here: `TicketSummary`/`CompanyTicketList` (now `CompanyTicketQueue`/`CustomerTickets`)/
 //! `TicketInternalNotes` all declare `OWNER_TAG_KEY = Some("company")`
 //! (see each one's own doc comment in `src/helpdesk.rs`), and
 //! `server.rs`'s demo customer Role is scoped to its own company.
@@ -77,7 +77,12 @@ fn a_customer_scoped_to_one_company_cannot_read_another_companys_projections() {
         let company_b = unique_name("company-b");
         let ticket_a = unique_name("ticket-a");
         let ticket_b = unique_name("ticket-b");
-        for (company, ticket) in [(&company_a, &ticket_a), (&company_b, &ticket_b)] {
+        let requester_a = unique_name("customer-a");
+        let requester_b = unique_name("customer-b");
+        for (company, ticket, requester) in [
+            (&company_a, &ticket_a, &requester_a),
+            (&company_b, &ticket_b, &requester_b),
+        ] {
             trigger(
                 &rest_router,
                 &sign_up,
@@ -88,7 +93,7 @@ fn a_customer_scoped_to_one_company_cannot_read_another_companys_projections() {
                 &rest_router,
                 &create_ticket,
                 serde_json::json!({
-                    "ticket_id": ticket, "company_id": company, "requester_id": unique_name("customer"),
+                    "ticket_id": ticket, "company_id": company, "requester_id": requester,
                     "logged_by_staff_id": null, "title": "t", "description": "d", "priority": "low",
                 }),
             )
@@ -148,11 +153,11 @@ fn a_customer_scoped_to_one_company_cannot_read_another_companys_projections() {
             "unscoped staff should still read every company's own ticket: {staff_read_b:?}"
         );
 
-        // --- CompanyTicketList (keyed by company_id itself) ---
+        // --- CompanyTicketQueue (keyed by company_id itself) ---
         let list_a = graphql_request(
             &router,
             &customer_a_jwt,
-            &projection_query("CompanyTicketList", &company_a, "helpdesk_CompanyTicketList", "tickets"),
+            &projection_query("CompanyTicketQueue", &company_a, "helpdesk_CompanyTicketQueue", "tickets"),
         )
         .await;
         assert!(succeeded(&list_a, "tickets"), "company A's own customer should read company A's own list: {list_a:?}");
@@ -160,12 +165,31 @@ fn a_customer_scoped_to_one_company_cannot_read_another_companys_projections() {
         let list_b = graphql_request(
             &router,
             &customer_a_jwt,
-            &projection_query("CompanyTicketList", &company_b, "helpdesk_CompanyTicketList", "tickets"),
+            &projection_query("CompanyTicketQueue", &company_b, "helpdesk_CompanyTicketQueue", "tickets"),
         )
         .await;
         assert!(
             !succeeded(&list_b, "tickets"),
             "company A's own customer must NOT read company B's ticket list: {list_b:?}"
+        );
+
+        // --- CustomerTickets (keyed by customer, owned by their company) ---
+        let content_a = graphql_request(
+            &router,
+            &customer_a_jwt,
+            &projection_query("CustomerTickets", &requester_a, "helpdesk_CustomerTickets", "tickets"),
+        )
+        .await;
+        assert!(succeeded(&content_a, "tickets"), "a customer of company A is readable to company A: {content_a:?}");
+        let content_b = graphql_request(
+            &router,
+            &customer_a_jwt,
+            &projection_query("CustomerTickets", &requester_b, "helpdesk_CustomerTickets", "tickets"),
+        )
+        .await;
+        assert!(
+            !succeeded(&content_b, "tickets"),
+            "company A's own customer must NOT read a company B customer's tickets: {content_b:?}"
         );
 
         // --- TicketInternalNotes: the cross-company half - company A's

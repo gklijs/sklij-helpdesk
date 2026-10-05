@@ -1,6 +1,6 @@
 use crate::{
     api, auth, config,
-    model::{TicketInternalNote, TicketListEntry},
+    model::{CustomerTicketContent, TicketInternalNote, TicketQueueEntry},
     routing::TicketContext,
     theme::ThemeToggle,
 };
@@ -11,8 +11,7 @@ use std::collections::HashMap;
 use web_sys::window;
 
 /// `TicketInternalNotes` is its own projection, queried on demand, not
-/// as part of the one eager `CompanyTicketList` fetch `Dashboard`
-/// already does - see that projection's own doc comment in
+/// as part of the eager ticket fetch `Dashboard` already does - see that projection's own doc comment in
 /// `helpdesk.rs`. Shared between the "Notes" toggle's own first fetch
 /// and `AddInternalNote`'s own re-fetch-after-success, rather than
 /// duplicated inline in each.
@@ -35,6 +34,27 @@ async fn fetch_internal_notes(
         ticket_id,
         &ticket_context.graphql_type("TicketInternalNotes"),
         "notes",
+    )
+    .await?;
+    serde_json::from_value(json).map_err(|e| e.to_string())
+}
+
+/// One customer's `CustomerTickets` row: the content of each of their
+/// tickets, by `ticket_id`. Keyed by the customer's `requester_id`, which
+/// for a logged-in customer is their own `sub` - that's what lets skilj
+/// decrypt it for them without any sensitive-read grant.
+async fn fetch_customer_tickets(
+    token: &str,
+    ticket_context: &TicketContext,
+    requester_id: &str,
+) -> Result<HashMap<String, CustomerTicketContent>, String> {
+    let json = api::query_projection(
+        token,
+        ticket_context.bounded_context(),
+        "CustomerTickets",
+        requester_id,
+        &ticket_context.graphql_type("CustomerTickets"),
+        "tickets",
     )
     .await?;
     serde_json::from_value(json).map_err(|e| e.to_string())
@@ -114,12 +134,14 @@ pub fn Dashboard() -> impl IntoView {
 
     // `api::query_projection` already resolves down to the `tickets`
     // field's own inner JSON (a plain ticket_id -> entry map, per
-    // `CompanyTicketListState`'s own shape on the backend) - deserialize
+    // `CompanyTicketQueueState`'s own shape on the backend) - deserialize
     // into that map directly, not the struct that wraps it. Found by
     // running the real thing in a real browser: every fetch failed with
-    // "missing field `tickets`", not intermittently - the earlier
-    // `CompanyTicketListState` target here was double-unwrapping.
-    let (tickets, set_tickets) = signal(HashMap::<String, TicketListEntry>::new());
+    // "missing field `tickets`", not intermittently - an earlier
+    // `…State` target here was double-unwrapping.
+    let (tickets, set_tickets) = signal(HashMap::<String, TicketQueueEntry>::new());
+    // Each ticket's content, from its customer's `CustomerTickets` row.
+    let (contents, set_contents) = signal(HashMap::<String, CustomerTicketContent>::new());
     let (status, set_status) = signal(String::new());
     let (refresh, set_refresh) = signal(0u32);
 
@@ -143,6 +165,7 @@ pub fn Dashboard() -> impl IntoView {
     }
 
     let fetch_token = token.clone();
+    let fetch_sub = my_sub.clone();
     Effect::new(move |_| {
         refresh.get();
         // Track the resolved context as well as the refresh counter, so
@@ -153,24 +176,54 @@ pub fn Dashboard() -> impl IntoView {
             return;
         }
         let token = fetch_token.clone();
+        let my_sub = fetch_sub.clone();
         spawn_local(async move {
             let result = api::query_projection(
                 &token,
                 context.bounded_context(),
-                "CompanyTicketList",
+                "CompanyTicketQueue",
                 config::DEMO_COMPANY_ID,
-                &context.graphql_type("CompanyTicketList"),
+                &context.graphql_type("CompanyTicketQueue"),
                 "tickets",
             )
             .await
             .and_then(|json| {
-                serde_json::from_value::<HashMap<String, TicketListEntry>>(json)
+                serde_json::from_value::<HashMap<String, TicketQueueEntry>>(json)
                     .map_err(|e| e.to_string())
             });
-            match result {
-                Ok(state) => set_tickets.set(state),
-                Err(e) => set_status.set(format!("couldn't load tickets: {e}")),
+            let queue = match result {
+                Ok(queue) => queue,
+                Err(e) => {
+                    set_status.set(format!("couldn't load tickets: {e}"));
+                    return;
+                }
+            };
+            // Content is per customer: staff read one row per customer in
+            // the queue, a customer only their own. One request each, in
+            // turn - fine for a demo company's handful of customers, and
+            // the price of keeping each customer's text under their own key.
+            //
+            // Only customers the queue shows a ticket for: a row that
+            // doesn't exist yet has no owner, so a company-scoped
+            // customer's read of it is refused (`grant_scope_mismatch`).
+            // The queue read above has the same limit before a company's
+            // first ticket.
+            let mut requesters: Vec<String> = queue
+                .values()
+                .map(|t| t.requester_id.clone())
+                .filter(|requester_id| is_staff || *requester_id == my_sub)
+                .collect();
+            requesters.sort();
+            requesters.dedup();
+            set_tickets.set(queue);
+            let mut all = HashMap::new();
+            for requester_id in requesters {
+                match fetch_customer_tickets(&token, &context, &requester_id).await {
+                    Ok(content) => all.extend(content),
+                    Err(e) => set_status.set(format!("couldn't load ticket content: {e}")),
+                }
             }
+            set_contents.set(all);
         });
     });
 
@@ -273,7 +326,8 @@ pub fn Dashboard() -> impl IntoView {
                 {move || {
                     let my_sub = my_sub.clone();
                     let token = token.clone();
-                    let mut entries: Vec<TicketListEntry> = tickets
+                    let contents = contents.get();
+                    let mut entries: Vec<TicketQueueEntry> = tickets
                         .get()
                         .into_values()
                         .filter(|t| is_staff || t.requester_id == my_sub)
@@ -284,6 +338,7 @@ pub fn Dashboard() -> impl IntoView {
                         .map(|ticket| {
                             view! {
                                 <TicketRow
+                                    content=contents.get(&ticket.ticket_id).cloned()
                                     ticket=ticket
                                     is_staff=is_staff
                                     my_sub=my_sub.clone()
@@ -305,7 +360,9 @@ pub fn Dashboard() -> impl IntoView {
 
 #[component]
 fn TicketRow(
-    ticket: TicketListEntry,
+    ticket: TicketQueueEntry,
+    /// `None` until it loads, or when it can't be read at all.
+    content: Option<CustomerTicketContent>,
     is_staff: bool,
     my_sub: String,
     token: String,
@@ -395,13 +452,18 @@ fn TicketRow(
     let ask = {
         let ticket_id = ticket_id.clone();
         let my_sub = my_sub.clone();
+        let requester_id = ticket.requester_id.clone();
         let run = run.clone();
         move |_| {
             let text = message_text.get();
             set_message_text.set(String::new());
+            // `requester_id` names the key the question is encrypted under.
             run(
                 "RequestInfoFromCustomer",
-                serde_json::json!({ "ticket_id": ticket_id, "staff_id": my_sub, "message": text }),
+                serde_json::json!({
+                    "ticket_id": ticket_id, "staff_id": my_sub, "message": text,
+                    "requester_id": requester_id,
+                }),
             )
         }
     };
@@ -433,6 +495,7 @@ fn TicketRow(
     let existing_rating = ticket.rating;
     let submit_rating = {
         let ticket_id = ticket_id.clone();
+        let my_sub = my_sub.clone();
         let run = run.clone();
         move |_| {
             let rating = rating_value.get();
@@ -445,14 +508,17 @@ fn TicketRow(
             };
             run(
                 "RateTicket",
-                serde_json::json!({ "ticket_id": ticket_id, "rating": rating, "comment": comment }),
+                serde_json::json!({
+                    "ticket_id": ticket_id, "rating": rating, "comment": comment,
+                    "requester_id": my_sub,
+                }),
             )
         }
     };
 
     // Internal notes - staff-only, fetched on demand (a second, separate
     // query - see `fetch_internal_notes`'s own doc comment for why this
-    // never rides along with the one eager `CompanyTicketList` fetch).
+    // never rides along with the eager ticket fetch).
     let (note_text, set_note_text) = signal(String::new());
     let (notes, set_notes) = signal(Vec::<TicketInternalNote>::new());
     let (notes_open, set_notes_open) = signal(false);
@@ -562,11 +628,14 @@ fn TicketRow(
     let status_for_customer_1 = ticket.status.clone();
     let can_ask = is_staff && ticket.status == "in_progress";
     let can_reply = !is_staff && is_own_ticket && ticket.status == "waiting_on_customer";
-    let messages = ticket.messages.clone();
+    let (title, description, messages, given_comment) = match content {
+        Some(c) => (c.title, c.description, c.messages, c.rating_comment),
+        None => ("…".to_string(), String::new(), Vec::new(), None),
+    };
 
     view! {
         <tr>
-            <td>{ticket.title.clone()}</td>
+            <td>{title}</td>
             <td><span class=status_badge_class>{status_text}</span></td>
             <td>
                 <span class=priority_badge_class>{priority_text}</span>
@@ -583,7 +652,7 @@ fn TicketRow(
         </tr>
         <tr>
             <td colspan="6" class="ticket-detail">
-                <p class="description">{ticket.description.clone()}</p>
+                <p class="description">{description}</p>
                 {(!messages.is_empty()).then(|| view! {
                     <ul class="messages">
                         {messages.into_iter().map(|m| {
@@ -620,7 +689,10 @@ fn TicketRow(
                     </div>
                 })}
                 {existing_rating.map(|r| view! {
-                    <p class="rating-given">{format!("You rated this ticket: {r}★")}</p>
+                    <p class="rating-given">
+                        {format!("Rated {r}★")}
+                        {given_comment.clone().map(|c| format!(" — {c}"))}
+                    </p>
                 })}
                 {can_rate.then(|| view! {
                     <div class="reply-form">

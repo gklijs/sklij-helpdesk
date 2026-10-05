@@ -23,7 +23,7 @@
 //!
 //! No projection exposes a company's own `status` directly (only
 //! ticket-shaped projections exist - see `src/helpdesk.rs`'s own
-//! `CompanyTicketList`/`TicketSummary`), so the trial-conversion test
+//! `CompanyTicketQueue`/`TicketSummary`), so the trial-conversion test
 //! proves the deadline fired indirectly: re-submitting `ConvertCompanyTrial`
 //! by hand afterwards, having never submitted it directly itself, and
 //! getting `company_not_trialing` back - the same rejection

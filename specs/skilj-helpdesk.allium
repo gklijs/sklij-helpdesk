@@ -204,6 +204,22 @@ entity Customer {
     company: Company
     external_subject: String       -- the IdP subject this identity is bound to (see skilj.allium's Role)
     contact_email: String
+
+    @guidance
+        -- Personal data, erasable on request (GDPR art. 17). Everything
+        -- a customer writes or is asked on a ticket - title,
+        -- description, the info-request conversation, a rating comment -
+        -- and their name and email are skilj `sensitive_fields`,
+        -- encrypted under one key per customer (subject `customer`,
+        -- keyed by the requester's id). Erasure is skilj.allium's own
+        -- `ForgetSubject` on that subject: the key is destroyed, so all
+        -- of it stays unreadable, and a pending auto-close naming the
+        -- customer is resolved `forgotten`. Hence the read side is split:
+        -- a per-company queue with no customer text, and a per-customer
+        -- view of the text, since skilj decrypts a projection only
+        -- against the row's own key. Every command carrying a customer's
+        -- text must name the ticket's own requester, or it would be
+        -- filed under someone else's key.
 }
 
 entity StaffMember {

@@ -68,6 +68,8 @@ pub fn created(ticket_id: &str, company_id: &str, priority: TicketPriority) -> H
         title: format!("{ticket_id} title"),
         description: format!("{ticket_id} description"),
         priority,
+        requester_name: None,
+        requester_email: None,
     })
 }
 
@@ -84,6 +86,7 @@ pub fn resolved(ticket_id: &str, company_id: &str, resolution: u32) -> HelpdeskE
         ticket_id: ticket_id.into(),
         company_id: company_id.into(),
         resolution: Some(resolution),
+        requester_id: Some("customer-1".into()),
     })
 }
 
@@ -101,6 +104,7 @@ pub fn info_requested(ticket_id: &str, company_id: &str, message: &str) -> Helpd
         company_id: company_id.into(),
         staff_id: "staff-1".into(),
         message: message.into(),
+        requester_id: Some("customer-1".into()),
     })
 }
 
@@ -147,7 +151,8 @@ pub fn rated(ticket_id: &str, company_id: &str, rating: u8) -> HelpdeskEvent {
         ticket_id: ticket_id.into(),
         company_id: company_id.into(),
         rating,
-        comment: None,
+        comment: Some(format!("{ticket_id} comment")),
+        requester_id: Some("customer-1".into()),
     })
 }
 

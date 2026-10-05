@@ -77,8 +77,19 @@ fn urgent_ticket_creation_is_visible_on_the_event_feed_and_triggers_an_alert() {
         // the point of server-tracked, at-most-once delivery
         // (docs/architecture.md §7.4), which is exactly what makes a
         // simple poll-loop-with-no-local-state (src/bin/alerter.rs) safe.
+        //
+        // Only our own event is checked: the other test in this file
+        // creates its ticket concurrently, and may land between the two
+        // consumes - new to this token, so rightly delivered.
         let consumed_again = consume_auto(&router, &read_ticket_created).await;
-        assert_eq!(consumed_again["events"].as_array().unwrap().len(), 0);
+        assert!(
+            consumed_again["events"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|e| e["payload"]["ticket_id"] != ticket_id),
+            "our TicketCreated must not be delivered twice: {consumed_again:?}"
+        );
     });
 }
 

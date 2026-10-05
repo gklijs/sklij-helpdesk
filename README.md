@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/gklijs/sklij-helpdesk/actions/workflows/ci.yml/badge.svg)](https://github.com/gklijs/sklij-helpdesk/actions/workflows/ci.yml)
 
-A showcase SaaS helpdesk built on [skilj](../skilj) — a Rust library for
+A showcase SaaS helpdesk built on [skilj](https://crates.io/crates/skilj) (the released 0.0.9 from crates.io) — a Rust library for
 event-sourced, DDD-style applications. This project exists to exercise
 skilj for real: every piece below was built, run, and verified against
 a live stack, not just written and assumed to work.
@@ -59,6 +59,38 @@ simplifications (see "What's not built" below).
   `prefers-color-scheme` by default, overridable per browser via the
   toggle next to "Log out"/"Log in".
 
+### GDPR erasure
+
+Everything a customer writes or is asked — ticket title and
+description, the request-info conversation, their rating comment, and
+optional `requester_name`/`requester_email` — is a skilj
+`sensitive_field`, encrypted under one key per customer (subject
+`customer`, keyed by `requester_id`). To erase a customer:
+
+```graphql
+mutation { forgetSubject(boundedContext: "helpdesk", subjectKey: "customer",
+                         subjectValue: "<requester_id>") { status } }
+```
+
+skilj destroys the key, so that customer's data reads back as
+ciphertext everywhere from then on, and their pending auto-close
+deadline is resolved as `forgotten` (`tests/customer_erasure.rs`).
+
+That's why the frontend reads two projections. `CompanyTicketQueue`
+(per company) has each ticket's status, priority and assignee, but no
+text. `CustomerTickets` (per customer) has the content. skilj decrypts a
+projection row only against its own key: a customer reads their own row
+because their IdP subject is their `requester_id`, and staff read every
+row through `can_read_sensitive`. Another customer of the same company
+sees only ciphertext.
+
+Not covered: ticket text stored before this was introduced stays
+plaintext (skilj has no backfill), and so does the retired
+`CompanyTicketList` projection's last stored state. Internal notes are
+staff-written and gated separately (`TEAM_ONLY`), not encrypted. The
+frontend can't tell ciphertext from text, so an erased customer's
+tickets show base64 rather than "erased".
+
 ## Layout
 
 | Path | What |
@@ -107,8 +139,14 @@ Run it against this project's config: `./dex serve dex/config.yaml`
 
 ```sh
 DATABASE_URL=postgres://... OIDC_ISSUER_URL=http://127.0.0.1:5556/dex \
-  cargo run --bin server
+  ENCRYPTION_MASTER_KEY=$(openssl rand -hex 32) cargo run --bin server
 ```
+
+`ENCRYPTION_MASTER_KEY` wraps the per-customer keys that everything a
+customer wrote is encrypted under (see "GDPR erasure" above). Keep it
+the same for as long as you keep the database; a new key makes every
+stored ticket's content unreadable. `scripts/dev.sh` generates one only
+for its throwaway Postgres.
 
 It prints every credential the rest of this needs, and the exact
 command to run `alerter` against it (trial conversion and ticket
@@ -403,7 +441,7 @@ surfaced five real bugs, each confirmed failing first, then fixed:
    this project, fixed in skilj itself (`RoleAccessMapping.scope` +
    `Projection`/`EventType`/`CommandType.OWNER_TAG_KEY` —
    `docs/architecture.md` §23–26 in the `skilj` repo), adopted here for
-   `TicketSummary`/`CompanyTicketList`/`TicketInternalNotes` and the demo
+   `TicketSummary`/`CompanyTicketList` (since `CompanyTicketQueue`/`CustomerTickets`)/`TicketInternalNotes` and the demo
    customer Role — `tests/cross_company_projection_scoping.rs` proves the
    cross-company half live. The remaining role-type axis — a customer
    reading *their own* company's internal notes — stayed open until
@@ -425,7 +463,7 @@ surfaced five real bugs, each confirmed failing first, then fixed:
   stops, then the pool closes, and the process prints which loops
   stopped cleanly and which, if any, were aborted at the timeout.
 - **Telemetry on the matching OTel line.** The OpenTelemetry stack is
-  pinned to what `../skilj/Cargo.toml` uses (0.33, with
+  pinned to what skilj 0.0.9 uses (0.33, with
   `tracing-opentelemetry` 0.34). `opentelemetry`'s globals are per
   crate version, so a provider installed on a different line receives
   none of skilj's spans or metrics — silently, with no error anywhere.
