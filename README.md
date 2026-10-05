@@ -53,6 +53,11 @@ simplifications (see "What's not built" below).
   staff-only internal notes — each grounded in how Zendesk/Freshdesk/
   Jira Service Management actually work, added to give the telemetry
   work below genuinely varied traffic to show.
+- **A `Snapshot` for long-lived tickets** (`TicketSnapshot`): every
+  single-ticket command decides from a stored per-ticket state plus the
+  events since, instead of re-reading the ticket's whole history. On a
+  500-event ticket that's 31–46% faster, and as fast as a new ticket —
+  see `docs/ticket-snapshot-report-2026-10-05.md`.
 - **A real login**: a self-hosted OIDC provider (Dex), Authorization
   Code + PKCE, a real customer/staff dashboard in the browser — with a
   dark mode (`frontend/src/theme.rs`) that follows the system's own

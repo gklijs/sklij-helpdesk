@@ -18,3 +18,4 @@ mod company;
 mod events;
 mod projections;
 mod ticket;
+mod ticket_snapshot;

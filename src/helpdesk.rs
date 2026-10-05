@@ -64,7 +64,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use skilj::{
     auto_register, requires_role, CancelDeadline, CommandType, EventType, Projection,
-    ScheduleDeadline,
+    ScheduleDeadline, Snapshot,
 };
 use skilj_core::event_store::Event;
 use skilj_core::plugin::{BoundedContextEvent, DeadlinePollStartFrom, DeadlineSpec};
@@ -448,7 +448,7 @@ pub struct TicketResolvedPayload {
     pub ticket_id: String,
     pub company_id: String,
     /// Which resolution of this ticket this is: 1 for the first, 2 after
-    /// one reopen, and so on (see `resolution_count`). It tags the
+    /// one reopen, and so on (see `TicketFacts::resolutions`). It tags the
     /// auto-close deadline this schedules, so `CancelTicketAutoCloseOnReopen`
     /// can cancel exactly this resolution's deadline and no later one.
     /// `None` on events stored before the field existed.
@@ -852,7 +852,8 @@ impl BoundedContextEvent for HelpdeskEvent {
 /// command's own status match already ends on a catch-all `Some(other)
 /// => Rejected{..}` arm, so adding this variant needed no changes
 /// anywhere else - verified by reading each one, not assumed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
 pub enum TicketStatus {
     Open,
     InProgress,
@@ -862,58 +863,205 @@ pub enum TicketStatus {
     Merged,
 }
 
-/// Folds this ticket's own status from its slice of `matching_events` -
-/// same technique as `banking.rs`'s `balance_of`/`courses.rs`'s roster
-/// folds. `None` means the ticket doesn't exist (no `TicketCreated`
-/// found).
-fn ticket_status(matching_events: &[HelpdeskEvent], ticket_id: &str) -> Option<TicketStatus> {
-    let mut status = None;
-    for event in matching_events {
+/// Everything a ticket command's `decide()` reads from one ticket's
+/// history, folded in one pass - same technique as `banking.rs`'s
+/// `balance_of`/`courses.rs`'s roster folds, gathered into one struct so
+/// it can also be `TicketSnapshot`'s stored state (issue #14). Every
+/// single-ticket command decides from this alone, whether it was folded
+/// from the full `matching_events` (`decide()`) or resumed from a stored
+/// snapshot plus the events since (`decide_from_snapshot()`), so the two
+/// paths can't drift apart.
+///
+/// Changing what this folds, or its shape, means bumping
+/// `TicketSnapshot::VERSION`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct TicketFacts {
+    /// Which ticket this is - set up front by `of`/`resume`, or by the
+    /// first `TicketCreated` when `TicketSnapshot` folds from nothing
+    /// (its `fold` gets no key). Needed for `TicketsMerged`, the one
+    /// event tagged with two tickets.
+    pub ticket_id: String,
+    /// `None` means the ticket doesn't exist (no `TicketCreated` found).
+    pub status: Option<TicketStatus>,
+    /// Off its `TicketCreated` - see `company_id`.
+    pub company_id: Option<String>,
+    /// Off its `TicketCreated`. Safe to copy out of history, unlike
+    /// `requester_name`/`requester_email`: those are stored, and so seen
+    /// here, as ciphertext, and copying them into a new sensitive field
+    /// would encrypt them a second time.
+    pub requester_id: Option<String>,
+    /// The priority it was created with - what `EscalateTicket` bumps.
+    pub created_priority: Option<TicketPriority>,
+    /// How many times it has been resolved so far. Counts the events
+    /// rather than reading `TicketResolved::resolution`, so a history that
+    /// predates that field still numbers its next resolution correctly.
+    pub resolutions: u32,
+    pub escalated: bool,
+    pub rated: bool,
+}
+
+impl TicketFacts {
+    /// Folded from `ticket_id`'s slice of `matching_events`.
+    pub fn of(matching_events: &[HelpdeskEvent], ticket_id: &str) -> Self {
+        let mut facts = Self {
+            ticket_id: ticket_id.to_string(),
+            ..Self::default()
+        };
+        for event in matching_events {
+            facts.apply(event);
+        }
+        facts
+    }
+
+    /// A stored `TicketSnapshot` state brought up to date with the events
+    /// stored after it. `state_json` is the default state when there is
+    /// no usable snapshot yet, and then `events_since` is the full
+    /// history - see `CommandType::decide_from_snapshot`.
+    pub fn resume(
+        state_json: &str,
+        events_since: &[HelpdeskEvent],
+        ticket_id: &str,
+    ) -> Result<Self, serde_json::Error> {
+        let mut facts: Self = serde_json::from_str(state_json)?;
+        if facts.ticket_id.is_empty() {
+            facts.ticket_id = ticket_id.to_string();
+        }
+        for event in events_since {
+            facts.apply(event);
+        }
+        Ok(facts)
+    }
+
+    fn apply(&mut self, event: &HelpdeskEvent) {
         match event {
-            HelpdeskEvent::TicketCreated(p) if p.ticket_id == ticket_id => {
-                status = Some(TicketStatus::Open);
+            HelpdeskEvent::TicketCreated(p)
+                if self.ticket_id.is_empty() || p.ticket_id == self.ticket_id =>
+            {
+                self.ticket_id = p.ticket_id.clone();
+                self.status = Some(TicketStatus::Open);
+                self.company_id.get_or_insert_with(|| p.company_id.clone());
+                self.requester_id
+                    .get_or_insert_with(|| p.requester_id.clone());
+                self.created_priority.get_or_insert(p.priority);
             }
-            HelpdeskEvent::TicketAssigned(p) if p.ticket_id == ticket_id => {
-                status = Some(TicketStatus::InProgress);
+            HelpdeskEvent::TicketAssigned(p) if p.ticket_id == self.ticket_id => {
+                self.status = Some(TicketStatus::InProgress);
             }
-            HelpdeskEvent::TicketResolved(p) if p.ticket_id == ticket_id => {
-                status = Some(TicketStatus::Resolved);
+            HelpdeskEvent::TicketResolved(p) if p.ticket_id == self.ticket_id => {
+                self.status = Some(TicketStatus::Resolved);
+                self.resolutions += 1;
             }
-            HelpdeskEvent::TicketReopened(p) if p.ticket_id == ticket_id => {
-                status = Some(TicketStatus::InProgress);
+            HelpdeskEvent::TicketReopened(p) if p.ticket_id == self.ticket_id => {
+                self.status = Some(TicketStatus::InProgress);
             }
-            HelpdeskEvent::TicketInfoRequested(p) if p.ticket_id == ticket_id => {
-                status = Some(TicketStatus::WaitingOnCustomer);
+            HelpdeskEvent::TicketInfoRequested(p) if p.ticket_id == self.ticket_id => {
+                self.status = Some(TicketStatus::WaitingOnCustomer);
             }
-            HelpdeskEvent::TicketCustomerResponded(p) if p.ticket_id == ticket_id => {
-                status = Some(TicketStatus::InProgress);
+            HelpdeskEvent::TicketCustomerResponded(p) if p.ticket_id == self.ticket_id => {
+                self.status = Some(TicketStatus::InProgress);
             }
-            HelpdeskEvent::TicketClosed(p) if p.ticket_id == ticket_id => {
-                status = Some(TicketStatus::Closed);
+            HelpdeskEvent::TicketClosed(p) if p.ticket_id == self.ticket_id => {
+                self.status = Some(TicketStatus::Closed);
             }
             // Only the *duplicate* side becomes Merged - the primary's
             // own status is untouched by a merge (see `MergeTickets`'s
             // own doc comment), so this only ever matches
             // `duplicate_ticket_id`, never `primary_ticket_id`.
-            HelpdeskEvent::TicketsMerged(p) if p.duplicate_ticket_id == ticket_id => {
-                status = Some(TicketStatus::Merged);
+            HelpdeskEvent::TicketsMerged(p) if p.duplicate_ticket_id == self.ticket_id => {
+                self.status = Some(TicketStatus::Merged);
+            }
+            HelpdeskEvent::TicketEscalated(p) if p.ticket_id == self.ticket_id => {
+                self.escalated = true;
+            }
+            HelpdeskEvent::TicketRated(p) if p.ticket_id == self.ticket_id => {
+                self.rated = true;
             }
             _ => {}
         }
     }
-    status
+
+    /// The company a ticket belongs to. Every ticket-lifecycle command
+    /// past creation uses this to stamp `company_id` onto the event it
+    /// emits, which is what lets `CompanyActiveTickets` below fold every
+    /// ticket event for one ticket into the correct per-company projection
+    /// instance - `AssignTicket`/`ResolveTicket`/etc.'s own payloads never
+    /// carried `company_id` as caller input (there's no reason to trust a
+    /// caller-supplied one when the real answer is already in the ticket's
+    /// own history). Only called once `status` is known to be `Some`.
+    fn company_id(&self) -> &str {
+        self.company_id
+            .as_deref()
+            .expect("a ticket with any status has a TicketCreated in its own history")
+    }
+
+    /// Rejects a command whose `requester_id` isn't this ticket's
+    /// requester.
+    ///
+    /// The command's free text is encrypted under the key its own
+    /// `requester_id` names, so a wrong one would file the text under
+    /// another customer: readable to them, and out of reach of the real
+    /// customer's erasure. Only meaningful once the ticket is known to
+    /// exist.
+    fn reject_unless_requester(&self, requester_id: Option<&str>) -> Option<CommandDecision> {
+        if requester_id.is_some() && requester_id == self.requester_id.as_deref() {
+            return None;
+        }
+        Some(CommandDecision::Rejected {
+            reason: format!(
+                "requester_id {requester_id:?} is not ticket {}'s requester",
+                self.ticket_id
+            ),
+            kind: "requester_mismatch".into(),
+        })
+    }
 }
 
-/// How many times this ticket has been resolved so far. Counts the
-/// events rather than reading `TicketResolved::resolution`, so a history
-/// that predates that field still numbers its next resolution correctly.
-fn resolution_count(matching_events: &[HelpdeskEvent], ticket_id: &str) -> u32 {
-    matching_events
-        .iter()
-        .filter(
-            |event| matches!(event, HelpdeskEvent::TicketResolved(p) if p.ticket_id == ticket_id),
-        )
-        .count() as u32
+/// `TicketFacts`, kept per ticket - lets every single-ticket command
+/// decide from a stored state plus the events since, instead of reading
+/// the ticket's whole history each time (issue #14). skilj only uses it
+/// for a command whose one derived tag is `ticket`, so `MergeTickets`
+/// (two tickets) and `CreateTicket` (company and ticket) keep plain
+/// `decide()`. See `docs/ticket-snapshot-report-2026-10-05.md`.
+pub struct TicketSnapshot;
+
+#[auto_register(BOUNDED_CONTEXT)]
+impl Snapshot for TicketSnapshot {
+    type State = TicketFacts;
+    type Event = HelpdeskEvent;
+    const NAME: &'static str = "TicketSnapshot";
+    const TAG_KEY: &'static str = "ticket";
+    /// Same owner every ticket projection derives - a company-scoped
+    /// Role can only `inspectSnapshot` its own company's tickets.
+    const OWNER_TAG_KEY: Option<&'static str> = Some("company");
+    const VERSION: u64 = 1;
+    /// Keyed by ticket, so unlike `CompanyActiveTickets` the work spreads
+    /// over every partition - see that projection's `PARTITION_COUNT`
+    /// and `docs/partitioned-projection-report-2026-10-05.md`.
+    const PARTITION_COUNT: u32 = 4;
+    fn fold(state: &mut Self::State, event: &Self::Event) {
+        state.apply(event);
+    }
+}
+
+/// The `decide_from_snapshot()` every single-ticket command shares: the
+/// stored state brought up to date, then the same decision `decide()`
+/// makes from the full history.
+fn decide_from_ticket_snapshot(
+    ticket_id: &str,
+    state_json: &str,
+    events_since: &[HelpdeskEvent],
+    decide: impl FnOnce(&TicketFacts) -> CommandDecision,
+) -> CommandDecision {
+    match TicketFacts::resume(state_json, events_since, ticket_id) {
+        Ok(facts) => decide(&facts),
+        // Only written by `TicketSnapshot::fold` itself, and an
+        // older-`VERSION` row is never handed over - so this is a bug,
+        // reported as a rejection rather than a wrong decision.
+        Err(e) => CommandDecision::Rejected {
+            reason: format!("stored TicketSnapshot for {ticket_id} is unreadable: {e}"),
+            kind: "snapshot_unreadable".into(),
+        },
+    }
 }
 
 /// The one-tier priority bump `EscalateTicket` applies - covered by that
@@ -941,7 +1089,7 @@ pub enum CompanyStatus {
     Expired,
 }
 
-/// Folds this company's own status - same technique as `ticket_status`
+/// Folds this company's own status - same technique as `TicketFacts`
 /// above. `None` means the company doesn't exist (no `CompanySignedUp`
 /// found).
 ///
@@ -995,56 +1143,6 @@ fn company_tenant(matching_events: &[HelpdeskEvent], company_id: &str) -> Option
         HelpdeskEvent::CompanyTenantProvisioned(p) if p.company_id == company_id => {
             Some(p.tenant_name.clone())
         }
-        _ => None,
-    })
-}
-
-/// The company a ticket belongs to, read off its own `TicketCreated`
-/// (always present in `matching_events` for any ticket-tagged command:
-/// `TicketCreated` carries both the "ticket" and "company" tags - see
-/// its own `tag_mappings` doc comment). Every ticket-lifecycle command
-/// past creation itself uses this to stamp `company_id` onto the event
-/// it emits, which is what lets `CompanyActiveTickets` below fold every
-/// ticket event for one ticket into the correct per-company projection
-/// instance - `AssignTicket`/`ResolveTicket`/etc.'s own payloads never
-/// carried `company_id` as caller input (there's no reason to trust a
-/// caller-supplied one when the real answer is already in the ticket's
-/// own history).
-fn company_id_for_ticket(matching_events: &[HelpdeskEvent], ticket_id: &str) -> Option<String> {
-    matching_events.iter().find_map(|event| match event {
-        HelpdeskEvent::TicketCreated(p) if p.ticket_id == ticket_id => Some(p.company_id.clone()),
-        _ => None,
-    })
-}
-
-/// Rejects a command whose `requester_id` isn't this ticket's requester.
-///
-/// The command's free text is encrypted under the key its own
-/// `requester_id` names, so a wrong one would file the text under another
-/// customer: readable to them, and out of reach of the real customer's
-/// erasure. Only meaningful once the ticket is known to exist.
-fn reject_unless_requester(
-    matching_events: &[HelpdeskEvent],
-    ticket_id: &str,
-    requester_id: Option<&str>,
-) -> Option<CommandDecision> {
-    let actual = requester_id_for_ticket(matching_events, ticket_id);
-    if requester_id.is_some() && requester_id == actual.as_deref() {
-        return None;
-    }
-    Some(CommandDecision::Rejected {
-        reason: format!("requester_id {requester_id:?} is not ticket {ticket_id}'s requester"),
-        kind: "requester_mismatch".into(),
-    })
-}
-
-/// `company_id_for_ticket`'s counterpart for the requester. Safe to copy
-/// out of history, unlike `requester_name`/`requester_email`: those are
-/// stored, and so seen here, as ciphertext, and copying them into a new
-/// sensitive field would encrypt them a second time.
-fn requester_id_for_ticket(matching_events: &[HelpdeskEvent], ticket_id: &str) -> Option<String> {
-    matching_events.iter().find_map(|event| match event {
-        HelpdeskEvent::TicketCreated(p) if p.ticket_id == ticket_id => Some(p.requester_id.clone()),
         _ => None,
     })
 }
@@ -1649,7 +1747,10 @@ impl CommandType for CreateTicket {
             }
             Some(CompanyStatus::Trialing | CompanyStatus::Active) => {}
         }
-        if ticket_status(matching_events, &payload.ticket_id).is_some() {
+        if TicketFacts::of(matching_events, &payload.ticket_id)
+            .status
+            .is_some()
+        {
             return CommandDecision::Rejected {
                 reason: format!("ticket {} already exists", payload.ticket_id),
                 kind: "ticket_already_exists".into(),
@@ -1696,8 +1797,32 @@ impl CommandType for AssignTicket {
     fn rest_trigger_allowed() -> bool {
         true
     }
+    fn snapshot() -> Option<&'static str> {
+        Some(TicketSnapshot::NAME)
+    }
     fn decide(payload: &Self::Payload, matching_events: &[Self::Event]) -> CommandDecision {
-        match ticket_status(matching_events, &payload.ticket_id) {
+        Self::decide_with(
+            payload,
+            &TicketFacts::of(matching_events, &payload.ticket_id),
+        )
+    }
+    fn decide_from_snapshot(
+        payload: &Self::Payload,
+        snapshot_state_json: &str,
+        events_since_snapshot: &[Self::Event],
+    ) -> CommandDecision {
+        decide_from_ticket_snapshot(
+            &payload.ticket_id,
+            snapshot_state_json,
+            events_since_snapshot,
+            |facts| Self::decide_with(payload, facts),
+        )
+    }
+}
+
+impl AssignTicket {
+    fn decide_with(payload: &AssignTicketPayload, facts: &TicketFacts) -> CommandDecision {
+        match facts.status {
             None => CommandDecision::Rejected {
                 reason: format!("ticket {} does not exist", payload.ticket_id),
                 kind: "ticket_not_found".into(),
@@ -1707,8 +1832,7 @@ impl CommandType for AssignTicket {
                     event_type: "TicketAssigned".into(),
                     payload: serde_json::json!({
                         "ticket_id": payload.ticket_id,
-                        "company_id": company_id_for_ticket(matching_events, &payload.ticket_id)
-                            .expect("a ticket with any status has a TicketCreated in its own history"),
+                        "company_id": facts.company_id(),
                         "staff_id": payload.staff_id,
                     }),
                 }],
@@ -1745,8 +1869,32 @@ impl CommandType for ResolveTicket {
     fn rest_trigger_allowed() -> bool {
         true
     }
+    fn snapshot() -> Option<&'static str> {
+        Some(TicketSnapshot::NAME)
+    }
     fn decide(payload: &Self::Payload, matching_events: &[Self::Event]) -> CommandDecision {
-        match ticket_status(matching_events, &payload.ticket_id) {
+        Self::decide_with(
+            payload,
+            &TicketFacts::of(matching_events, &payload.ticket_id),
+        )
+    }
+    fn decide_from_snapshot(
+        payload: &Self::Payload,
+        snapshot_state_json: &str,
+        events_since_snapshot: &[Self::Event],
+    ) -> CommandDecision {
+        decide_from_ticket_snapshot(
+            &payload.ticket_id,
+            snapshot_state_json,
+            events_since_snapshot,
+            |facts| Self::decide_with(payload, facts),
+        )
+    }
+}
+
+impl ResolveTicket {
+    fn decide_with(payload: &ResolveTicketPayload, facts: &TicketFacts) -> CommandDecision {
+        match facts.status {
             None => CommandDecision::Rejected {
                 reason: format!("ticket {} does not exist", payload.ticket_id),
                 kind: "ticket_not_found".into(),
@@ -1756,10 +1904,9 @@ impl CommandType for ResolveTicket {
                     event_type: "TicketResolved".into(),
                     payload: serde_json::json!({
                         "ticket_id": payload.ticket_id,
-                        "company_id": company_id_for_ticket(matching_events, &payload.ticket_id)
-                            .expect("a ticket with any status has a TicketCreated in its own history"),
-                        "resolution": resolution_count(matching_events, &payload.ticket_id) + 1,
-                        "requester_id": requester_id_for_ticket(matching_events, &payload.ticket_id),
+                        "company_id": facts.company_id(),
+                        "resolution": facts.resolutions + 1,
+                        "requester_id": facts.requester_id,
                     }),
                 }],
             },
@@ -1794,8 +1941,32 @@ impl CommandType for ReopenTicket {
     fn rest_trigger_allowed() -> bool {
         true
     }
+    fn snapshot() -> Option<&'static str> {
+        Some(TicketSnapshot::NAME)
+    }
     fn decide(payload: &Self::Payload, matching_events: &[Self::Event]) -> CommandDecision {
-        match ticket_status(matching_events, &payload.ticket_id) {
+        Self::decide_with(
+            payload,
+            &TicketFacts::of(matching_events, &payload.ticket_id),
+        )
+    }
+    fn decide_from_snapshot(
+        payload: &Self::Payload,
+        snapshot_state_json: &str,
+        events_since_snapshot: &[Self::Event],
+    ) -> CommandDecision {
+        decide_from_ticket_snapshot(
+            &payload.ticket_id,
+            snapshot_state_json,
+            events_since_snapshot,
+            |facts| Self::decide_with(payload, facts),
+        )
+    }
+}
+
+impl ReopenTicket {
+    fn decide_with(payload: &ReopenTicketPayload, facts: &TicketFacts) -> CommandDecision {
+        match facts.status {
             None => CommandDecision::Rejected {
                 reason: format!("ticket {} does not exist", payload.ticket_id),
                 kind: "ticket_not_found".into(),
@@ -1805,9 +1976,8 @@ impl CommandType for ReopenTicket {
                     event_type: "TicketReopened".into(),
                     payload: serde_json::json!({
                         "ticket_id": payload.ticket_id,
-                        "company_id": company_id_for_ticket(matching_events, &payload.ticket_id)
-                            .expect("a ticket with any status has a TicketCreated in its own history"),
-                        "resolution": resolution_count(matching_events, &payload.ticket_id),
+                        "company_id": facts.company_id(),
+                        "resolution": facts.resolutions,
                     }),
                 }],
             },
@@ -1830,7 +2000,7 @@ pub struct RequestInfoFromCustomerPayload {
     pub message: String,
     /// The ticket's requester. Required, though optional in the schema
     /// (a field added later must be): without it the stored command would
-    /// hold `message` in plaintext. See `reject_unless_requester`.
+    /// hold `message` in plaintext. See `TicketFacts::reject_unless_requester`.
     pub requester_id: Option<String>,
 }
 
@@ -1853,14 +2023,37 @@ impl CommandType for RequestInfoFromCustomer {
     fn rest_trigger_allowed() -> bool {
         true
     }
+    fn snapshot() -> Option<&'static str> {
+        Some(TicketSnapshot::NAME)
+    }
     fn decide(payload: &Self::Payload, matching_events: &[Self::Event]) -> CommandDecision {
-        let status = ticket_status(matching_events, &payload.ticket_id);
+        Self::decide_with(
+            payload,
+            &TicketFacts::of(matching_events, &payload.ticket_id),
+        )
+    }
+    fn decide_from_snapshot(
+        payload: &Self::Payload,
+        snapshot_state_json: &str,
+        events_since_snapshot: &[Self::Event],
+    ) -> CommandDecision {
+        decide_from_ticket_snapshot(
+            &payload.ticket_id,
+            snapshot_state_json,
+            events_since_snapshot,
+            |facts| Self::decide_with(payload, facts),
+        )
+    }
+}
+
+impl RequestInfoFromCustomer {
+    fn decide_with(
+        payload: &RequestInfoFromCustomerPayload,
+        facts: &TicketFacts,
+    ) -> CommandDecision {
+        let status = facts.status;
         if status.is_some() {
-            if let Some(rejected) = reject_unless_requester(
-                matching_events,
-                &payload.ticket_id,
-                payload.requester_id.as_deref(),
-            ) {
+            if let Some(rejected) = facts.reject_unless_requester(payload.requester_id.as_deref()) {
                 return rejected;
             }
         }
@@ -1874,8 +2067,7 @@ impl CommandType for RequestInfoFromCustomer {
                     event_type: "TicketInfoRequested".into(),
                     payload: serde_json::json!({
                         "ticket_id": payload.ticket_id,
-                        "company_id": company_id_for_ticket(matching_events, &payload.ticket_id)
-                            .expect("a ticket with any status has a TicketCreated in its own history"),
+                        "company_id": facts.company_id(),
                         "staff_id": payload.staff_id,
                         "message": payload.message,
                         "requester_id": payload.requester_id,
@@ -1896,7 +2088,7 @@ impl CommandType for RequestInfoFromCustomer {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct CustomerRespondsToTicketPayload {
     pub ticket_id: String,
-    /// Must be the ticket's requester - see `reject_unless_requester`.
+    /// Must be the ticket's requester - see `TicketFacts::reject_unless_requester`.
     pub requester_id: String,
     /// Encrypted under the requester's key, here and in the event.
     pub message: String,
@@ -1920,14 +2112,37 @@ impl CommandType for CustomerRespondsToTicket {
     fn rest_trigger_allowed() -> bool {
         true
     }
+    fn snapshot() -> Option<&'static str> {
+        Some(TicketSnapshot::NAME)
+    }
     fn decide(payload: &Self::Payload, matching_events: &[Self::Event]) -> CommandDecision {
-        let status = ticket_status(matching_events, &payload.ticket_id);
+        Self::decide_with(
+            payload,
+            &TicketFacts::of(matching_events, &payload.ticket_id),
+        )
+    }
+    fn decide_from_snapshot(
+        payload: &Self::Payload,
+        snapshot_state_json: &str,
+        events_since_snapshot: &[Self::Event],
+    ) -> CommandDecision {
+        decide_from_ticket_snapshot(
+            &payload.ticket_id,
+            snapshot_state_json,
+            events_since_snapshot,
+            |facts| Self::decide_with(payload, facts),
+        )
+    }
+}
+
+impl CustomerRespondsToTicket {
+    fn decide_with(
+        payload: &CustomerRespondsToTicketPayload,
+        facts: &TicketFacts,
+    ) -> CommandDecision {
+        let status = facts.status;
         if status.is_some() {
-            if let Some(rejected) = reject_unless_requester(
-                matching_events,
-                &payload.ticket_id,
-                Some(&payload.requester_id),
-            ) {
+            if let Some(rejected) = facts.reject_unless_requester(Some(&payload.requester_id)) {
                 return rejected;
             }
         }
@@ -1941,8 +2156,7 @@ impl CommandType for CustomerRespondsToTicket {
                     event_type: "TicketCustomerResponded".into(),
                     payload: serde_json::json!({
                         "ticket_id": payload.ticket_id,
-                        "company_id": company_id_for_ticket(matching_events, &payload.ticket_id)
-                            .expect("a ticket with any status has a TicketCreated in its own history"),
+                        "company_id": facts.company_id(),
                         "requester_id": payload.requester_id,
                         "message": payload.message,
                     }),
@@ -1972,7 +2186,7 @@ pub struct CloseTicketPayload {
     /// Where a closure notice would go, encrypted under the requester's
     /// key. The auto-close deadline leaves it `None`: the only email it
     /// could copy is `TicketCreated`'s, which it sees as ciphertext (see
-    /// `requester_id_for_ticket`). Declaring it is what ties a
+    /// `TicketFacts::requester_id`). Declaring it is what ties a
     /// `CloseTicket` payload to its customer for `forgetSubject` -
     /// skilj has no way to declare a subject without a sensitive field.
     pub requester_email: Option<String>,
@@ -2002,8 +2216,32 @@ impl CommandType for CloseTicket {
     fn rest_trigger_allowed() -> bool {
         true
     }
+    fn snapshot() -> Option<&'static str> {
+        Some(TicketSnapshot::NAME)
+    }
     fn decide(payload: &Self::Payload, matching_events: &[Self::Event]) -> CommandDecision {
-        match ticket_status(matching_events, &payload.ticket_id) {
+        Self::decide_with(
+            payload,
+            &TicketFacts::of(matching_events, &payload.ticket_id),
+        )
+    }
+    fn decide_from_snapshot(
+        payload: &Self::Payload,
+        snapshot_state_json: &str,
+        events_since_snapshot: &[Self::Event],
+    ) -> CommandDecision {
+        decide_from_ticket_snapshot(
+            &payload.ticket_id,
+            snapshot_state_json,
+            events_since_snapshot,
+            |facts| Self::decide_with(payload, facts),
+        )
+    }
+}
+
+impl CloseTicket {
+    fn decide_with(payload: &CloseTicketPayload, facts: &TicketFacts) -> CommandDecision {
+        match facts.status {
             None => CommandDecision::Rejected {
                 reason: format!("ticket {} does not exist", payload.ticket_id),
                 kind: "ticket_not_found".into(),
@@ -2013,8 +2251,7 @@ impl CommandType for CloseTicket {
                     event_type: "TicketClosed".into(),
                     payload: serde_json::json!({
                         "ticket_id": payload.ticket_id,
-                        "company_id": company_id_for_ticket(matching_events, &payload.ticket_id)
-                            .expect("a ticket with any status has a TicketCreated in its own history"),
+                        "company_id": facts.company_id(),
                     }),
                 }],
             },
@@ -2139,8 +2376,32 @@ impl CommandType for EscalateTicket {
     fn rest_trigger_allowed() -> bool {
         true
     }
+    fn snapshot() -> Option<&'static str> {
+        Some(TicketSnapshot::NAME)
+    }
     fn decide(payload: &Self::Payload, matching_events: &[Self::Event]) -> CommandDecision {
-        match ticket_status(matching_events, &payload.ticket_id) {
+        Self::decide_with(
+            payload,
+            &TicketFacts::of(matching_events, &payload.ticket_id),
+        )
+    }
+    fn decide_from_snapshot(
+        payload: &Self::Payload,
+        snapshot_state_json: &str,
+        events_since_snapshot: &[Self::Event],
+    ) -> CommandDecision {
+        decide_from_ticket_snapshot(
+            &payload.ticket_id,
+            snapshot_state_json,
+            events_since_snapshot,
+            |facts| Self::decide_with(payload, facts),
+        )
+    }
+}
+
+impl EscalateTicket {
+    fn decide_with(payload: &EscalateTicketPayload, facts: &TicketFacts) -> CommandDecision {
+        match facts.status {
             None => CommandDecision::Rejected {
                 reason: format!("ticket {} does not exist", payload.ticket_id),
                 kind: "ticket_not_found".into(),
@@ -2157,23 +2418,15 @@ impl CommandType for EscalateTicket {
             Some(
                 TicketStatus::Open | TicketStatus::InProgress | TicketStatus::WaitingOnCustomer,
             ) => {
-                let already_escalated = matching_events.iter().any(|e| {
-                    matches!(e, HelpdeskEvent::TicketEscalated(p) if p.ticket_id == payload.ticket_id)
-                });
+                let already_escalated = facts.escalated;
                 if already_escalated {
                     return CommandDecision::Rejected {
                         reason: format!("ticket {} has already been escalated", payload.ticket_id),
                         kind: "already_escalated".into(),
                     };
                 }
-                let previous_priority = matching_events
-                    .iter()
-                    .find_map(|e| match e {
-                        HelpdeskEvent::TicketCreated(p) if p.ticket_id == payload.ticket_id => {
-                            Some(p.priority)
-                        }
-                        _ => None,
-                    })
+                let previous_priority = facts
+                    .created_priority
                     .expect("a ticket with any status has a TicketCreated in its own history");
                 let new_priority = escalate_priority(previous_priority);
                 CommandDecision::Accepted {
@@ -2181,8 +2434,7 @@ impl CommandType for EscalateTicket {
                         event_type: "TicketEscalated".into(),
                         payload: serde_json::json!({
                             "ticket_id": payload.ticket_id,
-                            "company_id": company_id_for_ticket(matching_events, &payload.ticket_id)
-                                .expect("a ticket with any status has a TicketCreated in its own history"),
+                            "company_id": facts.company_id(),
                             "previous_priority": previous_priority,
                             "new_priority": new_priority,
                         }),
@@ -2236,9 +2488,9 @@ impl CommandType for MergeTickets {
                 kind: "cannot_merge_ticket_into_itself".into(),
             };
         }
-        let primary_status = ticket_status(matching_events, &payload.primary_ticket_id);
-        let duplicate_status = ticket_status(matching_events, &payload.duplicate_ticket_id);
-        match (primary_status, duplicate_status) {
+        let primary = TicketFacts::of(matching_events, &payload.primary_ticket_id);
+        let duplicate = TicketFacts::of(matching_events, &payload.duplicate_ticket_id);
+        match (primary.status, duplicate.status) {
             (None, _) => CommandDecision::Rejected {
                 reason: format!("ticket {} does not exist", payload.primary_ticket_id),
                 kind: "primary_ticket_not_found".into(),
@@ -2262,13 +2514,8 @@ impl CommandType for MergeTickets {
                 kind: "duplicate_ticket_not_mergeable".into(),
             },
             (Some(_), Some(_)) => {
-                let primary_company =
-                    company_id_for_ticket(matching_events, &payload.primary_ticket_id)
-                        .expect("a ticket with any status has a TicketCreated in its own history");
-                let duplicate_company =
-                    company_id_for_ticket(matching_events, &payload.duplicate_ticket_id)
-                        .expect("a ticket with any status has a TicketCreated in its own history");
-                if primary_company != duplicate_company {
+                let primary_company = primary.company_id();
+                if primary_company != duplicate.company_id() {
                     return CommandDecision::Rejected {
                         reason: "the two tickets belong to different companies".into(),
                         kind: "tickets_belong_to_different_companies".into(),
@@ -2320,14 +2567,34 @@ impl CommandType for RateTicket {
     fn rest_trigger_allowed() -> bool {
         true
     }
+    fn snapshot() -> Option<&'static str> {
+        Some(TicketSnapshot::NAME)
+    }
     fn decide(payload: &Self::Payload, matching_events: &[Self::Event]) -> CommandDecision {
-        let status = ticket_status(matching_events, &payload.ticket_id);
+        Self::decide_with(
+            payload,
+            &TicketFacts::of(matching_events, &payload.ticket_id),
+        )
+    }
+    fn decide_from_snapshot(
+        payload: &Self::Payload,
+        snapshot_state_json: &str,
+        events_since_snapshot: &[Self::Event],
+    ) -> CommandDecision {
+        decide_from_ticket_snapshot(
+            &payload.ticket_id,
+            snapshot_state_json,
+            events_since_snapshot,
+            |facts| Self::decide_with(payload, facts),
+        )
+    }
+}
+
+impl RateTicket {
+    fn decide_with(payload: &RateTicketPayload, facts: &TicketFacts) -> CommandDecision {
+        let status = facts.status;
         if status.is_some() {
-            if let Some(rejected) = reject_unless_requester(
-                matching_events,
-                &payload.ticket_id,
-                payload.requester_id.as_deref(),
-            ) {
+            if let Some(rejected) = facts.reject_unless_requester(payload.requester_id.as_deref()) {
                 return rejected;
             }
         }
@@ -2343,9 +2610,7 @@ impl CommandType for RateTicket {
                         kind: "invalid_rating".into(),
                     };
                 }
-                let already_rated = matching_events.iter().any(|e| {
-                    matches!(e, HelpdeskEvent::TicketRated(p) if p.ticket_id == payload.ticket_id)
-                });
+                let already_rated = facts.rated;
                 if already_rated {
                     return CommandDecision::Rejected {
                         reason: format!("ticket {} has already been rated", payload.ticket_id),
@@ -2357,8 +2622,7 @@ impl CommandType for RateTicket {
                         event_type: "TicketRated".into(),
                         payload: serde_json::json!({
                             "ticket_id": payload.ticket_id,
-                            "company_id": company_id_for_ticket(matching_events, &payload.ticket_id)
-                                .expect("a ticket with any status has a TicketCreated in its own history"),
+                            "company_id": facts.company_id(),
                             "rating": payload.rating,
                             "comment": payload.comment,
                             "requester_id": payload.requester_id,
@@ -2445,8 +2709,32 @@ impl CommandType for AddInternalNote {
             },
         ]
     }
+    fn snapshot() -> Option<&'static str> {
+        Some(TicketSnapshot::NAME)
+    }
     fn decide(payload: &Self::Payload, matching_events: &[Self::Event]) -> CommandDecision {
-        match ticket_status(matching_events, &payload.ticket_id) {
+        Self::decide_with(
+            payload,
+            &TicketFacts::of(matching_events, &payload.ticket_id),
+        )
+    }
+    fn decide_from_snapshot(
+        payload: &Self::Payload,
+        snapshot_state_json: &str,
+        events_since_snapshot: &[Self::Event],
+    ) -> CommandDecision {
+        decide_from_ticket_snapshot(
+            &payload.ticket_id,
+            snapshot_state_json,
+            events_since_snapshot,
+            |facts| Self::decide_with(payload, facts),
+        )
+    }
+}
+
+impl AddInternalNote {
+    fn decide_with(payload: &AddInternalNotePayload, facts: &TicketFacts) -> CommandDecision {
+        match facts.status {
             None => CommandDecision::Rejected {
                 reason: format!("ticket {} does not exist", payload.ticket_id),
                 kind: "ticket_not_found".into(),
@@ -2456,8 +2744,7 @@ impl CommandType for AddInternalNote {
                     event_type: "TicketInternalNoteAdded".into(),
                     payload: serde_json::json!({
                         "ticket_id": payload.ticket_id,
-                        "company_id": company_id_for_ticket(matching_events, &payload.ticket_id)
-                            .expect("a ticket with any status has a TicketCreated in its own history"),
+                        "company_id": facts.company_id(),
                         "staff_id": payload.staff_id,
                         "note": payload.note,
                     }),
@@ -2621,7 +2908,7 @@ impl Projection for TicketSummary {
             // Only the duplicate's own instance (this projection is
             // keyed per-ticket, so `key` tells the two fanned-out calls
             // apart - see `keys` above) becomes "merged"; the primary's
-            // own instance is untouched, matching `ticket_status`'s own
+            // own instance is untouched, matching `TicketFacts`'s own
             // treatment in this file's command-decision helpers.
             HelpdeskEvent::TicketsMerged(p) => {
                 if key == p.duplicate_ticket_id {
@@ -2764,7 +3051,7 @@ impl Projection for CompanyActiveTickets {
             HelpdeskEvent::TicketCreated(p) => vec![p.company_id.clone()],
             // Every ticket-lifecycle event past creation now carries its
             // own `company_id` too (stamped by each command's own
-            // `decide()` via `company_id_for_ticket` - see that
+            // `decide()` via `TicketFacts::company_id` - see that
             // function's doc comment) precisely so this projection's
             // instance key is always the real company, not a stand-in.
             HelpdeskEvent::TicketAssigned(p) => vec![p.company_id.clone()],
