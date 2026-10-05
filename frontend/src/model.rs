@@ -4,10 +4,10 @@
 //! - see `Cargo.toml`'s own doc comment.
 //!
 //! A ticket is two reads joined by `ticket_id`: its lifecycle from the
-//! company's `CompanyTicketQueue`, and what its customer wrote from that
+//! company's `CompanyActiveTickets`, and what its customer wrote from that
 //! customer's own `CustomerTickets` row. The second is encrypted per
 //! customer, which is why it can't live in the company-keyed first one
-//! (see `CompanyTicketQueue`'s doc comment on the backend).
+//! (see `CompanyActiveTickets`'s doc comment on the backend).
 //!
 //! No `…State` wrappers here, on purpose: `api::query_projection` already
 //! resolves down to the `tickets` field's own inner JSON (a plain

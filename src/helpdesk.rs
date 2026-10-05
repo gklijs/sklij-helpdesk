@@ -50,7 +50,7 @@
 //! varied traffic to show, grounded in how real helpdesk tools work
 //! (SLA-breach escalation, ticket merging, CSAT, internal notes), not
 //! invented for their own sake. `TicketInternalNoteAdded` is the one
-//! deliberately kept out of `CompanyTicketQueue`/`CustomerTickets`/
+//! deliberately kept out of `CompanyActiveTickets`/`CustomerTickets`/
 //! `TicketSummary` below - both of the frontend's eager reads are visible
 //! to customers, so an internal note in either, relying on the frontend
 //! to filter it back out, would reach them with no server-side
@@ -119,7 +119,7 @@ pub const CUSTOMER_SUBJECT: &str = "customer";
 /// fold the ciphertext as is, and skilj decrypts a projection row only
 /// against its own key, so every one of these fields lives in
 /// `CustomerTickets`, keyed by `requester_id`, and none in the
-/// company-keyed `CompanyTicketQueue`.
+/// company-keyed `CompanyActiveTickets`.
 fn customer_fields(fields: &[&str]) -> Vec<SensitiveField> {
     fields
         .iter()
@@ -709,7 +709,7 @@ pub struct TicketInternalNoteAddedPayload {
 pub struct TicketInternalNoteAdded;
 
 /// Not in the original spec - a staff-only note. Deliberately never
-/// folded into `CompanyTicketQueue`/`CustomerTickets`/`TicketSummary`
+/// folded into `CompanyActiveTickets`/`CustomerTickets`/`TicketSummary`
 /// (see this file's own module doc comment on why keeping it structurally
 /// separate, rather than tagging entries "internal" for the frontend to
 /// filter, is what keeps it from customers).
@@ -735,7 +735,7 @@ impl EventType for TicketInternalNoteAdded {
     /// projection's own doc comment) needs a "company" tag on *some*
     /// consuming event to derive an owner from, and this is the only
     /// one it consumes at all - `TicketCreated`'s own "company" tag
-    /// alone isn't enough here, since `TicketSummary`/`CompanyTicketQueue`
+    /// alone isn't enough here, since `TicketSummary`/`CompanyActiveTickets`
     /// consume `TicketCreated` but `TicketInternalNotes` deliberately
     /// doesn't (see this file's own module doc comment on why).
     fn tag_mappings() -> Vec<TagMapping> {
@@ -1004,7 +1004,7 @@ fn company_tenant(matching_events: &[HelpdeskEvent], company_id: &str) -> Option
 /// `TicketCreated` carries both the "ticket" and "company" tags - see
 /// its own `tag_mappings` doc comment). Every ticket-lifecycle command
 /// past creation itself uses this to stamp `company_id` onto the event
-/// it emits, which is what lets `CompanyTicketQueue` below fold every
+/// it emits, which is what lets `CompanyActiveTickets` below fold every
 /// ticket event for one ticket into the correct per-company projection
 /// instance - `AssignTicket`/`ResolveTicket`/etc.'s own payloads never
 /// carried `company_id` as caller input (there's no reason to trust a
@@ -2648,7 +2648,7 @@ pub struct TicketMessage {
 }
 
 /// A ticket's lifecycle, with nothing its customer wrote - see
-/// `CompanyTicketQueue`.
+/// `CompanyActiveTickets`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 pub struct TicketQueueEntry {
     pub ticket_id: String,
@@ -2664,12 +2664,20 @@ pub struct TicketQueueEntry {
 }
 
 #[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
-pub struct CompanyTicketQueueState {
+pub struct CompanyActiveTicketsState {
     pub tickets: std::collections::HashMap<String, TicketQueueEntry>,
 }
 
-/// Keyed by `company_id`: every ticket of one company, for the staff
-/// queue and for the customer view's status column.
+/// Keyed by `company_id`: every ticket of one company that can still
+/// change, for the staff queue and for the customer view's status column.
+///
+/// A ticket leaves once nothing can happen to it any more: a merged
+/// duplicate right away, a closed ticket once it carries a rating
+/// (`CustomerRatesTicket` still accepts a closed, unrated ticket, and
+/// this is the read the customer rates from). Without that, one row held
+/// every ticket a company ever had, and skilj rewrites the whole row on
+/// every fold - see `docs/partitioned-projection-report-2026-10-05.md`.
+/// A closed ticket nobody rates still stays.
 ///
 /// Holds no customer-written text, on purpose. That text is encrypted
 /// under each customer's own key (`customer_fields`), and skilj decrypts
@@ -2680,17 +2688,29 @@ pub struct CompanyTicketQueueState {
 /// Replaces `CompanyTicketList`, which held that text in plaintext. A
 /// registered projection can't lose a field (skilj's schema compatibility
 /// rule), so this is a new projection rather than a slimmed-down old one;
-/// the old one's stored state is no longer registered or updated.
+/// the old one's stored state is no longer registered or updated. It was
+/// `CompanyTicketQueue` before tickets started leaving it, renamed rather
+/// than kept so a fresh fold from history drops the finished tickets
+/// already stored - the schema didn't change, so skilj would not have
+/// rebuilt it on its own.
 ///
 /// What a customer still sees through this: the ids, statuses and
 /// requester ids of their company's other tickets, never their content.
-pub struct CompanyTicketQueue;
+///
+/// Async, unlike every other projection here (issue #15): it's the one
+/// read whose key (a company) every ticket event of that company
+/// contends on - the obvious candidate for `PARTITION_COUNT`. The cost
+/// is read-your-writes: a ticket just created can be missing from this
+/// queue for up to one `async_projection_poll_interval`, which is why
+/// the frontend's dashboard refetches once more after every write
+/// (`refresh_after_write`).
+pub struct CompanyActiveTickets;
 
 #[auto_register(BOUNDED_CONTEXT)]
-impl Projection for CompanyTicketQueue {
-    type State = CompanyTicketQueueState;
+impl Projection for CompanyActiveTickets {
+    type State = CompanyActiveTicketsState;
     type Event = HelpdeskEvent;
-    const NAME: &'static str = "CompanyTicketQueue";
+    const NAME: &'static str = "CompanyActiveTickets";
     /// See `TicketSummary`'s own doc comment - identical fix, identical
     /// reasoning. Keyed by `company_id` itself here (unlike
     /// `TicketSummary`'s `ticket_id`), so the derived owner ends up
@@ -2711,9 +2731,14 @@ impl Projection for CompanyTicketQueue {
             "TicketRated",
         ]
     }
-    fn sync() -> bool {
-        true
-    }
+    /// Lets up to this many `server` instances sharing one database
+    /// fold disjoint slices of the queue concurrently, instead of each
+    /// redoing all of it. Only helps with more than one instance, and
+    /// only up to the number of companies in a context: keys are
+    /// companies, so a per-company tenant context (one key) always
+    /// lands in a single partition. Rebuilds stay single-instance
+    /// regardless. See `docs/partitioned-projection-report-2026-10-05.md`.
+    const PARTITION_COUNT: u32 = 4;
     fn keys(event: &Self::Event) -> Vec<String> {
         match event {
             HelpdeskEvent::CompanySignedUp(_)
@@ -2771,7 +2796,7 @@ impl Projection for CompanyTicketQueue {
             | HelpdeskEvent::CompanyExpired(_)
             | HelpdeskEvent::CompanyTenantProvisioned(_)
             // A lifecycle mirror carries no ticket - see
-            // `CompanyTicketQueue::keys`'s own comment on the same event.
+            // `CompanyActiveTickets::keys`'s own comment on the same event.
             | HelpdeskEvent::CompanyLifecycleMirrored(_)
             | HelpdeskEvent::TicketInternalNoteAdded(_) => {}
             HelpdeskEvent::TicketCreated(p) => {
@@ -2800,8 +2825,18 @@ impl Projection for CompanyTicketQueue {
                 set_status(&p.ticket_id, "waiting_on_customer")
             }
             HelpdeskEvent::TicketCustomerResponded(p) => set_status(&p.ticket_id, "in_progress"),
-            HelpdeskEvent::TicketClosed(p) => set_status(&p.ticket_id, "closed"),
-            HelpdeskEvent::TicketsMerged(p) => set_status(&p.duplicate_ticket_id, "merged"),
+            HelpdeskEvent::TicketClosed(p) => {
+                if let Some(entry) = state.tickets.get_mut(&p.ticket_id) {
+                    if entry.rating.is_some() {
+                        state.tickets.remove(&p.ticket_id);
+                    } else {
+                        entry.status = "closed".into();
+                    }
+                }
+            }
+            HelpdeskEvent::TicketsMerged(p) => {
+                state.tickets.remove(&p.duplicate_ticket_id);
+            }
             HelpdeskEvent::TicketEscalated(p) => {
                 if let Some(entry) = state.tickets.get_mut(&p.ticket_id) {
                     entry.priority = priority_str(p.new_priority).to_string();
@@ -2810,7 +2845,11 @@ impl Projection for CompanyTicketQueue {
             }
             HelpdeskEvent::TicketRated(p) => {
                 if let Some(entry) = state.tickets.get_mut(&p.ticket_id) {
-                    entry.rating = Some(p.rating);
+                    if entry.status == "closed" {
+                        state.tickets.remove(&p.ticket_id);
+                    } else {
+                        entry.rating = Some(p.rating);
+                    }
                 }
             }
         }
@@ -2848,7 +2887,7 @@ pub struct CustomerTicketsState {
 /// forgotten (`CUSTOMER_SUBJECT`), nobody can decrypt it any more.
 ///
 /// Only the four events that carry customer text are consumed; status and
-/// the rest come from `CompanyTicketQueue`. Events stored before
+/// the rest come from `CompanyActiveTickets`. Events stored before
 /// `TicketInfoRequested`/`TicketRated` carried a `requester_id` are
 /// skipped - their plaintext isn't erasable either way.
 pub struct CustomerTickets;
@@ -2953,7 +2992,7 @@ pub struct TicketInternalNotesState {
 }
 
 /// Keyed by `ticket_id`. A *separate* projection from `TicketSummary`/
-/// `CompanyTicketQueue`/`CustomerTickets`, on purpose: those are what
+/// `CompanyActiveTickets`/`CustomerTickets`, on purpose: those are what
 /// `frontend/` fetches eagerly to render a ticket at all, for customers
 /// too, so keeping `TicketInternalNoteAdded` out of them is what keeps
 /// it from customers (see that event's own doc comment). This projection exists
@@ -2964,7 +3003,7 @@ pub struct TicketInternalNotesState {
 /// **Both the cross-company and the same-company staff-vs-customer gaps
 /// are now closed.** A security review found this projection (and
 /// `TicketSummary`/`CompanyTicketList`, since replaced by
-/// `CompanyTicketQueue`/`CustomerTickets`) readable by any Role with *any*
+/// `CompanyActiveTickets`/`CustomerTickets`) readable by any Role with *any*
 /// mapping on the bounded context, regardless of which company the
 /// queried key actually belonged to - `skilj-graphql`'s
 /// `require_read_mapping` checked only that. skilj's own fix
@@ -3075,7 +3114,7 @@ pub struct TenantDirectory;
 ///
 /// **Not an access-control boundary.** It carries no `OWNER_TAG_KEY`,
 /// deliberately: this is an infrastructure mapping, and unlike
-/// `CompanyTicketQueue`/`TicketSummary` there is no company data in it to
+/// `CompanyActiveTickets`/`TicketSummary` there is no company data in it to
 /// protect - it says which bounded context holds a company, not anything
 /// about the company. It is readable by anyone with an Admin mapping on
 /// the shared `helpdesk` context, which is the same audience that can

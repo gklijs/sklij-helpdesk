@@ -76,9 +76,10 @@ skilj destroys the key, so that customer's data reads back as
 ciphertext everywhere from then on, and their pending auto-close
 deadline is resolved as `forgotten` (`tests/customer_erasure.rs`).
 
-That's why the frontend reads two projections. `CompanyTicketQueue`
+That's why the frontend reads two projections. `CompanyActiveTickets`
 (per company) has each ticket's status, priority and assignee, but no
-text. `CustomerTickets` (per customer) has the content. skilj decrypts a
+text. It only holds tickets that can still change: a merged duplicate
+leaves at once, and a closed ticket leaves once it's rated. `CustomerTickets` (per customer) has the content. skilj decrypts a
 projection row only against its own key: a customer reads their own row
 because their IdP subject is their `requester_id`, and staff read every
 row through `can_read_sensitive`. Another customer of the same company
@@ -86,7 +87,8 @@ sees only ciphertext.
 
 Not covered: ticket text stored before this was introduced stays
 plaintext (skilj has no backfill), and so does the retired
-`CompanyTicketList` projection's last stored state. Internal notes are
+`CompanyTicketList` projection's last stored state. The also-retired
+`CompanyTicketQueue` holds no text. Internal notes are
 staff-written and gated separately (`TEAM_ONLY`), not encrypted. The
 frontend can't tell ciphertext from text, so an erased customer's
 tickets show base64 rather than "erased".
@@ -253,6 +255,11 @@ panels moving hard, e.g.:
 ```sh
 SEED_DEMO_TRAFFIC=1 SEED_DEMO_CONCURRENCY=10 SEED_DEMO_INTERVAL_MS=200 cargo run --bin server
 ```
+
+`SEED_DEMO_COMPANIES=N` (default 3) spreads the tickets over `N`
+companies instead. Only a load test of the partitioned
+`CompanyActiveTickets` needs this. That projection is keyed by company, so it
+can use at most as many partitions as there are companies.
 
 Start `server` itself with short deadlines
 (`TRIAL_DURATION_DAYS=0 AUTO_CLOSE_AFTER_DAYS=0 cargo run --bin
@@ -441,7 +448,7 @@ surfaced five real bugs, each confirmed failing first, then fixed:
    this project, fixed in skilj itself (`RoleAccessMapping.scope` +
    `Projection`/`EventType`/`CommandType.OWNER_TAG_KEY` —
    `docs/architecture.md` §23–26 in the `skilj` repo), adopted here for
-   `TicketSummary`/`CompanyTicketList` (since `CompanyTicketQueue`/`CustomerTickets`)/`TicketInternalNotes` and the demo
+   `TicketSummary`/`CompanyTicketList` (since `CompanyActiveTickets`/`CustomerTickets`)/`TicketInternalNotes` and the demo
    customer Role — `tests/cross_company_projection_scoping.rs` proves the
    cross-company half live. The remaining role-type axis — a customer
    reading *their own* company's internal notes — stayed open until

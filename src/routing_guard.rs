@@ -49,16 +49,16 @@ const TENANT_DIRECTORY: &str = "TenantDirectory";
 /// recognised as ticket traffic.
 ///
 /// An exhaustive list rather than a prefix rule: `helpdesk.rs` names
-/// Ticket projections `TicketSummary`, `CompanyTicketQueue`,
+/// Ticket projections `TicketSummary`, `CompanyActiveTickets`,
 /// `CustomerTickets` and `TicketInternalNotes` - inconsistently, because
 /// they're keyed per ticket, per company and per customer. A
 /// `name.starts_with("Ticket")` rule would catch two of the four and
-/// miss `CompanyTicketQueue`/`CustomerTickets`, precisely the reads the
+/// miss `CompanyActiveTickets`/`CustomerTickets`, precisely the reads the
 /// dashboard makes on every load, so the miss would be invisible until a
 /// company with a tenant loaded an empty dashboard.
 const TICKET_PROJECTIONS: &[&str] = &[
     "TicketSummary",
-    "CompanyTicketQueue",
+    "CompanyActiveTickets",
     "CustomerTickets",
     "TicketInternalNotes",
 ];
@@ -132,7 +132,7 @@ pub fn classify_projection_name(name: &str) -> NameClass {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Subject {
     /// The request names a company directly - `CreateTicket`'s payload
-    /// carries `company_id`, and `CompanyTicketQueue` is keyed by it.
+    /// carries `company_id`, and `CompanyActiveTickets` is keyed by it.
     Company(String),
     /// A read of this projection row, whose company is the row's owner.
     ///
@@ -326,7 +326,7 @@ pub async fn tenant_for_company(
 ///
 /// Only `company_id` is looked for, and only at the top level. That is
 /// enough for `CreateTicket` - the one command that both names a company
-/// and starts a company's ticket history - and for the `CompanyTicketQueue`
+/// and starts a company's ticket history - and for the `CompanyActiveTickets`
 /// read. A `CustomerTickets` read reports the row whose owner to look up.
 /// Everything else reports `Unattributed`, which the caller then refuses
 /// conservatively rather than guessing a company from a `ticket_id`.
@@ -340,7 +340,7 @@ pub fn subject_of(
             .and_then(|payload| payload["company_id"].as_str())
             .map(|company_id| Subject::Company(company_id.to_string()))
             .unwrap_or(Subject::Unattributed),
-        Guarded::Projection(name) if name == "CompanyTicketQueue" => projection_key
+        Guarded::Projection(name) if name == "CompanyActiveTickets" => projection_key
             .map(|key| Subject::Company(key.to_string()))
             .unwrap_or(Subject::Unattributed),
         Guarded::Projection(name) if name == CUSTOMER_TICKETS => projection_key
@@ -738,7 +738,7 @@ async fn check_request(
     // (a customer before their first ticket) holds nothing, so reading it
     // from the shared context can neither split nor leak a history: it is
     // let through. A company with a tenant that does this still gets its
-    // misrouting refused, on the `CompanyTicketQueue` read the dashboard
+    // misrouting refused, on the `CompanyActiveTickets` read the dashboard
     // makes alongside it.
     let subject = match subject {
         Subject::OwnerOfRow { projection, key } => {
@@ -930,7 +930,7 @@ mod tests {
     fn a_company_with_a_tenant_cannot_read_tickets_from_the_shared_context() {
         // Both of the frontend's company-keyed and ticket-keyed reads.
         for name in [
-            "CompanyTicketQueue",
+            "CompanyActiveTickets",
             "CustomerTickets",
             "TicketInternalNotes",
             "TicketSummary",
@@ -1058,13 +1058,13 @@ mod tests {
 
         let query = format!(
             "query {{ projection(boundedContext: {BOUNDED_CONTEXT:?}, name: \
-             \"CompanyTicketQueue\", key: {COMPANY:?}) {{ ... on helpdesk_CompanyTicketQueue \
+             \"CompanyActiveTickets\", key: {COMPANY:?}) {{ ... on helpdesk_CompanyActiveTickets \
              {{ tickets }} }} }}"
         );
         assert_eq!(
             intention(&serde_json::json!({ "query": query })),
             Intention::SharedContext {
-                traffic: Guarded::Projection("CompanyTicketQueue".into()),
+                traffic: Guarded::Projection("CompanyActiveTickets".into()),
                 subject: Subject::Company(COMPANY.into()),
             }
         );
@@ -1235,7 +1235,7 @@ mod tests {
         assert_eq!(created, Subject::Company(COMPANY.into()));
 
         let listed = subject_of(
-            &Guarded::Projection("CompanyTicketQueue".into()),
+            &Guarded::Projection("CompanyActiveTickets".into()),
             None,
             Some(COMPANY),
         );
@@ -1306,7 +1306,7 @@ mod tests {
         // guard and split a company's reads across two contexts.
         for name in [
             "TicketSummary",
-            "CompanyTicketQueue",
+            "CompanyActiveTickets",
             "CustomerTickets",
             "TicketInternalNotes",
         ] {

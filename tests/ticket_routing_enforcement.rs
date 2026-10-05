@@ -143,10 +143,10 @@ fn create_ticket_query(company_id: &str, context: &str) -> String {
     )
 }
 
-/// A `CompanyTicketQueue` read exactly as the frontend spells it.
+/// A `CompanyActiveTickets` read exactly as the frontend spells it.
 fn ticket_list_query(company_id: &str, context: &str) -> String {
     format!(
-        r#"query {{ projection(boundedContext: {context:?}, name: "CompanyTicketQueue", key: {company_id:?}) {{ ... on helpdesk_CompanyTicketQueue {{ tickets }} }} }}"#
+        r#"query {{ projection(boundedContext: {context:?}, name: "CompanyActiveTickets", key: {company_id:?}) {{ ... on helpdesk_CompanyActiveTickets {{ tickets }} }} }}"#
     )
 }
 

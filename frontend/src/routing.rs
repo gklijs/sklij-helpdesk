@@ -71,8 +71,8 @@ impl TicketContext {
     ///
     /// skilj builds these as `<bounded_context>_<projection>`
     /// (`skilj-graphql`'s own `graphql_type_name`), so a tenant read has
-    /// to ask for `company_acme_…_CompanyTicketQueue`, not
-    /// `helpdesk_CompanyTicketQueue`. Getting this wrong does not fail
+    /// to ask for `company_acme_…_CompanyActiveTickets`, not
+    /// `helpdesk_CompanyActiveTickets`. Getting this wrong does not fail
     /// loudly - the inline fragment simply matches no type and the
     /// response comes back without the field - so it is derived from the
     /// same `bounded_context` rather than hard-coded at the call site.
