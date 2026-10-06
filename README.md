@@ -101,6 +101,23 @@ staff-written and gated separately (`TEAM_ONLY`), not encrypted. The
 frontend can't tell ciphertext from text, so an erased customer's
 tickets show base64 rather than "erased".
 
+### Inbound email over NATS
+
+Customers can email the helpdesk: `support+<company_id>@...` opens a
+ticket, `ticket+<ticket_id>@...` answers one that's waiting on them.
+`src/bin/email-bridge.rs` reads emails from a NATS JetStream stream and
+uses skilj's own broker bridge, `skilj-nats`, to trigger `CreateTicket`
+and `CustomerRespondsToTicket`. The bridge takes care of retries,
+`Idempotency-Key` and parking failed deliveries. Everything is keyed on
+a hash of the email's `Message-ID`, so a second copy of the same email
+changes nothing, and that key is recorded as the events' correlation
+id. Emails it can't place stay on `helpdesk.email.unroutable` with the
+reason. An email customer is identified by address (`email:<address>`),
+separately from their portal login. It only works with the shared
+`helpdesk` context, not per-company tenants. `src/email_channel.rs`
+covers the design and its gaps, and `tests/email_channel.rs` runs it
+end to end against a real NATS server in Docker.
+
 ### Changing a projection: zero-downtime rebuilds
 
 `TicketSummary` gained `first_responder_staff_id` (the staff member
@@ -162,6 +179,8 @@ gap from step 5, so it will fail once skilj fixes it.
 | `src/bin/engagement-watcher.rs` | Sweeps for companies whose customers have gone quiet and records an engagement decline (`activity` context) |
 | `src/bin/provisioner.rs` | Reacts to `CompanySignedUp` by provisioning the company's own tenant bounded context |
 | `src/bin/lifecycle-replicator.rs` | Mirrors a company's lifecycle (trial/active/expired) into its tenant context |
+| `src/email_channel.rs` | Inbound email: which command an email becomes, plus the JetStream translator loop |
+| `src/bin/email-bridge.rs` | Turns emails on NATS JetStream into tickets and replies, via `skilj-nats` |
 | `tests/` | Integration tests (real HTTP, real Postgres) — split into several files by concern; see `tests/company.rs`'s own doc comment for why |
 | `dex/config.yaml` | The real OIDC provider's config (two demo logins) |
 | `frontend/` | The Leptos (WASM) web app |
@@ -235,9 +254,19 @@ seam `src/bin/alerter.rs`'s own module doc comment describes.
 (a real `POST {"text": ...}`) against a fake webhook receiver, not a
 real Slack workspace — that part's on you to point at your own.
 
+**5. Optionally, the email bridge** — needs a NATS server with
+JetStream (`nats-server -js`, or `docker run -p 4222:4222 nats -js`), and
+also prints its env vars when `server` starts:
+
+```sh
+cargo run --bin email-bridge
+```
+
 **Tests**: `cargo test` — real integration tests against a real (or
 [`postgresql_embedded`](https://crates.io/crates/postgresql_embedded))
 Postgres; DB-dependent ones skip cleanly if neither is reachable.
+`tests/email_channel.rs` also needs Docker, for its NATS server, and
+skips without it.
 `cargo test --test fixture` runs just the domain rules - every
 command's accept/reject paths and every projection fold, through
 `skilj-test-fixture`, with no database (`tests/fixture/`), so those
