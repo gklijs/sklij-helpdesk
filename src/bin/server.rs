@@ -1107,9 +1107,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(90);
+    // Connections the pool opens up front and keeps open. 0 (sqlx's own
+    // default) lets the pool grow on demand, and under the full load
+    // ramp it never grew past 14. skilj's
+    // `pool_options_performance_optimized()` keeps half its max warm;
+    // docs/pool-tuning-report-2026-10-06.md measured that and found the
+    // warm connections sat idle for no throughput gain.
+    let db_min_connections: u32 = std::env::var("DATABASE_MIN_CONNECTIONS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
     let pool = db::connect_with(
         &database_url,
-        db::PgPoolOptions::new().max_connections(db_max_connections),
+        db::PgPoolOptions::new()
+            .max_connections(db_max_connections)
+            .min_connections(db_min_connections),
     )
     .await?;
     db::migrate(&pool).await?;
