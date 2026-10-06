@@ -15,6 +15,7 @@ pub mod alerting;
 pub mod demo_seed;
 pub mod helpdesk;
 pub mod marketing;
+pub mod parked_deliveries;
 pub mod routing;
 pub mod routing_guard;
 pub mod scheduling;

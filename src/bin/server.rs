@@ -67,7 +67,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use chrono::Utc;
 use jsonwebtoken::{EncodingKey, Header};
-use opentelemetry::metrics::Counter;
+use opentelemetry::metrics::{Counter, Gauge};
 use opentelemetry::KeyValue;
 use rsa::pkcs1::EncodeRsaPrivateKey;
 use rsa::traits::PublicKeyParts;
@@ -107,6 +107,17 @@ static TICKET_RATINGS: LazyLock<Counter<u64>> = LazyLock::new(|| {
     opentelemetry::global::meter("skilj-helpdesk")
         .u64_counter("skilj_helpdesk.ticket.ratings")
         .with_description("CSAT ratings recorded via RateTicket, by rating value (1-5).")
+        .build()
+});
+
+// --- Parked deliveries - see run_parked_deliveries_gauge_loop ---
+static PARKED_DELIVERIES: LazyLock<Gauge<u64>> = LazyLock::new(|| {
+    opentelemetry::global::meter("skilj-helpdesk")
+        .u64_gauge("skilj_helpdesk.parked_deliveries")
+        .with_description(
+            "Deliveries skilj gave up on and parked, awaiting retryParkedDelivery or \
+             discardParkedDelivery - by bounded context, kind, and source.",
+        )
         .build()
 });
 
@@ -523,6 +534,42 @@ async fn run_tenant_access_reconciler(pool: skilj_core::db::Pool, ops_role: Role
     const POLL_INTERVAL: Duration = Duration::from_secs(5);
     loop {
         skilj_helpdesk::tenant_access::reconcile_all_tenants(&pool, &ops_role).await;
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
+}
+
+/// Samples every bounded context's parked deliveries into
+/// `PARKED_DELIVERIES` (`skilj_helpdesk::parked_deliveries`'s own doc
+/// comment for what parks and why it needs watching). Reads the database
+/// directly rather than `parkedDeliveries` over GraphQL: that query is
+/// admin-gated per context, and tenant contexts appear at runtime, so a
+/// GraphQL poller would need a grant on each one as it's provisioned.
+///
+/// 15s, not the 5s the other loops use: a park has already waited out
+/// its whole retry policy (minutes, by default), so a few more seconds
+/// changes nothing, and each tick reads every context.
+async fn run_parked_deliveries_gauge_loop(pool: skilj_core::db::Pool) {
+    const POLL_INTERVAL: Duration = Duration::from_secs(15);
+    let mut previous = std::collections::BTreeMap::new();
+    loop {
+        match skilj_helpdesk::parked_deliveries::sample(&pool).await {
+            Ok(current) => {
+                for (key, count) in
+                    skilj_helpdesk::parked_deliveries::with_cleared(&previous, &current)
+                {
+                    PARKED_DELIVERIES.record(
+                        count,
+                        &[
+                            KeyValue::new("bounded_context", key.bounded_context),
+                            KeyValue::new("kind", key.kind),
+                            KeyValue::new("source", key.source),
+                        ],
+                    );
+                }
+                previous = current;
+            }
+            Err(e) => eprintln!("parked deliveries: sample failed, will retry: {e}"),
+        }
         tokio::time::sleep(POLL_INTERVAL).await;
     }
 }
@@ -1625,6 +1672,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 run_multi_tenant_csat_loop(&mt_client, &mt_base_url, mt_config, mt_key_pair).await;
             });
         }
+    }
+
+    // Same gate as the CSAT loop: without a MeterProvider the gauge
+    // records into a no-op meter, so there is nothing to sample for.
+    if telemetry.is_some() {
+        println!("recording parked deliveries as a real metric (skilj_helpdesk_parked_deliveries)");
+        let parked_pool = pool.clone();
+        tokio::spawn(async move { run_parked_deliveries_gauge_loop(parked_pool).await });
     }
 
     // Keep each company's access grants mirrored into its own tenant -
