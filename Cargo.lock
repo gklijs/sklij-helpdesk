@@ -3399,6 +3399,7 @@ dependencies = [
  "serde_json",
  "skilj",
  "skilj-core",
+ "skilj-retry",
  "skilj-test-fixture",
  "sqlx",
  "tokio",

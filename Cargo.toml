@@ -108,3 +108,7 @@ skilj-test-fixture = "0.0.9"
 # skilj 0.0.9's own Cargo.toml, so it resolves to the copy skilj-core already
 # builds; features are unified with skilj-core's own.
 sqlx = { version = "0.9", default-features = false, features = ["postgres"] }
+# tests/parked_deliveries.rs only - `SkiljBuilder::cross_context_route_retry_policy`
+# takes a `skilj_retry::RetryPolicy`, which `skilj` doesn't re-export.
+# Same version skilj 0.0.9 already depends on.
+skilj-retry = "0.0.9"

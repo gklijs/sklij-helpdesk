@@ -283,6 +283,39 @@
       ],
       "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
       "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "orientation": "horizontal" }
+    },
+
+    { "id": 60, "type": "row", "title": "Parked deliveries (skilj_helpdesk.parked_deliveries)", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 58 } },
+    {
+      "id": 61, "type": "stat", "title": "Parked deliveries",
+      "description": "Route/deadline commands skilj retried, gave up on, and parked - nothing redelivers them until an operator calls retryParkedDelivery or discardParkedDelivery (see src/parked_deliveries.rs). Anything above zero needs a look; the 'Parked deliveries' alert rule fires on the same query.",
+      "gridPos": { "h": 8, "w": 6, "x": 0, "y": 59 },
+      "datasource": { "type": "prometheus", "uid": "skilj-prometheus" },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "skilj-prometheus" },
+          "expr": "sum(skilj_helpdesk_parked_deliveries) or vector(0)", "refId": "A" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short", "decimals": 0,
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 1 } ] }
+        },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background", "graphMode": "none" }
+    },
+    {
+      "id": 62, "type": "timeseries", "title": "Parked deliveries by context and source",
+      "description": "Which route or schedule is parking, and in which bounded context (tenant contexts included) - the boundedContext and source to look under with parkedDeliveries.",
+      "gridPos": { "h": 8, "w": 18, "x": 6, "y": 59 },
+      "datasource": { "type": "prometheus", "uid": "skilj-prometheus" },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "skilj-prometheus" },
+          "expr": "sum by (bounded_context, source) (skilj_helpdesk_parked_deliveries) > 0",
+          "legendFormat": "{{bounded_context}} / {{source}}", "refId": "A" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short", "decimals": 0 }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
     }
   ]
 }

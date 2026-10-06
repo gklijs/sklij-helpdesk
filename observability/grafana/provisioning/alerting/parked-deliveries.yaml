@@ -1,0 +1,53 @@
+# Fires while anything is parked - see src/parked_deliveries.rs for what
+# parks and why nothing redelivers it on its own. Same query as the
+# dashboard's "Parked deliveries" stat panel. No contact point is
+# provisioned (none exists for this local stack), so it shows up under
+# Alerting > Alert rules and goes to Grafana's default policy.
+apiVersion: 1
+
+groups:
+  - orgId: 1
+    name: skilj-helpdesk
+    folder: skilj-helpdesk
+    interval: 1m
+    rules:
+      - uid: skilj-helpdesk-parked-deliveries
+        title: Parked deliveries
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: { from: 300, to: 0 }
+            datasourceUid: skilj-prometheus
+            model:
+              refId: A
+              expr: sum by (bounded_context, source) (skilj_helpdesk_parked_deliveries)
+              instant: true
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: reduce
+              expression: A
+              reducer: last
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator: { type: gt, params: [0] }
+        # A park has already outlasted its retry policy; one more
+        # evaluation just rules out a scrape caught mid-redrive.
+        for: 1m
+        noDataState: OK
+        execErrState: Error
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.bounded_context }}: parked deliveries from {{ $labels.source }}"
+          description: >-
+            skilj parked a delivery from {{ $labels.source }} in
+            {{ $labels.bounded_context }} after its retries ran out. List it
+            with parkedDeliveries(boundedContext: "{{ $labels.bounded_context }}"),
+            fix the cause, then retryParkedDelivery or discardParkedDelivery.
