@@ -13,6 +13,7 @@ pub mod activity;
 pub mod activity_scheduling;
 pub mod alerting;
 pub mod demo_seed;
+pub mod email_channel;
 pub mod helpdesk;
 pub mod marketing;
 pub mod parked_deliveries;

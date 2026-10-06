@@ -1566,6 +1566,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     println!("  cargo run --bin engagement-watcher");
 
+    println!(
+        "\nto run the email-bridge against this server (inbound email over NATS JetStream, \
+         see src/email_channel.rs):"
+    );
+    println!("  export SKILJ_BASE_URL=http://localhost:{port}");
+    println!("  export NATS_URL=nats://localhost:4222");
+    println!(
+        "  export CREATE_TICKET_TOKEN={}",
+        command_tokens["CreateTicket"]
+    );
+    println!(
+        "  export CUSTOMER_RESPONDS_TO_TICKET_TOKEN={}",
+        command_tokens["CustomerRespondsToTicket"]
+    );
+    println!("  cargo run --bin email-bridge");
+
     let rest = skilj.rest_router();
     let graphql = skilj.graphql_router().await?;
     // Permissive: this showcase's whole point is a real browser

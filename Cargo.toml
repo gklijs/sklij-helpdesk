@@ -26,6 +26,10 @@ path = "src/bin/lifecycle-replicator.rs"
 name = "provisioner"
 path = "src/bin/provisioner.rs"
 
+[[bin]]
+name = "email-bridge"
+path = "src/bin/email-bridge.rs"
+
 [dependencies]
 skilj = "0.0.9"
 skilj-core = "0.0.9"
@@ -92,6 +96,20 @@ opentelemetry_sdk = "0.33"
 opentelemetry-otlp = { version = "0.33", default-features = false, features = ["http-proto", "reqwest-blocking-client", "trace", "logs", "metrics"] }
 tracing-opentelemetry = "0.34"
 opentelemetry-appender-tracing = "0.33"
+# The inbound email channel (src/email_channel.rs, src/bin/email-bridge.rs).
+# skilj-nats does the NATS JetStream -> `POST /v1/commands/trigger` half
+# with its own retries, Idempotency-Key and parking; async-nats is the
+# same client it uses, for setting up the stream and for the translation
+# hop in front of it. Same versions skilj 0.0.9 depends on, so the
+# `PullConsumer` this crate builds is the type skilj-nats accepts.
+skilj-nats = "0.0.9"
+async-nats = "0.50"
+# The RetryPolicy skilj_nats::run_inbound_until takes - not re-exported
+# by skilj-nats.
+skilj-retry = "0.0.9"
+# Ticket ids and idempotency keys are derived from a hash of the email's
+# Message-ID, so a redelivered email maps to the same ticket.
+sha2 = "0.10"
 
 [dev-dependencies]
 postgresql_embedded = "0.21.0"
@@ -108,7 +126,6 @@ skilj-test-fixture = "0.0.9"
 # skilj 0.0.9's own Cargo.toml, so it resolves to the copy skilj-core already
 # builds; features are unified with skilj-core's own.
 sqlx = { version = "0.9", default-features = false, features = ["postgres"] }
-# tests/parked_deliveries.rs only - `SkiljBuilder::cross_context_route_retry_policy`
-# takes a `skilj_retry::RetryPolicy`, which `skilj` doesn't re-export.
-# Same version skilj 0.0.9 already depends on.
-skilj-retry = "0.0.9"
+# tests/email_channel.rs only - a real, throwaway NATS server in Docker,
+# the same way skilj-nats's own tests run against one.
+testcontainers-modules = { version = "0.15", features = ["nats"] }
