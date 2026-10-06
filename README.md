@@ -275,6 +275,48 @@ never skip.
 thing (no frontend unit tests this pass) — it's verified by actually
 running it (see below).
 
+## Operator consoles
+
+skilj ships two terminal consoles for running a deployment. Neither is
+part of this repo; install them with
+`cargo install skilj-tui skilj-inspector --version 0.0.9`.
+`scripts/dev.sh` prints both commands, filled in, when it starts.
+
+**`skilj-tui`** is a GraphQL client, so it goes through the same login
+and access checks as the frontend. It shows live events, queries events
+and projections, triggers commands, and retries or discards parked
+deliveries, all for one bounded context. It needs Admin on that context.
+
+- **With Dex:** log in as the demo operator, `operator@acme.example` /
+  `operator-demo-pw`. The server gives it Admin on `helpdesk` but no
+  `can_read_sensitive`, so customer text shows as ciphertext.
+  `scripts/operator-token.sh` gets a token with Dex's password grant,
+  and `--token-command` reruns it whenever the token expires:
+
+  ```sh
+  skilj-tui --endpoint http://localhost:8080/graphql \
+    --token-command scripts/operator-token.sh --bounded-context helpdesk
+  ```
+
+- **Without Dex** (the local JWT shortcut): pass the JWT the server
+  prints at startup as `--token`. It belongs to the bootstrap superadmin
+  and expires after an hour; restart the server for a new one.
+
+The customer and staff-lead logins only have Write access. With one of
+those, the Parked Deliveries tab shows `grant_not_active`, which is how
+skilj reports a grant below Admin.
+
+**`skilj-inspector`** reads Postgres directly, read-only, for when the
+server itself is down. It lists every bounded context (tenants
+included), registered types and projections, and the most recent 200
+events per context. It never decrypts sensitive fields. In 0.0.9 the
+Events tab's title says "newest first" but it lists those 200 oldest
+first.
+
+```sh
+skilj-inspector --database-url "$DATABASE_URL"
+```
+
 ## Telemetry & dashboards
 
 `skilj-core`/`skilj-rest`/`skilj` already emit real `tracing` spans and
