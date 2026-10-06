@@ -121,6 +121,21 @@ else
     echo "        See README.md's 'Build Dex once' step. Continuing without it."
 fi
 
+# --- operator consoles: printed, not started - both are full-screen
+#     TUIs, so they need their own terminal (README.md, "Operator
+#     consoles") ---
+echo "dev.sh: operator consoles, in another terminal once the server is up"
+echo "        (cargo install skilj-tui skilj-inspector --version 0.0.9):"
+if [ -n "$DEX_BIN" ]; then
+    echo "  skilj-tui --endpoint http://localhost:${PORT:-8080}/graphql \\"
+    echo "    --token-command $ROOT/scripts/operator-token.sh --bounded-context helpdesk"
+else
+    echo "  skilj-tui --endpoint http://localhost:${PORT:-8080}/graphql \\"
+    echo "    --token <the JWT the server prints below> --bounded-context helpdesk"
+fi
+echo "  skilj-inspector --database-url '$DATABASE_URL'"
+echo
+
 echo "dev.sh: starting the server..."
 echo
 # Backgrounded, then `wait`ed on - not run directly in the foreground.

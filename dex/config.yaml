@@ -40,11 +40,20 @@ staticClients:
     name: "SkilJ Helpdesk"
     public: true
 
+# The password grant, for command-line tools rather than the browser:
+# `scripts/operator-token.sh` uses it to hand `skilj-tui` a fresh JWT
+# (`--token-command`) without a browser login. Tokens are issued to the
+# same client as the frontend's, so they carry the audience the server
+# already accepts.
+oauth2:
+  passwordConnector: local
+
 # Real login, real password hashes (bcrypt, cost 10) - not a shortcut.
-# Two demo identities, one per side of the app: `userID` becomes the
+# Two demo identities, one per side of the app, plus an operator for
+# skilj-tui (last below): `userID` becomes the
 # OIDC `sub` claim, and is exactly what server.rs registers as this
 # session's skilj `Role.external_subject` (see that file's own
-# `DEMO_IDENTITIES`-adjacent notes) - so logging in as one of these two
+# `DEMO_IDENTITIES`-adjacent notes) - so logging in as one of the first two
 # accounts is what makes the frontend show the customer view vs. the
 # staff view.
 enablePasswordDB: true
@@ -61,3 +70,12 @@ staticPasswords:
     name: "Demo Support Lead"
     # bcrypt hash of "staff-demo-pw"
     hash: "$2a$10$IidJt9AMe.JmJGEjsbTK7uOArm5kcW7xJDsCzUhXvFrAuQ8LGkoAy"
+  # The operator, for skilj-tui (README.md, "Operator consoles"): Admin
+  # on the shared contexts, no access to customer data. Not a frontend
+  # login - the dashboard has nothing for this role.
+  - email: "operator@acme.example"
+    username: "operator-demo"
+    userID: "operator-demo"
+    name: "Demo Operator"
+    # bcrypt hash of "operator-demo-pw"
+    hash: "$2a$10$fYsGOptCRfHKK9L9DyTI0eB0r75TqBT9oypO1t1a6jKCf9zcfp4w."

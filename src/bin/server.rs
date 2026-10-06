@@ -62,6 +62,8 @@
 //! issues for each (captured once via a real login flow against that
 //! exact config - `DEMO_CUSTOMER_SUB`/`DEMO_STAFF_LEAD_SUB` below -
 //! deterministic for that config, not something computed at runtime).
+//! A third, `operator@acme.example` / `operator-demo-pw`, gets Admin for
+//! `skilj-tui` (`DEMO_OPERATOR_SUB`; README.md, "Operator consoles").
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
@@ -146,6 +148,9 @@ const DEX_AUDIENCE: &str = "skilj-helpdesk-frontend";
 // `id_token`'s own `sub` claim - not computed, not guessed.
 const DEMO_CUSTOMER_SUB: &str = "Cg1jdXN0b21lci1kZW1vEgVsb2NhbA";
 const DEMO_STAFF_LEAD_SUB: &str = "Cg9zdGFmZi1sZWFkLWRlbW8SBWxvY2Fs";
+// Same encoding, for `operator-demo`. Checked against a real password
+// grant's `id_token` (scripts/operator-token.sh).
+const DEMO_OPERATOR_SUB: &str = "Cg1vcGVyYXRvci1kZW1vEgVsb2NhbA";
 // `frontend/src/config.rs`'s own `DEMO_COMPANY_ID` - the walkthrough
 // company README.md's own "sign up the demo company" step creates.
 // This binary needs its own copy (no shared crate boundary between
@@ -1260,18 +1265,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // those. staff-lead stays unrestricted (`scope: None`) on
         // purpose: real support staff serve every company sharing this
         // one bounded context, not just one.
-        for (label, sub, scope, name) in [
+        //
+        // The operator is for `skilj-tui` (README.md, "Operator
+        // consoles"), which needs Admin on the context it opens. Admin,
+        // but no `can_read_sensitive`: running the deployment doesn't
+        // need customers' ticket text, so it sees ciphertext.
+        for (label, sub, scope, name, level) in [
             (
                 "customer",
                 DEMO_CUSTOMER_SUB,
                 Some(DEMO_COMPANY_ID.to_string()),
                 "customer",
+                AccessLevel::Write,
             ),
             (
                 "staff-lead",
                 DEMO_STAFF_LEAD_SUB,
                 None,
                 skilj_helpdesk::helpdesk::STAFF_TEAM,
+                AccessLevel::Write,
+            ),
+            (
+                "operator",
+                DEMO_OPERATOR_SUB,
+                None,
+                "operator",
+                AccessLevel::Admin,
             ),
         ] {
             // Staff read every customer's ticket content, which is
@@ -1282,7 +1301,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let demo_mapping = |role: Role| RoleAccessMapping {
                 role,
                 bounded_context: mapping.bounded_context.clone(),
-                level: AccessLevel::Write,
+                level,
                 can_read_sensitive,
                 scope: scope.clone(),
                 status: RoleStatus::Active,
@@ -1324,7 +1343,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 )
                 .await?;
                 match current {
-                    Some(current) if current.can_read_sensitive == can_read_sensitive => {}
+                    Some(current)
+                        if current.can_read_sensitive == can_read_sensitive
+                            && current.level == level => {}
                     current => {
                         if current.is_some() {
                             db::revoke_active_role_access_mapping(
