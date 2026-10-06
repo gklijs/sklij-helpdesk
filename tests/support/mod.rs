@@ -41,6 +41,8 @@ pub fn runtime() -> &'static tokio::runtime::Runtime {
     })
 }
 
+/// Under `DATABASE_URL` (CI) every test binary shares this database;
+/// use `fresh_database` if a test needs it untouched.
 pub async fn test_db() -> Option<(String, Pool)> {
     TEST_DB
         .get_or_init(provision)
