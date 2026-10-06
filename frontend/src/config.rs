@@ -11,6 +11,10 @@ pub const REDIRECT_URI: &str = "http://127.0.0.1:8081/callback";
 /// overridden, this needs to match.
 pub const GRAPHQL_URL: &str = "http://localhost:8080/graphql";
 
+/// The same endpoint, for `live`'s subscription - skilj-graphql serves
+/// the websocket upgrade on `GET /graphql`.
+pub const GRAPHQL_WS_URL: &str = "ws://localhost:8080/graphql";
+
 /// The shared `helpdesk` context - where company *lifecycle* traffic is
 /// authoritative, and where *Ticket* traffic goes for a company that has
 /// no tenant of its own.
