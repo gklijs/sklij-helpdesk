@@ -2,6 +2,7 @@ mod api;
 mod app;
 mod auth;
 mod config;
+mod live;
 mod model;
 mod pages;
 mod routing;

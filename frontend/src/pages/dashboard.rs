@@ -1,5 +1,5 @@
 use crate::{
-    api, auth, config,
+    api, auth, config, live,
     model::{CustomerTicketContent, TicketInternalNote, TicketQueueEntry},
     routing::TicketContext,
     theme::ThemeToggle,
@@ -10,13 +10,14 @@ use leptos::task::spawn_local;
 use std::collections::HashMap;
 use web_sys::window;
 
-/// What a write hands the dashboard's ticket fetch: bump `refresh` to
-/// refetch, and remember the write's own last sequence so that fetch can
-/// ask skilj to wait for it. `CompanyActiveTickets` is async (issue #15),
-/// so a plain read right after a write usually misses it;
-/// `waitForSequence` makes the read return once the catch-up has folded
-/// it, instead of guessing how long that takes. `CustomerTickets` is sync
-/// and already current, so only the queue read waits.
+/// What a write - this session's own, or anyone's via `live` - hands the
+/// dashboard's ticket fetch: bump `refresh` to refetch, and remember the
+/// write's last sequence so that fetch can ask skilj to wait for it.
+/// `CompanyActiveTickets` is async (issue #15), so a plain read right
+/// after a write usually misses it; `waitForSequence` makes the read
+/// return once the catch-up has folded it, instead of guessing how long
+/// that takes. `CustomerTickets` is sync and already current, so only the
+/// queue read waits.
 #[derive(Clone, Copy)]
 struct AfterWrite {
     set_refresh: WriteSignal<u32>,
@@ -25,7 +26,11 @@ struct AfterWrite {
 
 impl AfterWrite {
     fn refresh(self, result: &serde_json::Value) {
-        if let Some(seq) = api::last_triggered_sequence(result) {
+        self.refresh_up_to(api::last_triggered_sequence(result));
+    }
+
+    fn refresh_up_to(self, seq: Option<i64>) {
+        if let Some(seq) = seq {
             self.set_written_up_to
                 .update(|up_to| *up_to = Some(up_to.map_or(seq, |prev| prev.max(seq))));
         }
@@ -265,6 +270,35 @@ pub fn Dashboard() -> impl IntoView {
         });
     });
 
+    // Live updates (issue #21): other people's writes - and the alerter's
+    // `TicketEscalated` - reach this page without a reload. Started once
+    // the context resolves, since the feed is per bounded context; held
+    // in this component's scope so leaving the page closes the socket.
+    let (live_status, set_live_status) = signal(Some("connecting…".to_string()));
+    let live_feed = StoredValue::new_local(None::<live::LiveFeed>);
+    {
+        let token = token.clone();
+        Effect::new(move |_| {
+            let context = ticket_context.get();
+            if context == TicketContext::Resolving {
+                return;
+            }
+            let on_update = move |update| match update {
+                // Already fetched up to here - most often this session's
+                // own write, whose response arrived first.
+                live::Update::UpTo(seq) if written_up_to.get_untracked() >= Some(seq) => {}
+                live::Update::UpTo(seq) => after_write.refresh_up_to(Some(seq)),
+                live::Update::Resync => after_write.refresh_up_to(None),
+            };
+            live_feed.set_value(Some(live::LiveFeed::start(
+                token.clone(),
+                context.bounded_context().to_string(),
+                on_update,
+                move |status| set_live_status.set(status),
+            )));
+        });
+    }
+
     let (new_title, set_new_title) = signal(String::new());
     let (new_description, set_new_description) = signal(String::new());
     let (new_priority, set_new_priority) = signal("low".to_string());
@@ -317,6 +351,12 @@ pub fn Dashboard() -> impl IntoView {
             <h1>"SkilJ Helpdesk"</h1>
             <div class="nav-right">
                 <span>{if is_staff { "Staff view" } else { "Customer view" }} " — " {short_id(&my_sub)}</span>
+                <span
+                    class=move || if live_status.get().is_none() { "live-indicator live" } else { "live-indicator" }
+                    title=move || live_status.get().unwrap_or_else(|| "updates appear as they happen".to_string())
+                >
+                    {move || if live_status.get().is_none() { "● Live" } else { "○ Offline" }}
+                </span>
                 <ThemeToggle/>
                 <button on:click=log_out>"Log out"</button>
             </div>
@@ -361,34 +401,44 @@ pub fn Dashboard() -> impl IntoView {
                 </tr>
             </thead>
             <tbody>
-                {move || {
-                    let my_sub = my_sub.clone();
-                    let token = token.clone();
-                    let contents = contents.get();
-                    let mut entries: Vec<TicketQueueEntry> = tickets
-                        .get()
-                        .into_values()
-                        .filter(|t| is_staff || t.requester_id == my_sub)
-                        .collect();
-                    entries.sort_by(|a, b| a.ticket_id.cmp(&b.ticket_id));
-                    entries
-                        .into_iter()
-                        .map(|ticket| {
-                            view! {
-                                <TicketRow
-                                    content=contents.get(&ticket.ticket_id).cloned()
-                                    ticket=ticket
-                                    is_staff=is_staff
-                                    my_sub=my_sub.clone()
-                                    token=token.clone()
-                                    ticket_context=ticket_context.get()
-                                    after_write=after_write
-                                    set_status=set_status
-                                />
-                            }
-                        })
-                        .collect_view()
-                }}
+                // Keyed by everything a row shows, so a refetch only
+                // rebuilds the rows that changed. With live updates a
+                // refetch can come from anyone's write, and rebuilding
+                // every row would wipe a reply half-typed in another one.
+                <For
+                    each={
+                        let my_sub = my_sub.clone();
+                        move || {
+                            let contents = contents.get();
+                            let mut rows: Vec<(TicketQueueEntry, Option<CustomerTicketContent>)> = tickets
+                                .get()
+                                .into_values()
+                                .filter(|t| is_staff || t.requester_id == my_sub)
+                                .map(|t| {
+                                    let content = contents.get(&t.ticket_id).cloned();
+                                    (t, content)
+                                })
+                                .collect();
+                            rows.sort_by(|a, b| a.0.ticket_id.cmp(&b.0.ticket_id));
+                            rows
+                        }
+                    }
+                    key=|row| format!("{row:?}")
+                    children=move |(ticket, content)| {
+                        view! {
+                            <TicketRow
+                                content=content
+                                ticket=ticket
+                                is_staff=is_staff
+                                my_sub=my_sub.clone()
+                                token=token.clone()
+                                ticket_context=ticket_context.get_untracked()
+                                after_write=after_write
+                                set_status=set_status
+                            />
+                        }
+                    }
+                />
             </tbody>
         </table>
         </div>

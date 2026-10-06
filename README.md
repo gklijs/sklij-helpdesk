@@ -62,7 +62,10 @@ simplifications (see "What's not built" below).
   Code + PKCE, a real customer/staff dashboard in the browser — with a
   dark mode (`frontend/src/theme.rs`) that follows the system's own
   `prefers-color-scheme` by default, overridable per browser via the
-  toggle next to "Log out"/"Log in".
+  toggle next to "Log out"/"Log in". The dashboard is live: it
+  subscribes to skilj's `allEvents` over a websocket and re-reads on
+  every ticket event, so other people's changes (and escalations from
+  the alerter) show up without a reload (`frontend/src/live.rs`).
 
 ### GDPR erasure
 
