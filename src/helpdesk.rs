@@ -3004,8 +3004,11 @@ pub struct CompanyActiveTicketsState {
 /// contends on - the obvious candidate for `PARTITION_COUNT`. The cost
 /// is read-your-writes: a ticket just created can be missing from this
 /// queue for up to one `async_projection_poll_interval`, which is why
-/// the frontend's dashboard refetches once more after every write
-/// (`refresh_after_write`).
+/// the frontend's dashboard reads it with `waitForSequence` set to its
+/// own last write's sequence (`AfterWrite` in `dashboard.rs`). Issue #12
+/// measured the trade: ~7% more accepted commands/s at saturation, for
+/// a median lag of ~20 events - see
+/// `docs/async-projection-report-2026-10-06.md`.
 pub struct CompanyActiveTickets;
 
 #[auto_register(BOUNDED_CONTEXT)]
@@ -3412,7 +3415,9 @@ pub struct TenantDirectory;
 /// one company's ticket history across two bounded contexts with nothing
 /// recording that it happened. `sync()` bounds that window to "not yet
 /// committed", which `RecordTenantLifecycle`'s own guard downstream is
-/// built to tolerate.
+/// built to tolerate. Async would buy nothing back either (issue #12): it
+/// folds only `CompanyTenantProvisioned`, once per company, so it adds
+/// nothing to an ordinary command's commit.
 ///
 /// **Not an access-control boundary.** It carries no `OWNER_TAG_KEY`,
 /// deliberately: this is an infrastructure mapping, and unlike

@@ -71,7 +71,8 @@ instances sharing one database catch up on an existing history, with
   (500ms). The dashboard didn't poll; it only refetched immediately
   after the user's own write, which would now usually miss that write.
   `frontend/src/pages/dashboard.rs`'s `refresh_after_write` refetches
-  once more after 750ms.
+  once more after 750ms. (Since replaced by a read with
+  `waitForSequence`, issue #12.)
 - Two tests read the queue right after a command and now wait for it
   (`wait_until`): `cross_company_projection_scoping` and
   `customer_erasure`. A gotcha surfaced while fixing the first one:

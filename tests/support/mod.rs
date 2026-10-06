@@ -814,7 +814,7 @@ pub fn submit_command_mutation(
     let payload_json = serde_json::to_string(payload).unwrap();
     let payload_literal = serde_json::to_string(&payload_json).unwrap();
     format!(
-        "mutation {{ submitCommand(boundedContext: {bounded_context:?}, commandTypeName: {command_type_name:?}, payload: {payload_literal}) {{ accepted rejectionReason rejectionKind }} }}"
+        "mutation {{ submitCommand(boundedContext: {bounded_context:?}, commandTypeName: {command_type_name:?}, payload: {payload_literal}) {{ accepted rejectionReason rejectionKind triggeredEventSequences }} }}"
     )
 }
 
