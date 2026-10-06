@@ -2783,6 +2783,18 @@ pub struct TicketSummaryState {
     /// (the frontend needs to know a ticket's already been rated so it
     /// doesn't keep showing the rating form), not scope creep.
     pub rating: Option<u8>,
+    /// The staff member whose `TicketInfoRequested` was the first reply
+    /// the customer got - set once, by the first one, and never moved by
+    /// a later round of the back-and-forth. Who answered first is not
+    /// when: `project` sees an event's payload, not when it was stored,
+    /// so a first-response *time* has nothing here to be derived from.
+    ///
+    /// Added after tickets already existed, which is what a rebuild is
+    /// for (README's "Changing a projection: zero-downtime rebuilds"):
+    /// until one is run, a ticket answered before the deploy stays at
+    /// `None`, or names whoever answered *after* it instead of first.
+    /// `tests/projection_rebuild.rs` walks both through to the switch-over.
+    pub first_responder_staff_id: Option<String>,
 }
 
 fn priority_str(priority: TicketPriority) -> &'static str {
@@ -2889,8 +2901,11 @@ impl Projection for TicketSummary {
             HelpdeskEvent::TicketReopened(_) => {
                 state.status = Some("in_progress".into());
             }
-            HelpdeskEvent::TicketInfoRequested(_) => {
+            HelpdeskEvent::TicketInfoRequested(p) => {
                 state.status = Some("waiting_on_customer".into());
+                state
+                    .first_responder_staff_id
+                    .get_or_insert_with(|| p.staff_id.clone());
             }
             HelpdeskEvent::TicketCustomerResponded(_) => {
                 state.status = Some("in_progress".into());

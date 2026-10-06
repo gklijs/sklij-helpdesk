@@ -98,6 +98,52 @@ staff-written and gated separately (`TEAM_ONLY`), not encrypted. The
 frontend can't tell ciphertext from text, so an erased customer's
 tickets show base64 rather than "erased".
 
+### Changing a projection: zero-downtime rebuilds
+
+`TicketSummary` gained `first_responder_staff_id` (the staff member
+whose request for info was the customer's first reply) after tickets
+already existed. A projection's stored state only ever reflects the code
+that folded it, so tickets answered before the deploy need their history
+replayed. skilj does that next to the live projection, without taking
+reads down:
+
+1. **Deploy.** On startup the new build's `TicketSummary` schema differs
+   from the stored one, so reconciliation *stages* a rebuild instead of
+   touching the live projection (`APPLICATION_VERSION` is bumped with
+   it). Reads keep serving the old state. New events are folded into it
+   by the new code, so the new field is only right for tickets that
+   start after the deploy.
+2. **Retire the old build first.** A rebuild is folded by whichever
+   instance's catch-up reaches it first, using that instance's code. An
+   older build still running would fold it into the old shape.
+3. **Start it:**
+
+   ```graphql
+   mutation { rebuildProjection(boundedContext: "helpdesk", name: "TicketSummary") { status } }
+   ```
+
+   The background catch-up replays every event into a separate state.
+   Reads still get the old state. Progress is visible on
+   `projections(boundedContext: "helpdesk") { name schemaVersion buildingRebuild { caughtUpTo } }`.
+4. **Switch-over.** Once the replay has caught up, skilj swaps the
+   rebuilt state, schema and `schemaVersion` in, in one transaction.
+   No step for you.
+5. **Restart once.** In skilj 0.0.9 the switch-over doesn't refresh the
+   GraphQL schema, so the new field shows up on `helpdesk_TicketSummary`
+   only after each instance restarts. The REST/database state is
+   already current.
+
+If the deploy is rolled back instead, drop the staged rebuild:
+`discardProjectionRebuild(boundedContext: "helpdesk", name: "TicketSummary")`.
+The live projection never changed. The next deploy of the new shape
+stages it again.
+
+`tests/projection_rebuild.rs` runs this whole rollout against real
+Postgres: discard, redeploy, rebuild, and the switch-over. It checks
+that reads return the old state until the last moment, and that the
+rebuilt state is what goes live. The test also pins the schema-refresh
+gap from step 5, so it will fail once skilj fixes it.
+
 ## Layout
 
 | Path | What |

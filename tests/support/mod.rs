@@ -167,6 +167,29 @@ fn spawn_reaper(settings: &postgresql_embedded::Settings) {
     }
 }
 
+/// A database of its own on the same server as `test_db()`, migrated and
+/// empty - for a test that needs the shared `"helpdesk"` bounded context
+/// as no other test has left it. Under `DATABASE_URL` (CI) every test
+/// binary shares one database, so `test_db()` alone can't promise that.
+pub async fn fresh_database(prefix: &str) -> Option<(String, Pool)> {
+    let (database_url, pool) = test_db().await?;
+    let name = unique_name(prefix).to_lowercase();
+    sqlx::query(sqlx::AssertSqlSafe(format!("CREATE DATABASE \"{name}\"")))
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (base, query) = match database_url.split_once('?') {
+        Some((base, query)) => (base, format!("?{query}")),
+        None => (database_url.as_str(), String::new()),
+    };
+    let (server, _) = base
+        .rsplit_once('/')
+        .expect("a database URL names a database");
+    let url = format!("{server}/{name}{query}");
+    let pool = connect_and_migrate(&url, &name).await?;
+    Some((url, pool))
+}
+
 pub fn unique_name(prefix: &str) -> String {
     format!("{prefix}_{}", generate_token_id())
 }
@@ -740,12 +763,7 @@ pub async fn setup_graphql() -> (Skilj, Pool, RoleAccessMapping, String) {
     let (skilj, report) = skilj_helpdesk::register(Skilj::builder(database_url))
         .encryption_master_key(test_master_key())
         .reconciliation_role(external_subject.clone())
-        .identity_provider(IdpConfig::new(
-            jwks_url.parse().unwrap(),
-            TEST_ISSUER,
-            TEST_AUDIENCE,
-            SigningAlgorithm::Rs256,
-        ))
+        .identity_provider(test_idp_config(&jwks_url))
         .build()
         .await
         .unwrap();
@@ -753,6 +771,17 @@ pub async fn setup_graphql() -> (Skilj, Pool, RoleAccessMapping, String) {
 
     let jwt = sign_jwt(&external_subject);
     (skilj, pool, mapping, jwt)
+}
+
+/// The `IdpConfig` `sign_jwt`'s tokens verify against, for a test that
+/// builds its own `Skilj` rather than going through `setup_graphql`.
+pub fn test_idp_config(jwks_url: &str) -> IdpConfig {
+    IdpConfig::new(
+        jwks_url.parse().unwrap(),
+        TEST_ISSUER,
+        TEST_AUDIENCE,
+        SigningAlgorithm::Rs256,
+    )
 }
 
 pub async fn graphql_request(router: &axum::Router, jwt: &str, query: &str) -> serde_json::Value {

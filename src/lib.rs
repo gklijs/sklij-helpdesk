@@ -33,7 +33,7 @@ pub mod tenant_access;
 ///
 /// Must only ever increase: bump it in any change that alters a
 /// registered shape (a new consumed event type, a flag, a new field).
-pub const APPLICATION_VERSION: u64 = 2;
+pub const APPLICATION_VERSION: u64 = 3;
 
 /// Parses `ENCRYPTION_MASTER_KEY`'s value - 64 hex characters, 32 bytes
 /// (`openssl rand -hex 32`) - for `SkiljBuilder::encryption_master_key`.

@@ -35,6 +35,7 @@ fn ticket_summary_follows_a_ticket_through_its_whole_lifecycle() {
             assigned_staff_id: Some("staff-1".into()),
             escalated: true,
             rating: Some(4),
+            first_responder_staff_id: Some("staff-1".into()),
         });
 }
 
@@ -74,7 +75,25 @@ fn ticket_summary_ignores_internal_notes_and_company_events() {
             assigned_staff_id: None,
             escalated: false,
             rating: None,
+            first_responder_staff_id: None,
         });
+}
+
+#[test]
+fn ticket_summary_keeps_whoever_replied_first() {
+    let mut second_round = info_requested("t1", "acme", "and the OS?");
+    if let HelpdeskEvent::TicketInfoRequested(p) = &mut second_round {
+        p.staff_id = "staff-2".into();
+    }
+    GivenEvents::<TicketSummary>::new()
+        .events(in_progress_ticket("t1", "acme"))
+        .then(|state| assert_eq!(state.first_responder_staff_id, None));
+    GivenEvents::<TicketSummary>::new()
+        .events(in_progress_ticket("t1", "acme"))
+        .event(info_requested("t1", "acme", "which version?"))
+        .event(customer_responded("t1", "acme", "2.1"))
+        .event(second_round)
+        .then(|state| assert_eq!(state.first_responder_staff_id.as_deref(), Some("staff-1")));
 }
 
 #[test]
