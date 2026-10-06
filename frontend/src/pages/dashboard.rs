@@ -8,21 +8,29 @@ use leptos::ev::SubmitEvent;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use std::collections::HashMap;
-use std::time::Duration;
 use web_sys::window;
 
-/// Refetches now, and again once skilj's background catch-up has had a
-/// tick to fold the write in. `CompanyActiveTickets` is async (issue #15),
-/// so the immediate refetch usually still misses what was just
-/// written; `CustomerTickets` is sync and is already current. 750ms is
-/// skilj's default `async_projection_poll_interval` (500ms) plus room
-/// for the fold itself.
-fn refresh_after_write(set_refresh: WriteSignal<u32>) {
-    set_refresh.update(|n| *n += 1);
-    set_timeout(
-        move || set_refresh.update(|n| *n += 1),
-        Duration::from_millis(750),
-    );
+/// What a write hands the dashboard's ticket fetch: bump `refresh` to
+/// refetch, and remember the write's own last sequence so that fetch can
+/// ask skilj to wait for it. `CompanyActiveTickets` is async (issue #15),
+/// so a plain read right after a write usually misses it;
+/// `waitForSequence` makes the read return once the catch-up has folded
+/// it, instead of guessing how long that takes. `CustomerTickets` is sync
+/// and already current, so only the queue read waits.
+#[derive(Clone, Copy)]
+struct AfterWrite {
+    set_refresh: WriteSignal<u32>,
+    set_written_up_to: WriteSignal<Option<i64>>,
+}
+
+impl AfterWrite {
+    fn refresh(self, result: &serde_json::Value) {
+        if let Some(seq) = api::last_triggered_sequence(result) {
+            self.set_written_up_to
+                .update(|up_to| *up_to = Some(up_to.map_or(seq, |prev| prev.max(seq))));
+        }
+        self.set_refresh.update(|n| *n += 1);
+    }
 }
 
 /// `TicketInternalNotes` is its own projection, queried on demand, not
@@ -159,6 +167,11 @@ pub fn Dashboard() -> impl IntoView {
     let (contents, set_contents) = signal(HashMap::<String, CustomerTicketContent>::new());
     let (status, set_status) = signal(String::new());
     let (refresh, set_refresh) = signal(0u32);
+    let (written_up_to, set_written_up_to) = signal(None::<i64>);
+    let after_write = AfterWrite {
+        set_refresh,
+        set_written_up_to,
+    };
 
     // Where this company's Ticket traffic belongs, resolved once per
     // session and then read by every ticket call below. Resolving here
@@ -192,17 +205,27 @@ pub fn Dashboard() -> impl IntoView {
         }
         let token = fetch_token.clone();
         let my_sub = fetch_sub.clone();
+        let wait_for_sequence = written_up_to.get_untracked();
         spawn_local(async move {
-            let result = api::query_projection(
-                &token,
-                context.bounded_context(),
-                "CompanyActiveTickets",
-                config::DEMO_COMPANY_ID,
-                &context.graphql_type("CompanyActiveTickets"),
-                "tickets",
-            )
-            .await
-            .and_then(|json| {
+            let graphql_type = context.graphql_type("CompanyActiveTickets");
+            let read = |wait_for_sequence| {
+                api::query_projection_after(
+                    &token,
+                    context.bounded_context(),
+                    "CompanyActiveTickets",
+                    config::DEMO_COMPANY_ID,
+                    &graphql_type,
+                    "tickets",
+                    wait_for_sequence,
+                )
+            };
+            // A wait that times out is refused rather than answered
+            // stale; show the queue as it stands rather than nothing.
+            let result = match read(wait_for_sequence).await {
+                Err(_) if wait_for_sequence.is_some() => read(None).await,
+                result => result,
+            };
+            let result = result.and_then(|json| {
                 serde_json::from_value::<HashMap<String, TicketQueueEntry>>(json)
                     .map_err(|e| e.to_string())
             });
@@ -278,7 +301,7 @@ pub fn Dashboard() -> impl IntoView {
             match api::submit_command(&token, context.bounded_context(), "CreateTicket", &payload)
                 .await
             {
-                Ok(_) => refresh_after_write(set_refresh),
+                Ok(result) => after_write.refresh(&result),
                 Err(e) => set_status.set(format!("couldn't create ticket: {e}")),
             }
         });
@@ -359,7 +382,7 @@ pub fn Dashboard() -> impl IntoView {
                                     my_sub=my_sub.clone()
                                     token=token.clone()
                                     ticket_context=ticket_context.get()
-                                    set_refresh=set_refresh
+                                    after_write=after_write
                                     set_status=set_status
                                 />
                             }
@@ -382,7 +405,7 @@ fn TicketRow(
     my_sub: String,
     token: String,
     ticket_context: TicketContext,
-    set_refresh: WriteSignal<u32>,
+    after_write: AfterWrite,
     set_status: WriteSignal<String>,
 ) -> impl IntoView {
     let ticket_id = ticket.ticket_id.clone();
@@ -412,7 +435,7 @@ fn TicketRow(
                 )
                 .await
                 {
-                    Ok(_) => refresh_after_write(set_refresh),
+                    Ok(result) => after_write.refresh(&result),
                     Err(e) => set_status.set(format!("{command_type_name} failed: {e}")),
                 }
             });

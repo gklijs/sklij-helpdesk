@@ -173,3 +173,65 @@ fn graphql_refuses_a_staff_only_command_from_a_non_staff_role() {
         );
     });
 }
+
+/// What `frontend/`'s dashboard relies on after every write:
+/// `CompanyActiveTickets` is async, so a plain read right after
+/// `CreateTicket` can miss the ticket for up to one catch-up tick. Passing
+/// the command's own `triggeredEventSequences` back as `waitForSequence`
+/// makes the read return only once the projection has folded it.
+#[test]
+fn a_read_waiting_for_the_writes_own_sequence_sees_the_write_in_an_async_projection() {
+    runtime().block_on(async {
+        if test_db().await.is_none() {
+            return;
+        }
+        let (skilj, _pool, _mapping, jwt) = setup_graphql().await;
+        let router = skilj.graphql_router().await.unwrap();
+        let company_id = unique_name("company");
+        let ticket_id = unique_name("ticket");
+
+        let response = graphql_request(
+            &router,
+            &jwt,
+            &submit_command_mutation(
+                BOUNDED_CONTEXT,
+                "SignUpCompany",
+                &serde_json::json!({ "company_id": company_id, "name": "Acme", "contact_email": "a@acme.example" }),
+            ),
+        )
+        .await;
+        assert!(graphql_accepted(&response), "{response:?}");
+
+        let payload = serde_json::json!({
+            "ticket_id": ticket_id, "company_id": company_id, "requester_id": unique_name("customer"),
+            "logged_by_staff_id": null, "title": "t", "description": "d", "priority": "low",
+        });
+        let response = graphql_request(
+            &router,
+            &jwt,
+            &submit_command_mutation(BOUNDED_CONTEXT, "CreateTicket", &payload),
+        )
+        .await;
+        assert!(graphql_accepted(&response), "{response:?}");
+        let written = response["data"]["submitCommand"]["triggeredEventSequences"]
+            .as_array()
+            .expect("an accepted command lists the sequences it triggered")
+            .iter()
+            .filter_map(serde_json::Value::as_i64)
+            .max()
+            .expect("CreateTicket triggers one event");
+
+        let query = format!(
+            r#"query {{ projection(boundedContext: {BOUNDED_CONTEXT:?}, name: "CompanyActiveTickets", key: {company_id:?}, waitForSequence: {written}) {{ ... on helpdesk_CompanyActiveTickets {{ tickets }} }} }}"#
+        );
+        let response = graphql_request(&router, &jwt, &query).await;
+        assert!(response.get("errors").is_none(), "{response:?}");
+        let tickets: serde_json::Value = serde_json::from_str(
+            response["data"]["projection"]["tickets"]
+                .as_str()
+                .expect("tickets comes back JSON-encoded"),
+        )
+        .unwrap();
+        assert_eq!(tickets[&ticket_id]["status"], "open", "{tickets}");
+    });
+}

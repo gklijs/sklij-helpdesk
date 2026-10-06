@@ -45,7 +45,7 @@ pub async fn submit_command(
     let payload_json = serde_json::to_string(payload).map_err(|e| e.to_string())?;
     let payload_literal = serde_json::to_string(&payload_json).map_err(|e| e.to_string())?;
     let query = format!(
-        "mutation {{ submitCommand(boundedContext: {bounded_context:?}, commandTypeName: {command_type_name:?}, payload: {payload_literal}) {{ accepted rejectionReason rejectionKind }} }}"
+        "mutation {{ submitCommand(boundedContext: {bounded_context:?}, commandTypeName: {command_type_name:?}, payload: {payload_literal}) {{ accepted rejectionReason rejectionKind triggeredEventSequences }} }}"
     );
     let response = graphql(token, &query).await?;
     let result = &response["data"]["submitCommand"];
@@ -57,6 +57,16 @@ pub async fn submit_command(
             .unwrap_or("rejected, no reason given")
             .to_string())
     }
+}
+
+/// The highest sequence an accepted `submit_command` result says its
+/// command produced - what `query_projection_after` waits for.
+pub fn last_triggered_sequence(result: &Value) -> Option<i64> {
+    result["triggeredEventSequences"]
+        .as_array()?
+        .iter()
+        .filter_map(Value::as_i64)
+        .max()
 }
 
 /// `projection(boundedContext, name, key)` - the result comes back as
@@ -73,8 +83,27 @@ pub async fn query_projection(
     graphql_type: &str,
     field: &str,
 ) -> Result<Value, String> {
+    query_projection_after(token, bounded_context, name, key, graphql_type, field, None).await
+}
+
+/// `query_projection`, but for an async projection read right after this
+/// session's own write: with `wait_for_sequence`, skilj holds the answer
+/// until the projection has folded that sequence (`waitForSequence`), or
+/// refuses once its `projection_query_wait_timeout` runs out.
+pub async fn query_projection_after(
+    token: &str,
+    bounded_context: &str,
+    name: &str,
+    key: &str,
+    graphql_type: &str,
+    field: &str,
+    wait_for_sequence: Option<i64>,
+) -> Result<Value, String> {
+    let wait = wait_for_sequence
+        .map(|seq| format!(", waitForSequence: {seq}"))
+        .unwrap_or_default();
     let query = format!(
-        "query {{ projection(boundedContext: {bounded_context:?}, name: {name:?}, key: {key:?}) {{ ... on {graphql_type} {{ {field} }} }} }}"
+        "query {{ projection(boundedContext: {bounded_context:?}, name: {name:?}, key: {key:?}{wait}) {{ ... on {graphql_type} {{ {field} }} }} }}"
     );
     let response = graphql(token, &query).await?;
     let raw = response["data"]["projection"][field]
