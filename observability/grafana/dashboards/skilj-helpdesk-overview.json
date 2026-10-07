@@ -316,6 +316,39 @@
       ],
       "fieldConfig": { "defaults": { "unit": "short", "decimals": 0 }, "overrides": [] },
       "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
+    },
+
+    { "id": 70, "type": "row", "title": "Async projection lag (skilj_helpdesk.projection_lag)", "gridPos": { "h": 1, "w": 24, "x": 0, "y": 67 } },
+    {
+      "id": 71, "type": "stat", "title": "Worst async projection lag",
+      "description": "The furthest any async projection (CompanyActiveTickets, in the shared and every tenant context) is behind its bounded context's latest event, in sequences (see src/projection_lag.rs). Catch-up polls every 500ms, so a few dozen under load is normal; a number that only grows means catch-up is falling behind or has stopped.",
+      "gridPos": { "h": 8, "w": 6, "x": 0, "y": 68 },
+      "datasource": { "type": "prometheus", "uid": "skilj-prometheus" },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "skilj-prometheus" },
+          "expr": "max(skilj_helpdesk_projection_lag) or vector(0)", "refId": "A" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short", "decimals": 0,
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "yellow", "value": 200 }, { "color": "red", "value": 1000 } ] }
+        },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background", "graphMode": "area" }
+    },
+    {
+      "id": 72, "type": "timeseries", "title": "Async projection lag by context and projection (top 10)",
+      "description": "Sequences between each async projection's caught_up_to and its bounded context's latest event, sampled every 5s. The ten furthest behind; every tenant context has its own CompanyActiveTickets.",
+      "gridPos": { "h": 8, "w": 18, "x": 6, "y": 68 },
+      "datasource": { "type": "prometheus", "uid": "skilj-prometheus" },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "skilj-prometheus" },
+          "expr": "topk(10, max by (bounded_context, projection) (skilj_helpdesk_projection_lag))",
+          "legendFormat": "{{bounded_context}} / {{projection}}", "refId": "A" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short", "decimals": 0 }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } }
     }
   ]
 }

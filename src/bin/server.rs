@@ -123,6 +123,17 @@ static PARKED_DELIVERIES: LazyLock<Gauge<u64>> = LazyLock::new(|| {
         .build()
 });
 
+// --- Async projection lag - see run_projection_lag_gauge_loop ---
+static PROJECTION_LAG: LazyLock<Gauge<u64>> = LazyLock::new(|| {
+    opentelemetry::global::meter("skilj-helpdesk")
+        .u64_gauge("skilj_helpdesk.projection_lag")
+        .with_description(
+            "How many sequences an async projection's caught_up_to is behind its bounded \
+             context's latest event - by bounded context and projection.",
+        )
+        .build()
+});
+
 const TEST_ISSUER: &str = "https://idp.example.test/";
 // skilj 0.0.9 requires an explicit `aud` on every verified JWT
 // (IdpConfig::new's `audience`, docs/architecture.md §81) - a token
@@ -574,6 +585,38 @@ async fn run_parked_deliveries_gauge_loop(pool: skilj_core::db::Pool) {
                 previous = current;
             }
             Err(e) => eprintln!("parked deliveries: sample failed, will retry: {e}"),
+        }
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
+}
+
+/// Samples every async projection's lag into `PROJECTION_LAG`
+/// (`skilj_helpdesk::projection_lag`'s own doc comment). Reads the
+/// database directly, for the same reason the parked-deliveries loop
+/// does.
+///
+/// 5s, not 15s: catch-up polls every 500ms and the lag moves within
+/// seconds, and each tick is a few small queries per bounded context.
+async fn run_projection_lag_gauge_loop(pool: skilj_core::db::Pool) {
+    const POLL_INTERVAL: Duration = Duration::from_secs(5);
+    let mut previous = std::collections::BTreeMap::new();
+    loop {
+        match skilj_helpdesk::projection_lag::sample(&pool).await {
+            Ok(current) => {
+                for (key, lag) in
+                    skilj_helpdesk::parked_deliveries::with_cleared(&previous, &current)
+                {
+                    PROJECTION_LAG.record(
+                        lag,
+                        &[
+                            KeyValue::new("bounded_context", key.bounded_context),
+                            KeyValue::new("projection", key.projection),
+                        ],
+                    );
+                }
+                previous = current;
+            }
+            Err(e) => eprintln!("projection lag: sample failed, will retry: {e}"),
         }
         tokio::time::sleep(POLL_INTERVAL).await;
     }
@@ -1091,42 +1134,45 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Err(_) => std::net::Ipv4Addr::LOCALHOST.into(),
     };
 
-    // db::connect's bare default (sqlx's own PgPoolOptions::new(), a
-    // 10-connection cap) turned out to be the actual ceiling on this
-    // server's throughput, not anything in the app's own logic - see
-    // docs/load-test-report-2026-09-17.md. DATABASE_MAX_CONNECTIONS lets
-    // that be sized for real load instead of silently inheriting
-    // whatever sqlx ships with. 90, not just "well above 10": this same
-    // pool is also shared by every background loop skilj spawns
-    // (cross_context_route_tick, async_projection_tick, scheduler_tick)
-    // plus `/v1/events/consume` (which holds its connection for a whole
-    // open transaction, not just one query - see skilj-rest's own
-    // get_events_consume doc comment on why a concurrent call for the
-    // same token genuinely blocks there) - all of that competes with
-    // foreground request traffic for the same budget, so sizing this to
-    // just the expected foreground concurrency undercounts real demand.
-    // 90 leaves headroom under Postgres's own default server-side
-    // max_connections (100) for `alerter`/`engagement-watcher`/manual
-    // `psql` alongside this pool.
+    // Two pools. Skilj's own (`skilj_pool_options`, handed to
+    // `Skilj::builder` below) serves every command, query and
+    // `/v1/events/consume` call, and every background loop skilj spawns
+    // (cross_context_route_tick, async_projection_tick, scheduler_tick).
+    // This server's own (`pool`) does the setup below, the routing guard's
+    // tenant lookup, the parked-deliveries and projection-lag gauges and
+    // the tenant-access reconciler.
+    //
+    // DATABASE_MAX_CONNECTIONS sizes skilj's pool. Until 2026-10-09 it
+    // sized only this server's own pool, and skilj ran on sqlx's default
+    // of 10 connections, so the load-test and pool-tuning reports before
+    // then measured skilj at 10 (which is why "it never grew past 14").
+    // 80 plus DATABASE_APP_MAX_CONNECTIONS' 10 leaves headroom under
+    // Postgres's own default server-side max_connections (100) for manual
+    // `psql` and a second instance's setup.
     let db_max_connections: u32 = std::env::var("DATABASE_MAX_CONNECTIONS")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(90);
-    // Connections the pool opens up front and keeps open. 0 (sqlx's own
-    // default) lets the pool grow on demand, and under the full load
-    // ramp it never grew past 14. skilj's
-    // `pool_options_performance_optimized()` keeps half its max warm;
-    // docs/pool-tuning-report-2026-10-06.md measured that and found the
-    // warm connections sat idle for no throughput gain.
+        .unwrap_or(80);
+    // Connections skilj's pool opens up front and keeps open. 0 (sqlx's
+    // own default) lets the pool grow on demand.
+    // docs/pool-tuning-report-2026-10-06.md found warm connections sat
+    // idle for no throughput gain (measured on the wrong pool; see above).
     let db_min_connections: u32 = std::env::var("DATABASE_MIN_CONNECTIONS")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
+    // skilj's defaults (no ping each time a connection leaves the pool:
+    // one round trip less per statement), sized as above.
+    let skilj_pool_options = skilj::default_pool_options()
+        .max_connections(db_max_connections)
+        .min_connections(db_min_connections);
+    let app_max_connections: u32 = std::env::var("DATABASE_APP_MAX_CONNECTIONS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(10);
     let pool = db::connect_with(
         &database_url,
-        db::PgPoolOptions::new()
-            .max_connections(db_max_connections)
-            .min_connections(db_min_connections),
+        db::PgPoolOptions::new().max_connections(app_max_connections),
     )
     .await?;
     db::migrate(&pool).await?;
@@ -1382,6 +1428,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let (skilj, report) = skilj_helpdesk::register(Skilj::builder(database_url))
+        .pool_options(skilj_pool_options)
         .reconciliation_role(external_subject.clone())
         .application_version(skilj_helpdesk::APPLICATION_VERSION)
         .encryption_master_key(encryption_master_key)
@@ -1729,6 +1776,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("recording parked deliveries as a real metric (skilj_helpdesk_parked_deliveries)");
         let parked_pool = pool.clone();
         tokio::spawn(async move { run_parked_deliveries_gauge_loop(parked_pool).await });
+        println!("recording async projection lag as a real metric (skilj_helpdesk_projection_lag)");
+        let lag_pool = pool.clone();
+        tokio::spawn(async move { run_projection_lag_gauge_loop(lag_pool).await });
     }
 
     // Keep each company's access grants mirrored into its own tenant -

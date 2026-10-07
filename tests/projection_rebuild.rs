@@ -413,25 +413,25 @@ fn a_projection_change_is_discarded_then_rebuilt_and_switched_over() {
         assert!(registration["buildingRebuild"].is_null(), "{registration}");
         assert!(registration["pendingRebuild"].is_null(), "{registration}");
 
-        // The new field reaches the projection's GraphQL type only on a
-        // restart. skilj 0.0.9's `promote_projection_rebuild` replaces the
-        // live schema without the `skilj_registration_changed` notify
-        // `upsert_projection` sends, so no instance rebuilds its GraphQL
-        // schema at the switch-over. When this starts failing, skilj
-        // has fixed that: drop this half and the restart's comment below.
+        // The new field reaches the projection's GraphQL type at the
+        // switch-over, no restart needed: promotion notifies every instance
+        // to rebuild its GraphQL schema, the way a registration does. That
+        // notify is delivered asynchronously, hence the wait.
         let query = format!(
             r#"query {{ projection(boundedContext: {BOUNDED_CONTEXT:?}, name: "TicketSummary", key: {ticket_id:?}) {{ ... on helpdesk_TicketSummary {{ status firstResponderStaffId }} }} }}"#
         );
-        let response = graphql_request(&new.graphql_router().await.unwrap(), &jwt, &query).await;
-        assert!(
-            response["errors"][0]["message"]
-                .as_str()
-                .is_some_and(|m| m.contains("Unknown field \"firstResponderStaffId\"")),
-            "{response}"
-        );
+        wait_until(
+            Duration::from_secs(30),
+            "the promoted field to be queryable",
+            || async {
+                let response =
+                    graphql_request(&new.graphql_router().await.unwrap(), &jwt, &query).await;
+                response["data"]["projection"]["firstResponderStaffId"] == "alice"
+            },
+        )
+        .await;
 
-        // A restart builds the GraphQL schema from the promoted shape, and
-        // finds nothing left to rebuild.
+        // A restart finds nothing left to rebuild.
         stop(new).await;
         let (new, report) = start(&database_url, &subject, &jwks_url, APPLICATION_VERSION).await;
         assert!(report.kept_newer.is_empty(), "{report:?}");

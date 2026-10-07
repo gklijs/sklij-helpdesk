@@ -129,3 +129,18 @@ sqlx = { version = "0.9", default-features = false, features = ["postgres"] }
 # tests/email_channel.rs only - a real, throwaway NATS server in Docker,
 # the same way skilj-nats's own tests run against one.
 testcontainers-modules = { version = "0.15", features = ["nats"] }
+
+# Unreleased skilj from the sibling checkout: its chunked catch-up
+# (skilj CHANGELOG, Codeberg issue #52) is what
+# docs/rebuild-report-2026-10-07.md measures. Drop this once a release
+# carries it.
+[patch.crates-io]
+skilj = { path = "../skilj/skilj" }
+skilj-bridge = { path = "../skilj/skilj-bridge" }
+skilj-core = { path = "../skilj/skilj-core" }
+skilj-graphql = { path = "../skilj/skilj-graphql" }
+skilj-macros = { path = "../skilj/skilj-macros" }
+skilj-nats = { path = "../skilj/skilj-nats" }
+skilj-rest = { path = "../skilj/skilj-rest" }
+skilj-retry = { path = "../skilj/skilj-retry" }
+skilj-test-fixture = { path = "../skilj/skilj-test-fixture" }

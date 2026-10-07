@@ -36,9 +36,10 @@
 //! (see this crate's `README.md`) rather than something this pass guesses
 //! at.
 
-use crate::helpdesk::BOUNDED_CONTEXT;
+use crate::helpdesk::{CompanyTenantProvisioned, BOUNDED_CONTEXT};
 use skilj_core::access_control::{self, AccessLevel, Role, RoleAccessMapping};
 use skilj_core::db;
+use skilj_core::plugin::EventType;
 
 /// One grant/revoke the reconciler intends to make.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -417,16 +418,18 @@ async fn revoke_one(
 /// *key*, and the company ids are exactly what's being looked up here -
 /// reading the events is what makes "which companies have tenants"
 /// answerable without already knowing a company to ask about.
+///
+/// Only that one type, through its index: the reconciler calls this every
+/// 5s, and reading the whole context's history instead took 1.5s and
+/// gigabytes of RSS per call on a 1M-event history
+/// (docs/rebuild-report-2026-10-07.md).
 pub async fn recorded_company_tenants(
     pool: &db::Pool,
 ) -> Result<Vec<(String, String)>, skilj_core::error::Error> {
-    let events = db::list_events_for_bounded_context(pool, BOUNDED_CONTEXT).await?;
+    let events = db::list_events(pool, BOUNDED_CONTEXT, CompanyTenantProvisioned::NAME).await?;
     let mut latest: std::collections::HashMap<String, (i64, String)> =
         std::collections::HashMap::new();
     for event in &events {
-        if event.event_type.name != "CompanyTenantProvisioned" {
-            continue;
-        }
         let Ok(payload) = serde_json::from_str::<serde_json::Value>(&event.payload) else {
             continue;
         };

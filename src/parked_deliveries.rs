@@ -96,10 +96,11 @@ pub async fn sample(pool: &Pool) -> skilj_core::error::Result<BTreeMap<SeriesKey
 /// each series reported last tick that has no rows any more. Without the
 /// zero, a gauge keeps exporting its last value, so a redriven delivery
 /// would stay "parked" on the dashboard until the process restarted.
-pub fn with_cleared(
-    previous: &BTreeMap<SeriesKey, u64>,
-    current: &BTreeMap<SeriesKey, u64>,
-) -> Vec<(SeriesKey, u64)> {
+/// `projection_lag`'s gauge uses it the same way.
+pub fn with_cleared<K: Ord + Clone>(
+    previous: &BTreeMap<K, u64>,
+    current: &BTreeMap<K, u64>,
+) -> Vec<(K, u64)> {
     let cleared = previous
         .keys()
         .filter(|key| !current.contains_key(*key))
@@ -134,6 +135,6 @@ mod tests {
 
     #[test]
     fn nothing_parked_and_nothing_before_records_nothing() {
-        assert!(with_cleared(&BTreeMap::new(), &BTreeMap::new()).is_empty());
+        assert!(with_cleared::<SeriesKey>(&BTreeMap::new(), &BTreeMap::new()).is_empty());
     }
 }

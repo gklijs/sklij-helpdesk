@@ -90,12 +90,21 @@ pub fn demo_companies(count: usize) -> Vec<String> {
         .collect()
 }
 
-const CUSTOMER_HANDLES: &[&str] = &[
-    "seed-customer-1",
-    "seed-customer-2",
-    "seed-customer-3",
-    "seed-customer-4",
-];
+/// How many customers file tickets for each company. A customer belongs
+/// to one company (`specs/skilj-helpdesk.allium`'s `entity Customer`), so
+/// each company gets its own, `{company}-customer-{n}`. Four shared
+/// customers used to file every ticket for every company, which grew
+/// four `CustomerTickets` rows without bound and made them the load
+/// test's bottleneck (docs/create-ticket-latency-report-2026-10-09.md).
+const CUSTOMERS_PER_COMPANY: usize = 25;
+
+/// A random customer of `company_id`.
+fn customer_of(company_id: &str, rng: &mut Rng) -> String {
+    format!(
+        "{company_id}-customer-{}",
+        1 + rng.below(CUSTOMERS_PER_COMPANY)
+    )
+}
 const STAFF_HANDLES: &[&str] = &["seed-staff-1", "seed-staff-2", "seed-staff-3"];
 
 const TITLES: &[&str] = &[
@@ -346,10 +355,11 @@ pub fn next_action(state: &SeedState, rng: &mut Rng) -> SeedAction {
     if state.tickets.is_empty() || rng.chance(2, 5) {
         let company_id = state.companies[rng.below(state.companies.len())].clone();
         let ticket_id = state.next_ticket_id();
+        let requester_id = customer_of(&company_id, rng);
         return SeedAction::CreateTicket {
             ticket_id,
             company_id,
-            requester_id: CUSTOMER_HANDLES[rng.below(CUSTOMER_HANDLES.len())].to_string(),
+            requester_id,
             title: TITLES[rng.below(TITLES.len())].to_string(),
             description: "filed by skilj-helpdesk's own demo traffic generator".to_string(),
             priority: random_priority(rng),
@@ -408,14 +418,17 @@ pub fn next_action(state: &SeedState, rng: &mut Rng) -> SeedAction {
             rating: 1 + rng.below(5) as u8,
             comment: RATING_COMMENTS[rng.below(RATING_COMMENTS.len())].map(str::to_string),
         },
-        (SeedTicketStatus::Resolved, false) => SeedAction::CreateTicket {
-            ticket_id: state.next_ticket_id(),
-            company_id: state.companies[rng.below(state.companies.len())].clone(),
-            requester_id: CUSTOMER_HANDLES[rng.below(CUSTOMER_HANDLES.len())].to_string(),
-            title: TITLES[rng.below(TITLES.len())].to_string(),
-            description: "filed by skilj-helpdesk's own demo traffic generator".to_string(),
-            priority: random_priority(rng),
-        },
+        (SeedTicketStatus::Resolved, false) => {
+            let company_id = state.companies[rng.below(state.companies.len())].clone();
+            SeedAction::CreateTicket {
+                ticket_id: state.next_ticket_id(),
+                requester_id: customer_of(&company_id, rng),
+                company_id,
+                title: TITLES[rng.below(TITLES.len())].to_string(),
+                description: "filed by skilj-helpdesk's own demo traffic generator".to_string(),
+                priority: random_priority(rng),
+            }
+        }
         (SeedTicketStatus::Resolved, true) => SeedAction::AssignTicket {
             ticket_id,
             staff_id,
@@ -597,6 +610,26 @@ mod tests {
                 next_action(&state, &mut rng),
                 SeedAction::CreateTicket { .. }
             ));
+        }
+    }
+
+    #[test]
+    fn a_ticket_is_always_filed_by_a_customer_of_its_own_company() {
+        let state = SeedState::new(vec!["acme".into(), "globex".into()], "t");
+        for seed in 0..50 {
+            let mut rng = Rng::seeded(seed);
+            let SeedAction::CreateTicket {
+                company_id,
+                requester_id,
+                ..
+            } = next_action(&state, &mut rng)
+            else {
+                panic!("an empty state always creates a ticket");
+            };
+            assert!(
+                requester_id.starts_with(&format!("{company_id}-customer-")),
+                "{requester_id} filed for {company_id}"
+            );
         }
     }
 

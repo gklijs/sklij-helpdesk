@@ -1020,8 +1020,9 @@ impl TicketFacts {
 /// decide from a stored state plus the events since, instead of reading
 /// the ticket's whole history each time (issue #14). skilj only uses it
 /// for a command whose one derived tag is `ticket`, so `MergeTickets`
-/// (two tickets) and `CreateTicket` (company and ticket) keep plain
-/// `decide()`. See `docs/ticket-snapshot-report-2026-10-05.md`.
+/// (two tickets) keeps plain `decide()`, and `CreateTicket` (tagged by
+/// company) uses `CompanySnapshot`. See
+/// `docs/ticket-snapshot-report-2026-10-05.md`.
 pub struct TicketSnapshot;
 
 #[auto_register(BOUNDED_CONTEXT)]
@@ -1130,6 +1131,106 @@ fn company_status(matching_events: &[HelpdeskEvent], company_id: &str) -> Option
         }
     }
     status
+}
+
+/// What `CreateTicket` decides from: the company's status and which
+/// ticket ids it has already created, folded in one pass. Kept per
+/// company by `CompanySnapshot`, so a ticket's creation reads that row
+/// plus the events since, instead of the company's whole history: every
+/// `TicketCreated` (and `TicketInternalNoteAdded`) carries the "company"
+/// tag, so that history grows with every ticket the company ever filed
+/// (docs/create-ticket-latency-report-2026-10-09.md). Same split as
+/// `TicketFacts`, so `decide()` and `decide_from_snapshot()` can't drift
+/// apart.
+///
+/// Changing what this folds, or its shape, means bumping
+/// `CompanySnapshot::VERSION`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct CompanyFacts {
+    /// Which company this is - set up front by `of`/`resume`, or by the
+    /// first event when `CompanySnapshot` folds from nothing (its `fold`
+    /// gets no key).
+    pub company_id: String,
+    /// `None` means the company doesn't exist - see `company_status`.
+    pub status: Option<CompanyStatus>,
+    /// Every ticket id a `TicketCreated` of this company used.
+    pub ticket_ids: std::collections::BTreeSet<String>,
+}
+
+impl CompanyFacts {
+    /// Folded from `company_id`'s slice of `matching_events`.
+    pub fn of(matching_events: &[HelpdeskEvent], company_id: &str) -> Self {
+        let mut facts = Self {
+            company_id: company_id.to_string(),
+            ..Self::default()
+        };
+        for event in matching_events {
+            facts.apply(event);
+        }
+        facts
+    }
+
+    /// A stored `CompanySnapshot` state brought up to date with the
+    /// events stored after it - see `TicketFacts::resume`.
+    pub fn resume(
+        state_json: &str,
+        events_since: &[HelpdeskEvent],
+        company_id: &str,
+    ) -> Result<Self, serde_json::Error> {
+        let mut facts: Self = serde_json::from_str(state_json)?;
+        if facts.company_id.is_empty() {
+            facts.company_id = company_id.to_string();
+        }
+        for event in events_since {
+            facts.apply(event);
+        }
+        Ok(facts)
+    }
+
+    fn apply(&mut self, event: &HelpdeskEvent) {
+        let company_id = match event {
+            HelpdeskEvent::CompanySignedUp(p) => &p.company_id,
+            HelpdeskEvent::CompanyActivated(p) => &p.company_id,
+            HelpdeskEvent::CompanyExpired(p) => &p.company_id,
+            HelpdeskEvent::CompanyLifecycleMirrored(p) => &p.company_id,
+            HelpdeskEvent::TicketCreated(p) => &p.company_id,
+            _ => return,
+        };
+        if self.company_id.is_empty() {
+            self.company_id = company_id.clone();
+        } else if *company_id != self.company_id {
+            return;
+        }
+        if let HelpdeskEvent::TicketCreated(p) = event {
+            self.ticket_ids.insert(p.ticket_id.clone());
+        } else {
+            self.status = company_status(std::slice::from_ref(event), company_id).or(self.status);
+        }
+    }
+}
+
+/// `CompanyFacts`, kept per company - see its doc comment. skilj uses it
+/// for `CreateTicket`, the one command whose only derived tag is
+/// "company" and that runs on every new ticket. The company lifecycle
+/// commands keep plain `decide()`: they run a few times per company.
+pub struct CompanySnapshot;
+
+#[auto_register(BOUNDED_CONTEXT)]
+impl Snapshot for CompanySnapshot {
+    type State = CompanyFacts;
+    type Event = HelpdeskEvent;
+    const NAME: &'static str = "CompanySnapshot";
+    const TAG_KEY: &'static str = "company";
+    /// The company is its own owner, as for every company-keyed
+    /// projection.
+    const OWNER_TAG_KEY: Option<&'static str> = Some("company");
+    const VERSION: u64 = 1;
+    /// Keyed by company, so it spreads over as many partitions as there
+    /// are companies - same as `CompanyActiveTickets`.
+    const PARTITION_COUNT: u32 = 4;
+    fn fold(state: &mut Self::State, event: &Self::Event) {
+        state.apply(event);
+    }
 }
 
 /// This company's own provisioned tenant name, if `RecordCompanyTenant`
@@ -1729,49 +1830,78 @@ impl CommandType for CreateTicket {
         true
     }
     fn decide(payload: &Self::Payload, matching_events: &[Self::Event]) -> CommandDecision {
-        match company_status(matching_events, &payload.company_id) {
-            None => {
-                return CommandDecision::Rejected {
-                    reason: format!("company {} has not signed up", payload.company_id),
-                    kind: "company_not_found".into(),
-                };
-            }
-            Some(CompanyStatus::Expired) => {
-                return CommandDecision::Rejected {
-                    reason: format!(
-                        "company {} is expired - subscribe to keep creating tickets",
-                        payload.company_id
-                    ),
-                    kind: "company_expired".into(),
-                };
-            }
-            Some(CompanyStatus::Trialing | CompanyStatus::Active) => {}
+        create_ticket(
+            payload,
+            &CompanyFacts::of(matching_events, &payload.company_id),
+        )
+    }
+    fn snapshot() -> Option<&'static str> {
+        Some(CompanySnapshot::NAME)
+    }
+    fn decide_from_snapshot(
+        payload: &Self::Payload,
+        snapshot_state_json: &str,
+        events_since_snapshot: &[Self::Event],
+    ) -> CommandDecision {
+        match CompanyFacts::resume(
+            snapshot_state_json,
+            events_since_snapshot,
+            &payload.company_id,
+        ) {
+            Ok(facts) => create_ticket(payload, &facts),
+            // See `decide_from_ticket_snapshot`.
+            Err(e) => CommandDecision::Rejected {
+                reason: format!(
+                    "stored CompanySnapshot for {} is unreadable: {e}",
+                    payload.company_id
+                ),
+                kind: "snapshot_unreadable".into(),
+            },
         }
-        if TicketFacts::of(matching_events, &payload.ticket_id)
-            .status
-            .is_some()
-        {
+    }
+}
+
+/// `CreateTicket`'s decision, from either path.
+fn create_ticket(payload: &CreateTicketPayload, company: &CompanyFacts) -> CommandDecision {
+    match company.status {
+        None => {
             return CommandDecision::Rejected {
-                reason: format!("ticket {} already exists", payload.ticket_id),
-                kind: "ticket_already_exists".into(),
+                reason: format!("company {} has not signed up", payload.company_id),
+                kind: "company_not_found".into(),
             };
         }
-        CommandDecision::Accepted {
-            events: vec![EventSpec {
-                event_type: "TicketCreated".into(),
-                payload: serde_json::json!({
-                    "ticket_id": payload.ticket_id,
-                    "company_id": payload.company_id,
-                    "requester_id": payload.requester_id,
-                    "logged_by_staff_id": payload.logged_by_staff_id,
-                    "title": payload.title,
-                    "description": payload.description,
-                    "priority": payload.priority,
-                    "requester_name": payload.requester_name,
-                    "requester_email": payload.requester_email,
-                }),
-            }],
+        Some(CompanyStatus::Expired) => {
+            return CommandDecision::Rejected {
+                reason: format!(
+                    "company {} is expired - subscribe to keep creating tickets",
+                    payload.company_id
+                ),
+                kind: "company_expired".into(),
+            };
         }
+        Some(CompanyStatus::Trialing | CompanyStatus::Active) => {}
+    }
+    if company.ticket_ids.contains(&payload.ticket_id) {
+        return CommandDecision::Rejected {
+            reason: format!("ticket {} already exists", payload.ticket_id),
+            kind: "ticket_already_exists".into(),
+        };
+    }
+    CommandDecision::Accepted {
+        events: vec![EventSpec {
+            event_type: "TicketCreated".into(),
+            payload: serde_json::json!({
+                "ticket_id": payload.ticket_id,
+                "company_id": payload.company_id,
+                "requester_id": payload.requester_id,
+                "logged_by_staff_id": payload.logged_by_staff_id,
+                "title": payload.title,
+                "description": payload.description,
+                "priority": payload.priority,
+                "requester_name": payload.requester_name,
+                "requester_email": payload.requester_email,
+            }),
+        }],
     }
 }
 
