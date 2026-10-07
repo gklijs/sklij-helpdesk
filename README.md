@@ -57,7 +57,11 @@ simplifications (see "What's not built" below).
   single-ticket command decides from a stored per-ticket state plus the
   events since, instead of re-reading the ticket's whole history. On a
   500-event ticket that's 31–46% faster, and as fast as a new ticket —
-  see `docs/ticket-snapshot-report-2026-10-05.md`.
+  see `docs/ticket-snapshot-report-2026-10-05.md`. `CreateTicket` does
+  the same per company (`CompanySnapshot`): without it, every new
+  ticket re-read every ticket its company ever filed, and the load
+  ramp's throughput decayed within minutes (27.7 → 105 accepted/s at
+  40 workers, `docs/create-ticket-latency-report-2026-10-09.md`).
 - **A real login**: a self-hosted OIDC provider (Dex), Authorization
   Code + PKCE, a real customer/staff dashboard in the browser — with a
   dark mode (`frontend/src/theme.rs`) that follows the system's own
@@ -145,13 +149,17 @@ reads down:
    The background catch-up replays every event into a separate state.
    Reads still get the old state. Progress is visible on
    `projections(boundedContext: "helpdesk") { name schemaVersion buildingRebuild { caughtUpTo } }`.
+   It runs at about 1,400–1,700 events/s on one instance, so a million
+   events take 10–12 minutes (`docs/rebuild-report-2026-10-07.md`).
 4. **Switch-over.** Once the replay has caught up, skilj swaps the
-   rebuilt state, schema and `schemaVersion` in, in one transaction.
-   No step for you.
-5. **Restart once.** In skilj 0.0.9 the switch-over doesn't refresh the
-   GraphQL schema, so the new field shows up on `helpdesk_TicketSummary`
-   only after each instance restarts. The REST/database state is
-   already current.
+   rebuilt state, schema and `schemaVersion` in, in one transaction,
+   and every instance refreshes its GraphQL schema, so the new field
+   shows up on `helpdesk_TicketSummary` right away. No step for you,
+   with one catch: under steady writes the switch-over can keep
+   missing its moment and never happen. If `buildingRebuild.caughtUpTo`
+   stays just behind the latest event, it's waiting for a moment with
+   no new event between two catch-up steps; a pause in writes lets it
+   through (see the report).
 
 If the deploy is rolled back instead, drop the staged rebuild:
 `discardProjectionRebuild(boundedContext: "helpdesk", name: "TicketSummary")`.
@@ -161,8 +169,8 @@ stages it again.
 `tests/projection_rebuild.rs` runs this whole rollout against real
 Postgres: discard, redeploy, rebuild, and the switch-over. It checks
 that reads return the old state until the last moment, and that the
-rebuilt state is what goes live. The test also pins the schema-refresh
-gap from step 5, so it will fail once skilj fixes it.
+rebuilt state is what goes live, and that the new field is queryable
+without a restart.
 
 ## Layout
 
@@ -353,7 +361,14 @@ metric, not just command throughput — `server.rs`'s own
 `run_csat_metrics_loop` consumes `TicketRated` off the event feed
 (`skilj-core`'s generic counters only ever see *that* a rating happened,
 never the 1-5 value) and records it as `skilj_helpdesk_ticket_ratings_total`,
-labelled by rating.
+labelled by rating. The "Async projection lag" row shows how far each
+async projection (`CompanyActiveTickets`, shared and per tenant) is
+behind its bounded context's latest event, in sequences:
+`src/projection_lag.rs`, recorded every 5s as
+`skilj_helpdesk_projection_lag`. Under the load ramp it stays in the
+tens up to 20 workers, and grows to thousands at 40 or more, where
+commands arrive faster than async catch-up folds them
+(`docs/projection-lag-report-2026-10-09.md`).
 
 **4. Optionally, generate fake traffic** so the dashboard actually has
 something to show without driving curl by hand — `SEED_DEMO_TRAFFIC=1`

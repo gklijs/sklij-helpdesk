@@ -12,11 +12,13 @@ mod support;
 
 use skilj::Snapshot;
 use skilj_helpdesk::helpdesk::{
-    TicketFacts, TicketPriority, TicketSnapshot, TicketStatus, BOUNDED_CONTEXT,
+    CompanyFacts, CompanySnapshot, CompanyStatus, TicketFacts, TicketPriority, TicketSnapshot,
+    TicketStatus, BOUNDED_CONTEXT,
 };
 use std::time::Duration;
 use support::{
-    accepted, mint_command_token, runtime, setup, test_db, trigger, unique_name, wait_until,
+    accepted, mint_command_token, rejection_kind, runtime, setup, test_db, trigger, unique_name,
+    wait_until,
 };
 
 /// The stored row for `ticket_id`: `(snapshot_version, as_of_sequence, state)`.
@@ -205,5 +207,67 @@ fn single_ticket_commands_really_decide_from_the_stored_row() {
         let response = trigger(&router, &tokens["ResolveTicket"], serde_json::json!({ "ticket_id": ticket_id })).await;
         assert!(accepted(&response), "{response:?}");
         assert_eq!(latest_resolution(&pool, &ticket_id).await, 42);
+    });
+}
+
+/// `CompanySnapshot`'s counterpart to the test above: plant an `Expired`
+/// status on a current-version company row whose history says trialing,
+/// and check `CreateTicket` follows the row.
+#[test]
+fn create_ticket_really_decides_from_the_stored_company_row() {
+    runtime().block_on(async {
+        if test_db().await.is_none() {
+            return;
+        }
+        let (skilj, pool, mapping) = setup().await;
+        let router = skilj.rest_router();
+        let sign_up = mint_command_token(&pool, &mapping, BOUNDED_CONTEXT, "SignUpCompany").await;
+        let create = mint_command_token(&pool, &mapping, BOUNDED_CONTEXT, "CreateTicket").await;
+        let company_id = unique_name("company");
+        let ticket = |ticket_id: String| {
+            serde_json::json!({
+                "ticket_id": ticket_id, "company_id": company_id, "requester_id": "customer-1",
+                "logged_by_staff_id": null, "title": "t", "description": "d", "priority": "low",
+            })
+        };
+        let response = trigger(&router, &sign_up, serde_json::json!({ "company_id": company_id, "name": "Acme", "contact_email": "a@acme.example" })).await;
+        assert!(accepted(&response), "{response:?}");
+        let response = trigger(&router, &create, ticket(unique_name("ticket"))).await;
+        assert!(accepted(&response), "{response:?}");
+
+        let stored_company = || async {
+            sqlx::query_as::<_, (i64, String)>(
+                "SELECT snapshot_version, state::text FROM bc_helpdesk.snapshots \
+                 WHERE snapshot_name = $1 AND tag_key = 'company' AND tag_value = $2",
+            )
+            .bind(CompanySnapshot::NAME)
+            .bind(&company_id)
+            .fetch_optional(&pool)
+            .await
+            .unwrap()
+        };
+        wait_until(Duration::from_secs(10), "CompanySnapshot catch-up", || async {
+            matches!(stored_company().await, Some((v, state))
+                if v == CompanySnapshot::VERSION as i64
+                    && serde_json::from_str::<CompanyFacts>(&state).unwrap().ticket_ids.len() == 1)
+        })
+        .await;
+
+        let (_, state) = stored_company().await.unwrap();
+        let mut planted: CompanyFacts = serde_json::from_str(&state).unwrap();
+        planted.status = Some(CompanyStatus::Expired);
+        sqlx::query(
+            "UPDATE bc_helpdesk.snapshots SET state = $1::jsonb \
+             WHERE snapshot_name = $2 AND tag_value = $3",
+        )
+        .bind(serde_json::to_string(&planted).unwrap())
+        .bind(CompanySnapshot::NAME)
+        .bind(&company_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let response = trigger(&router, &create, ticket(unique_name("ticket"))).await;
+        assert_eq!(rejection_kind(&response), "company_expired", "{response:?}");
     });
 }

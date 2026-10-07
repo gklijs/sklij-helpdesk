@@ -17,6 +17,7 @@ pub mod email_channel;
 pub mod helpdesk;
 pub mod marketing;
 pub mod parked_deliveries;
+pub mod projection_lag;
 pub mod routing;
 pub mod routing_guard;
 pub mod scheduling;
