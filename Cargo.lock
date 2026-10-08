@@ -3972,7 +3972,7 @@ version = "0.0.1"
 dependencies = [
  "async-nats",
  "axum",
- "base64 0.22.1",
+ "base64 0.23.1",
  "chrono",
  "futures-util",
  "http-body-util",
