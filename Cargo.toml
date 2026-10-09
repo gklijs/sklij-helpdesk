@@ -63,7 +63,7 @@ base64 = "0.22"
 # consuming application's call, made where the two routers are merged.
 # Found the hard way: a real browser (frontend/, a different origin
 # from the server) blocks the response outright without this.
-tower-http = { version = "0.6", features = ["cors"] }
+tower-http = { version = "0.7", features = ["cors"] }
 # src/bin/server.rs only - concurrency-limit + load-shed on the merged
 # router, same "consuming application's call" reasoning as tower-http
 # above: once the DB pool (skilj_core::db) is saturated, this is what
