@@ -109,7 +109,7 @@ async-nats = "0.50"
 skilj-retry = "0.0.9"
 # Ticket ids and idempotency keys are derived from a hash of the email's
 # Message-ID, so a redelivered email maps to the same ticket.
-sha2 = "0.10"
+sha2 = "0.11"
 
 [dev-dependencies]
 postgresql_embedded = "0.21.0"
