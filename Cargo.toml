@@ -51,7 +51,7 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 # reasoning as skilj-demo/src/bin/server.rs's own copy (its doc comment
 # explains why). A real dependency, not a dev one: this ships in the
 # `server` binary, not just tests.
-jsonwebtoken = "9"
+jsonwebtoken = "11"
 # src/bin/server.rs only - generates a fresh RSA keypair at startup for the
 # local JWKS/JWT shortcut (no more hardcoded private key in source).
 rsa = { version = "0.9", default-features = false, features = ["pem", "std"] }
