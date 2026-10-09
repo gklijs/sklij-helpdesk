@@ -52,9 +52,9 @@ jobs:
       # neither touched by this plain default checkout.
       - uses: actions/checkout@v7
 
-      # Cargo.toml: `skilj = { path = "../skilj/skilj" }` (and
-      # `skilj-core` the same way) - a sibling checkout, not a crates.io
-      # version, matching this project's own local-dev convention
+      # Cargo.toml's `[patch.crates-io]` points every skilj crate at
+      # `../skilj` - a sibling checkout, not the crates.io release,
+      # matching this project's own local-dev convention
       # (README.md's own `[skilj](../skilj)` link assumes the same
       # layout). Pinned to a commit so a CI run is reproducible and a
       # breaking change on skilj's `main` can't turn an unrelated PR
@@ -63,7 +63,7 @@ jobs:
       # init + a shallow fetch of exactly that commit.
       - name: Clone skilj (sibling path dependency)
         env:
-          SKILJ_COMMIT: ee3086aa86ea37b439ac2820fc6d4f3a61140f52
+          SKILJ_COMMIT: 61c84b8b08fb6342c46ddf54ea5f98a3de2db100
         run: |
           git init -q ../skilj
           git -C ../skilj fetch -q --depth 1 https://codeberg.org/gklijs/SkilJ.git "$SKILJ_COMMIT"
