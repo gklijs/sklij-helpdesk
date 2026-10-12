@@ -5,21 +5,29 @@
 //! by a decision nor leave a row that's missing the ticket's earlier
 //! history. skilj 0.0.9 refolds such a row from the tag's whole history
 //! the next time an event for it is caught up (docs/architecture.md
-//! §152 in the skilj repo). Decision equivalence itself is covered,
-//! exhaustively, by `tests/fixture/ticket_snapshot.rs`.
+//! §152 in the skilj repo). The fold itself is covered by
+//! `tests/fixture/ticket_snapshot.rs`.
 
 mod support;
 
 use skilj::Snapshot;
 use skilj_helpdesk::helpdesk::{
-    CompanyFacts, CompanySnapshot, CompanyStatus, TicketFacts, TicketPriority, TicketSnapshot,
-    TicketStatus, BOUNDED_CONTEXT,
+    TicketFacts, TicketPriority, TicketSnapshot, TicketStatus, BOUNDED_CONTEXT,
 };
 use std::time::Duration;
 use support::{
-    accepted, mint_command_token, rejection_kind, runtime, setup, test_db, trigger, unique_name,
-    wait_until,
+    accepted, mint_command_token, runtime, setup, test_db, trigger, unique_name, wait_until,
 };
+
+/// The flag skilj ORs into a stored `snapshot_version` since it folds an
+/// event into every value it carries (skilj docs/architecture.md §202):
+/// a row without it is never trusted.
+const EVERY_VALUE_FOLD: i64 = 1 << 40;
+
+/// `version` as skilj stores it.
+fn stored_version(version: u64) -> i64 {
+    version as i64 | EVERY_VALUE_FOLD
+}
 
 /// The stored row for `ticket_id`: `(snapshot_version, as_of_sequence, state)`.
 async fn stored(pool: &skilj_core::db::Pool, ticket_id: &str) -> Option<(i64, i64, TicketFacts)> {
@@ -69,7 +77,7 @@ async fn latest_resolution(pool: &skilj_core::db::Pool, ticket_id: &str) -> i64 
 async fn wait_until_current(pool: &skilj_core::db::Pool, ticket_id: &str) {
     let last = last_ticket_event(pool, ticket_id).await;
     wait_until(Duration::from_secs(10), "TicketSnapshot catch-up", || async {
-        matches!(stored(pool, ticket_id).await, Some((v, as_of, _)) if v == TicketSnapshot::VERSION as i64 && as_of >= last)
+        matches!(stored(pool, ticket_id).await, Some((v, as_of, _)) if v == stored_version(TicketSnapshot::VERSION) && as_of >= last)
     })
     .await;
 }
@@ -127,7 +135,7 @@ fn an_older_version_row_is_ignored_and_then_refolded_from_the_whole_history() {
             "UPDATE bc_helpdesk.snapshots SET snapshot_version = $1, state = '{\"retired\": true}'::jsonb \
              WHERE snapshot_name = $2 AND tag_value = $3",
         )
-        .bind(TicketSnapshot::VERSION as i64 - 1)
+        .bind(stored_version(TicketSnapshot::VERSION - 1))
         .bind(TicketSnapshot::NAME)
         .bind(&ticket_id)
         .execute(&pool)
@@ -156,9 +164,9 @@ fn an_older_version_row_is_ignored_and_then_refolded_from_the_whole_history() {
     });
 }
 
-/// skilj falls back to plain `decide()`, silently, whenever it won't use
-/// a snapshot (a command deriving more than the one `ticket` tag, say) -
-/// every other test would still pass with the snapshot dead weight. So
+/// A command would decide the same from the whole history as from the
+/// row - every other test would still pass with the snapshot dead
+/// weight. So
 /// plant a current-version row that disagrees with the history and check
 /// the decision follows the row: proof the stored state is what's read.
 #[test]
@@ -207,67 +215,5 @@ fn single_ticket_commands_really_decide_from_the_stored_row() {
         let response = trigger(&router, &tokens["ResolveTicket"], serde_json::json!({ "ticket_id": ticket_id })).await;
         assert!(accepted(&response), "{response:?}");
         assert_eq!(latest_resolution(&pool, &ticket_id).await, 42);
-    });
-}
-
-/// `CompanySnapshot`'s counterpart to the test above: plant an `Expired`
-/// status on a current-version company row whose history says trialing,
-/// and check `CreateTicket` follows the row.
-#[test]
-fn create_ticket_really_decides_from_the_stored_company_row() {
-    runtime().block_on(async {
-        if test_db().await.is_none() {
-            return;
-        }
-        let (skilj, pool, mapping) = setup().await;
-        let router = skilj.rest_router();
-        let sign_up = mint_command_token(&pool, &mapping, BOUNDED_CONTEXT, "SignUpCompany").await;
-        let create = mint_command_token(&pool, &mapping, BOUNDED_CONTEXT, "CreateTicket").await;
-        let company_id = unique_name("company");
-        let ticket = |ticket_id: String| {
-            serde_json::json!({
-                "ticket_id": ticket_id, "company_id": company_id, "requester_id": "customer-1",
-                "logged_by_staff_id": null, "title": "t", "description": "d", "priority": "low",
-            })
-        };
-        let response = trigger(&router, &sign_up, serde_json::json!({ "company_id": company_id, "name": "Acme", "contact_email": "a@acme.example" })).await;
-        assert!(accepted(&response), "{response:?}");
-        let response = trigger(&router, &create, ticket(unique_name("ticket"))).await;
-        assert!(accepted(&response), "{response:?}");
-
-        let stored_company = || async {
-            sqlx::query_as::<_, (i64, String)>(
-                "SELECT snapshot_version, state::text FROM bc_helpdesk.snapshots \
-                 WHERE snapshot_name = $1 AND tag_key = 'company' AND tag_value = $2",
-            )
-            .bind(CompanySnapshot::NAME)
-            .bind(&company_id)
-            .fetch_optional(&pool)
-            .await
-            .unwrap()
-        };
-        wait_until(Duration::from_secs(10), "CompanySnapshot catch-up", || async {
-            matches!(stored_company().await, Some((v, state))
-                if v == CompanySnapshot::VERSION as i64
-                    && serde_json::from_str::<CompanyFacts>(&state).unwrap().ticket_ids.len() == 1)
-        })
-        .await;
-
-        let (_, state) = stored_company().await.unwrap();
-        let mut planted: CompanyFacts = serde_json::from_str(&state).unwrap();
-        planted.status = Some(CompanyStatus::Expired);
-        sqlx::query(
-            "UPDATE bc_helpdesk.snapshots SET state = $1::jsonb \
-             WHERE snapshot_name = $2 AND tag_value = $3",
-        )
-        .bind(serde_json::to_string(&planted).unwrap())
-        .bind(CompanySnapshot::NAME)
-        .bind(&company_id)
-        .execute(&pool)
-        .await
-        .unwrap();
-
-        let response = trigger(&router, &create, ticket(unique_name("ticket"))).await;
-        assert_eq!(rejection_kind(&response), "company_expired", "{response:?}");
     });
 }

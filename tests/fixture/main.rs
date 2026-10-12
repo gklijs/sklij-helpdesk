@@ -15,7 +15,7 @@
 
 mod activity_marketing;
 mod company;
-mod company_snapshot;
+mod consistency_query;
 mod events;
 mod projections;
 mod ticket;

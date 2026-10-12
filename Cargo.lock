@@ -3879,7 +3879,9 @@ checksum = "8ee5873ec9cce0195efcb7a4e9507a04cd49aec9c83d0389df45b1ef7ba2e649"
 
 [[package]]
 name = "skilj"
-version = "0.0.9"
+version = "0.0.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ec6b7b4aeb1294d8a105b1b497882060b2f9cf8c7ef146b290c6886f8a3e62a2"
 dependencies = [
  "arc-swap",
  "axum",
@@ -3900,7 +3902,9 @@ dependencies = [
 
 [[package]]
 name = "skilj-bridge"
-version = "0.0.9"
+version = "0.0.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "097285864f07b59378133887d9c323ae63b71e1d93ae45d501c4eb4a63f88135"
 dependencies = [
  "chrono",
  "reqwest 0.13.4",
@@ -3914,7 +3918,9 @@ dependencies = [
 
 [[package]]
 name = "skilj-core"
-version = "0.0.9"
+version = "0.0.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8665acc1855f0ff51983f0f8249355b042de9c47c67b808d296040a85e817d40"
 dependencies = [
  "arc-swap",
  "base64 0.23.1",
@@ -3941,7 +3947,9 @@ dependencies = [
 
 [[package]]
 name = "skilj-graphql"
-version = "0.0.9"
+version = "0.0.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a158e4900760fdf3c36d30d7bb614e353a764cf3d83d54fdc365cd8a394b70a1"
 dependencies = [
  "arc-swap",
  "async-graphql",
@@ -3999,7 +4007,9 @@ dependencies = [
 
 [[package]]
 name = "skilj-macros"
-version = "0.0.9"
+version = "0.0.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "01f702fdadb3baaf51862b8584ab3a2ac3ce994840a2d0a3bff5230fe4a7dd87"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -4008,7 +4018,9 @@ dependencies = [
 
 [[package]]
 name = "skilj-nats"
-version = "0.0.9"
+version = "0.0.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8f805458e98b0479a272b66c2baa0c41cbe3bb40fd3d9803da6dc344ebd88c86"
 dependencies = [
  "async-nats",
  "chrono",
@@ -4025,7 +4037,9 @@ dependencies = [
 
 [[package]]
 name = "skilj-rest"
-version = "0.0.9"
+version = "0.0.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "65e0be5aefa19747abd422b6271ac620a676f773d05cbeb5f9877a8eb0cf3f7f"
 dependencies = [
  "axum",
  "axum-extra",
@@ -4042,14 +4056,18 @@ dependencies = [
 
 [[package]]
 name = "skilj-retry"
-version = "0.0.9"
+version = "0.0.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "20ab04e90c8a7abeb15ecd1f349764791cbf7fe42798fff85b7e340262a92640"
 dependencies = [
  "chrono",
 ]
 
 [[package]]
 name = "skilj-test-fixture"
-version = "0.0.9"
+version = "0.0.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "435314c6eb96d6aa8f7005871521c0b11fc4759f9b04a143ef6e961e34d026b9"
 dependencies = [
  "serde_json",
  "skilj-core",

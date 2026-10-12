@@ -9,6 +9,7 @@ use skilj_helpdesk::scheduling;
 use skilj_test_fixture::command::GivenEvents;
 
 use crate::events::*;
+use crate::ticket_snapshot::GivenTicket;
 
 // --- CreateTicket ---
 
@@ -104,7 +105,7 @@ fn a_ticket_id_can_only_be_used_once() {
 
 #[test]
 fn an_open_ticket_can_be_assigned() {
-    GivenEvents::<AssignTicket>::new()
+    GivenTicket::<AssignTicket>::new()
         .events(open_ticket("t1", "acme"))
         .when(AssignTicketPayload {
             ticket_id: "t1".into(),
@@ -124,7 +125,7 @@ fn only_an_open_ticket_can_be_assigned() {
         resolved_ticket("t1", "acme"),
         closed_ticket("t1", "acme"),
     ] {
-        GivenEvents::<AssignTicket>::new()
+        GivenTicket::<AssignTicket>::new()
             .events(history)
             .when(AssignTicketPayload {
                 ticket_id: "t1".into(),
@@ -136,7 +137,7 @@ fn only_an_open_ticket_can_be_assigned() {
 
 #[test]
 fn another_tickets_history_does_not_count() {
-    GivenEvents::<AssignTicket>::new()
+    GivenTicket::<AssignTicket>::new()
         .events(open_ticket("t2", "acme"))
         .when(AssignTicketPayload {
             ticket_id: "t1".into(),
@@ -149,7 +150,7 @@ fn another_tickets_history_does_not_count() {
 
 #[test]
 fn an_in_progress_ticket_resolves() {
-    GivenEvents::<ResolveTicket>::new()
+    GivenTicket::<ResolveTicket>::new()
         .events(in_progress_ticket("t1", "acme"))
         .when(ResolveTicketPayload {
             ticket_id: "t1".into(),
@@ -168,7 +169,7 @@ fn a_ticket_not_in_progress_cannot_be_resolved() {
         resolved_ticket("t1", "acme"),
         closed_ticket("t1", "acme"),
     ] {
-        GivenEvents::<ResolveTicket>::new()
+        GivenTicket::<ResolveTicket>::new()
             .events(history)
             .when(ResolveTicketPayload {
                 ticket_id: "t1".into(),
@@ -179,7 +180,7 @@ fn a_ticket_not_in_progress_cannot_be_resolved() {
 
 #[test]
 fn a_resolved_ticket_reopens_and_can_be_resolved_again() {
-    GivenEvents::<ReopenTicket>::new()
+    GivenTicket::<ReopenTicket>::new()
         .events(resolved_ticket("t1", "acme"))
         .when(ReopenTicketPayload {
             ticket_id: "t1".into(),
@@ -190,7 +191,7 @@ fn a_resolved_ticket_reopens_and_can_be_resolved_again() {
         )]);
     let mut history = resolved_ticket("t1", "acme");
     history.push(reopened("t1", "acme", 1));
-    GivenEvents::<ResolveTicket>::new()
+    GivenTicket::<ResolveTicket>::new()
         .events(history)
         .when(ResolveTicketPayload {
             ticket_id: "t1".into(),
@@ -202,7 +203,7 @@ fn a_resolved_ticket_reopens_and_can_be_resolved_again() {
     let mut history = resolved_ticket("t1", "acme");
     history.push(reopened("t1", "acme", 1));
     history.push(resolved("t1", "acme", 2));
-    GivenEvents::<ReopenTicket>::new()
+    GivenTicket::<ReopenTicket>::new()
         .events(history)
         .when(ReopenTicketPayload {
             ticket_id: "t1".into(),
@@ -220,7 +221,7 @@ fn only_a_resolved_ticket_reopens() {
         in_progress_ticket("t1", "acme"),
         closed_ticket("t1", "acme"),
     ] {
-        GivenEvents::<ReopenTicket>::new()
+        GivenTicket::<ReopenTicket>::new()
             .events(history)
             .when(ReopenTicketPayload {
                 ticket_id: "t1".into(),
@@ -231,7 +232,7 @@ fn only_a_resolved_ticket_reopens() {
 
 #[test]
 fn a_resolved_ticket_closes() {
-    GivenEvents::<CloseTicket>::new()
+    GivenTicket::<CloseTicket>::new()
         .events(resolved_ticket("t1", "acme"))
         .when(CloseTicketPayload {
             ticket_id: "t1".into(),
@@ -251,7 +252,7 @@ fn an_auto_close_that_lost_the_race_to_a_reopen_is_rejected() {
     // were numbered, which no reopen can cancel.
     let mut history = resolved_ticket("t1", "acme");
     history.push(reopened("t1", "acme", 1));
-    GivenEvents::<CloseTicket>::new()
+    GivenTicket::<CloseTicket>::new()
         .events(history)
         .when(CloseTicketPayload {
             ticket_id: "t1".into(),
@@ -259,7 +260,7 @@ fn an_auto_close_that_lost_the_race_to_a_reopen_is_rejected() {
             requester_email: None,
         })
         .then_rejected("ticket_not_resolved");
-    GivenEvents::<CloseTicket>::new()
+    GivenTicket::<CloseTicket>::new()
         .events(closed_ticket("t1", "acme"))
         .when(CloseTicketPayload {
             ticket_id: "t1".into(),
@@ -359,7 +360,7 @@ fn reopening_cancels_only_the_auto_close_of_the_resolution_it_undoes() {
 
 #[test]
 fn staff_ask_and_the_customer_answers() {
-    GivenEvents::<RequestInfoFromCustomer>::new()
+    GivenTicket::<RequestInfoFromCustomer>::new()
         .events(in_progress_ticket("t1", "acme"))
         .when(RequestInfoFromCustomerPayload {
             ticket_id: "t1".into(),
@@ -371,7 +372,7 @@ fn staff_ask_and_the_customer_answers() {
             "TicketInfoRequested",
             json!({ "ticket_id": "t1", "company_id": "acme", "staff_id": "staff-1", "message": "Which browser?", "requester_id": "customer-1" }),
         )]);
-    GivenEvents::<CustomerRespondsToTicket>::new()
+    GivenTicket::<CustomerRespondsToTicket>::new()
         .events(waiting_ticket("t1", "acme"))
         .when(CustomerRespondsToTicketPayload {
             ticket_id: "t1".into(),
@@ -389,7 +390,7 @@ fn customer_text_is_only_accepted_under_the_tickets_own_requester() {
     // The text is encrypted under the key `requester_id` names, so a
     // wrong or missing one would file it under someone else.
     for requester_id in [None, Some("customer-2")] {
-        GivenEvents::<RequestInfoFromCustomer>::new()
+        GivenTicket::<RequestInfoFromCustomer>::new()
             .events(in_progress_ticket("t1", "acme"))
             .when(RequestInfoFromCustomerPayload {
                 ticket_id: "t1".into(),
@@ -398,7 +399,7 @@ fn customer_text_is_only_accepted_under_the_tickets_own_requester() {
                 requester_id: requester_id.map(Into::into),
             })
             .then_rejected("requester_mismatch");
-        GivenEvents::<RateTicket>::new()
+        GivenTicket::<RateTicket>::new()
             .events(resolved_ticket("t1", "acme"))
             .when(RateTicketPayload {
                 requester_id: requester_id.map(Into::into),
@@ -406,7 +407,7 @@ fn customer_text_is_only_accepted_under_the_tickets_own_requester() {
             })
             .then_rejected("requester_mismatch");
     }
-    GivenEvents::<CustomerRespondsToTicket>::new()
+    GivenTicket::<CustomerRespondsToTicket>::new()
         .events(waiting_ticket("t1", "acme"))
         .when(CustomerRespondsToTicketPayload {
             ticket_id: "t1".into(),
@@ -423,7 +424,7 @@ fn info_can_only_be_requested_on_an_in_progress_ticket() {
         waiting_ticket("t1", "acme"),
         resolved_ticket("t1", "acme"),
     ] {
-        GivenEvents::<RequestInfoFromCustomer>::new()
+        GivenTicket::<RequestInfoFromCustomer>::new()
             .events(history)
             .when(RequestInfoFromCustomerPayload {
                 ticket_id: "t1".into(),
@@ -444,7 +445,7 @@ fn a_customer_can_only_respond_when_asked() {
         in_progress_ticket("t1", "acme"),
         answered,
     ] {
-        GivenEvents::<CustomerRespondsToTicket>::new()
+        GivenTicket::<CustomerRespondsToTicket>::new()
             .events(history)
             .when(CustomerRespondsToTicketPayload {
                 ticket_id: "t1".into(),
@@ -458,7 +459,7 @@ fn a_customer_can_only_respond_when_asked() {
 // --- EscalateTicket ---
 
 fn escalation_of(priority: TicketPriority) -> (TicketPriority, TicketPriority) {
-    let decision = GivenEvents::<EscalateTicket>::new()
+    let decision = GivenTicket::<EscalateTicket>::new()
         .event(created("t1", "acme", priority))
         .when(EscalateTicketPayload {
             ticket_id: "t1".into(),
@@ -489,7 +490,7 @@ fn any_unhandled_ticket_can_be_escalated_once() {
         in_progress_ticket("t1", "acme"),
         waiting_ticket("t1", "acme"),
     ] {
-        GivenEvents::<EscalateTicket>::new()
+        GivenTicket::<EscalateTicket>::new()
             .events(history)
             .when(EscalateTicketPayload {
                 ticket_id: "t1".into(),
@@ -503,7 +504,7 @@ fn any_unhandled_ticket_can_be_escalated_once() {
         TicketPriority::Medium,
         TicketPriority::High,
     ));
-    GivenEvents::<EscalateTicket>::new()
+    GivenTicket::<EscalateTicket>::new()
         .events(history)
         .when(EscalateTicketPayload {
             ticket_id: "t1".into(),
@@ -521,7 +522,7 @@ fn a_handled_ticket_is_not_escalated() {
         closed_ticket("t1", "acme"),
         merged_away,
     ] {
-        GivenEvents::<EscalateTicket>::new()
+        GivenTicket::<EscalateTicket>::new()
             .events(history)
             .when(EscalateTicketPayload {
                 ticket_id: "t1".into(),
@@ -541,7 +542,7 @@ fn merge(primary: &str, duplicate: &str) -> MergeTicketsPayload {
 
 #[test]
 fn two_tickets_of_one_company_merge() {
-    GivenEvents::<MergeTickets>::new()
+    GivenTicket::<MergeTickets>::new()
         .events(resolved_ticket("t1", "acme"))
         .events(open_ticket("t2", "acme"))
         .when(merge("t1", "t2"))
@@ -553,24 +554,24 @@ fn two_tickets_of_one_company_merge() {
 
 #[test]
 fn merge_rejections_name_the_side_that_failed() {
-    GivenEvents::<MergeTickets>::new()
+    GivenTicket::<MergeTickets>::new()
         .events(open_ticket("t1", "acme"))
         .when(merge("t1", "t1"))
         .then_rejected("cannot_merge_ticket_into_itself");
-    GivenEvents::<MergeTickets>::new()
+    GivenTicket::<MergeTickets>::new()
         .events(open_ticket("t2", "acme"))
         .when(merge("t1", "t2"))
         .then_rejected("primary_ticket_not_found");
-    GivenEvents::<MergeTickets>::new()
+    GivenTicket::<MergeTickets>::new()
         .events(open_ticket("t1", "acme"))
         .when(merge("t1", "t2"))
         .then_rejected("duplicate_ticket_not_found");
-    GivenEvents::<MergeTickets>::new()
+    GivenTicket::<MergeTickets>::new()
         .events(closed_ticket("t1", "acme"))
         .events(open_ticket("t2", "acme"))
         .when(merge("t1", "t2"))
         .then_rejected("primary_ticket_not_mergeable");
-    GivenEvents::<MergeTickets>::new()
+    GivenTicket::<MergeTickets>::new()
         .events(open_ticket("t1", "acme"))
         .events(closed_ticket("t2", "acme"))
         .when(merge("t1", "t2"))
@@ -583,7 +584,7 @@ fn a_ticket_merged_away_cannot_be_merged_again_from_either_side() {
     history.extend(open_ticket("t2", "acme"));
     history.extend(open_ticket("t3", "acme"));
     history.push(merged("t1", "t2", "acme"));
-    GivenEvents::<MergeTickets>::new()
+    GivenTicket::<MergeTickets>::new()
         .events(history)
         .when(merge("t2", "t3"))
         .then_rejected("primary_ticket_not_mergeable");
@@ -591,7 +592,7 @@ fn a_ticket_merged_away_cannot_be_merged_again_from_either_side() {
     history.extend(open_ticket("t2", "acme"));
     history.extend(open_ticket("t3", "acme"));
     history.push(merged("t1", "t2", "acme"));
-    GivenEvents::<MergeTickets>::new()
+    GivenTicket::<MergeTickets>::new()
         .events(history)
         .when(merge("t3", "t2"))
         .then_rejected("duplicate_ticket_not_mergeable");
@@ -599,7 +600,7 @@ fn a_ticket_merged_away_cannot_be_merged_again_from_either_side() {
 
 #[test]
 fn tickets_of_different_companies_never_merge() {
-    GivenEvents::<MergeTickets>::new()
+    GivenTicket::<MergeTickets>::new()
         .events(open_ticket("t1", "acme"))
         .events(open_ticket("t2", "globex"))
         .when(merge("t1", "t2"))
@@ -620,7 +621,7 @@ fn rate(rating: u8) -> RateTicketPayload {
 #[test]
 fn a_resolved_or_closed_ticket_can_be_rated() {
     for history in [resolved_ticket("t1", "acme"), closed_ticket("t1", "acme")] {
-        GivenEvents::<RateTicket>::new()
+        GivenTicket::<RateTicket>::new()
             .events(history)
             .when(rate(5))
             .then_accepted(vec![spec(
@@ -633,7 +634,7 @@ fn a_resolved_or_closed_ticket_can_be_rated() {
 #[test]
 fn ratings_outside_one_to_five_are_rejected() {
     for rating in [0, 6, 255] {
-        GivenEvents::<RateTicket>::new()
+        GivenTicket::<RateTicket>::new()
             .events(resolved_ticket("t1", "acme"))
             .when(rate(rating))
             .then_rejected("invalid_rating");
@@ -644,7 +645,7 @@ fn ratings_outside_one_to_five_are_rejected() {
 fn a_ticket_is_rated_once_and_only_once_handled() {
     let mut history = resolved_ticket("t1", "acme");
     history.push(rated("t1", "acme", 4));
-    GivenEvents::<RateTicket>::new()
+    GivenTicket::<RateTicket>::new()
         .events(history)
         .when(rate(5))
         .then_rejected("already_rated");
@@ -653,12 +654,12 @@ fn a_ticket_is_rated_once_and_only_once_handled() {
         in_progress_ticket("t1", "acme"),
         waiting_ticket("t1", "acme"),
     ] {
-        GivenEvents::<RateTicket>::new()
+        GivenTicket::<RateTicket>::new()
             .events(history)
             .when(rate(5))
             .then_rejected("ticket_not_ratable");
     }
-    GivenEvents::<RateTicket>::new()
+    GivenTicket::<RateTicket>::new()
         .when(rate(5))
         .then_rejected("ticket_not_found");
 }
@@ -672,7 +673,7 @@ fn staff_can_note_a_ticket_in_any_status() {
         waiting_ticket("t1", "acme"),
         closed_ticket("t1", "acme"),
     ] {
-        GivenEvents::<AddInternalNote>::new()
+        GivenTicket::<AddInternalNote>::new()
             .events(history)
             .when(AddInternalNotePayload {
                 ticket_id: "t1".into(),
@@ -684,7 +685,7 @@ fn staff_can_note_a_ticket_in_any_status() {
                 json!({ "ticket_id": "t1", "company_id": "acme", "staff_id": "staff-1", "note": "customer is a VIP" }),
             )]);
     }
-    GivenEvents::<AddInternalNote>::new()
+    GivenTicket::<AddInternalNote>::new()
         .when(AddInternalNotePayload {
             ticket_id: "t1".into(),
             staff_id: "staff-1".into(),
@@ -697,24 +698,24 @@ fn staff_can_note_a_ticket_in_any_status() {
 
 #[test]
 fn every_ticket_command_rejects_an_unknown_ticket() {
-    GivenEvents::<ResolveTicket>::new()
+    GivenTicket::<ResolveTicket>::new()
         .when(ResolveTicketPayload {
             ticket_id: "t1".into(),
         })
         .then_rejected("ticket_not_found");
-    GivenEvents::<ReopenTicket>::new()
+    GivenTicket::<ReopenTicket>::new()
         .when(ReopenTicketPayload {
             ticket_id: "t1".into(),
         })
         .then_rejected("ticket_not_found");
-    GivenEvents::<CloseTicket>::new()
+    GivenTicket::<CloseTicket>::new()
         .when(CloseTicketPayload {
             ticket_id: "t1".into(),
             requester_id: Some("customer-1".into()),
             requester_email: None,
         })
         .then_rejected("ticket_not_found");
-    GivenEvents::<RequestInfoFromCustomer>::new()
+    GivenTicket::<RequestInfoFromCustomer>::new()
         .when(RequestInfoFromCustomerPayload {
             ticket_id: "t1".into(),
             staff_id: "staff-1".into(),
@@ -722,14 +723,14 @@ fn every_ticket_command_rejects_an_unknown_ticket() {
             requester_id: Some("customer-1".into()),
         })
         .then_rejected("ticket_not_found");
-    GivenEvents::<CustomerRespondsToTicket>::new()
+    GivenTicket::<CustomerRespondsToTicket>::new()
         .when(CustomerRespondsToTicketPayload {
             ticket_id: "t1".into(),
             requester_id: "customer-1".into(),
             message: "?".into(),
         })
         .then_rejected("ticket_not_found");
-    GivenEvents::<EscalateTicket>::new()
+    GivenTicket::<EscalateTicket>::new()
         .when(EscalateTicketPayload {
             ticket_id: "t1".into(),
         })

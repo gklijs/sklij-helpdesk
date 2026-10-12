@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 use skilj::{auto_register, CommandType, EventType};
 use skilj_core::event_store::Event;
 use skilj_core::plugin::BoundedContextEvent;
-use skilj_core::shared::{CommandDecision, EventSpec, TagMapping};
+use skilj_core::shared::{CommandDecision, EventSpec, QueryItemMapping, TagMapping};
 
 pub const BOUNDED_CONTEXT: &str = "activity";
 
@@ -33,6 +33,13 @@ fn company_tag() -> Vec<TagMapping> {
     vec![TagMapping {
         key: "company".into(),
         field: "company_id".into(),
+    }]
+}
+
+fn person_tag() -> Vec<TagMapping> {
+    vec![TagMapping {
+        key: "person".into(),
+        field: "person_subject".into(),
     }]
 }
 
@@ -161,28 +168,24 @@ impl CommandType for RecordDailyActivity {
     type Event = ActivityEvent;
     const NAME: &'static str = "RecordDailyActivity";
     fn tag_mappings() -> Vec<TagMapping> {
-        vec![
-            TagMapping {
-                key: "company".into(),
-                field: "company_id".into(),
-            },
-            TagMapping {
-                key: "person".into(),
-                field: "person_subject".into(),
-            },
-        ]
+        [company_tag(), person_tag()].concat()
+    }
+    /// This person's records at this company - carrying both tags, not
+    /// either, which without a query was every record of the whole
+    /// company plus every record of the person. `person` first: an item
+    /// is looked up by its first tag, and a person has far fewer records
+    /// than their company.
+    fn consistency_query() -> Vec<QueryItemMapping> {
+        vec![QueryItemMapping::types(&["DailyActivityRecorded"])
+            .tagged(person_tag())
+            .tagged(company_tag())]
     }
     fn rest_trigger_allowed() -> bool {
         true
     }
     fn decide(payload: &Self::Payload, matching_events: &[Self::Event]) -> CommandDecision {
-        // `matching_events` is every DailyActivityRecorded tagged with
-        // this company OR this person (union - see
-        // `DailyActivityRecorded::tag_mappings` above), so the exact
-        // company+person+day triple is checked here, in application
-        // code, the same "broader tag scope, precise application-level
-        // match" shape `MergeTickets::decide` already relies on for its
-        // own two-ticket read in `helpdesk.rs`.
+        // `matching_events` is every day this person was recorded at
+        // this company, so the day is checked here, in application code.
         let already_recorded = matching_events.iter().any(|e| match e {
             ActivityEvent::DailyActivityRecorded(p) => {
                 p.company_id == payload.company_id
@@ -235,6 +238,12 @@ impl CommandType for RecordEngagementDecline {
     const NAME: &'static str = "RecordEngagementDecline";
     fn tag_mappings() -> Vec<TagMapping> {
         company_tag()
+    }
+    /// Whether the company was flagged at all: its latest flag.
+    fn consistency_query() -> Vec<QueryItemMapping> {
+        vec![QueryItemMapping::types(&["CompanyEngagementDeclined"])
+            .tagged(company_tag())
+            .latest()]
     }
     fn rest_trigger_allowed() -> bool {
         true

@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 use skilj::{auto_register, CommandType, CrossContextRoute, EventType};
 use skilj_core::event_store::Event;
 use skilj_core::plugin::BoundedContextEvent;
-use skilj_core::shared::{CommandDecision, EventSpec, TagMapping};
+use skilj_core::shared::{CommandDecision, EventSpec, QueryItemMapping, TagMapping};
 
 use crate::activity;
 use crate::helpdesk;
@@ -123,6 +123,16 @@ impl BoundedContextEvent for MarketingEvent {
 }
 
 // --- commands ---
+
+/// The consistency query for the three commands below, whose `decide()`
+/// reads nothing: without one, each read every event of its company in
+/// this bounded context. With `nothing()` (skilj docs/architecture.md
+/// §201) each reads no history and no event conflicts with it, while the
+/// company tag still scopes it to its owner.
+fn marketing_query() -> Vec<QueryItemMapping> {
+    vec![QueryItemMapping::nothing()]
+}
+
 //
 // Each accepted unconditionally - `specs/marketing.allium`'s own
 // "Rejected when: none identified yet" for all three (see that file's
@@ -146,6 +156,10 @@ impl CommandType for RecordTrialLapse {
     const NAME: &'static str = "RecordTrialLapse";
     fn tag_mappings() -> Vec<TagMapping> {
         company_tag()
+    }
+    /// See `marketing_query`.
+    fn consistency_query() -> Vec<QueryItemMapping> {
+        marketing_query()
     }
     fn decide(payload: &Self::Payload, _matching_events: &[Self::Event]) -> CommandDecision {
         CommandDecision::Accepted {
@@ -175,6 +189,10 @@ impl CommandType for RecordTrialConversion {
     const NAME: &'static str = "RecordTrialConversion";
     fn tag_mappings() -> Vec<TagMapping> {
         company_tag()
+    }
+    /// See `marketing_query`.
+    fn consistency_query() -> Vec<QueryItemMapping> {
+        marketing_query()
     }
     fn decide(payload: &Self::Payload, _matching_events: &[Self::Event]) -> CommandDecision {
         CommandDecision::Accepted {
@@ -208,6 +226,10 @@ impl CommandType for RecordEngagementDecline {
     const NAME: &'static str = "RecordEngagementDecline";
     fn tag_mappings() -> Vec<TagMapping> {
         company_tag()
+    }
+    /// See `marketing_query`.
+    fn consistency_query() -> Vec<QueryItemMapping> {
+        marketing_query()
     }
     fn decide(payload: &Self::Payload, _matching_events: &[Self::Event]) -> CommandDecision {
         CommandDecision::Accepted {

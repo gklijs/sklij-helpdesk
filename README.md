@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/gklijs/sklij-helpdesk/actions/workflows/ci.yml/badge.svg)](https://github.com/gklijs/sklij-helpdesk/actions/workflows/ci.yml)
 
-A showcase SaaS helpdesk built on [skilj](https://crates.io/crates/skilj) (the released 0.0.9 from crates.io) — a Rust library for
+A showcase SaaS helpdesk built on [skilj](https://crates.io/crates/skilj) (the released 0.0.10 from crates.io) — a Rust library for
 event-sourced, DDD-style applications. This project exists to exercise
 skilj for real: every piece below was built, run, and verified against
 a live stack, not just written and assumed to work.
@@ -57,11 +57,16 @@ simplifications (see "What's not built" below).
   single-ticket command decides from a stored per-ticket state plus the
   events since, instead of re-reading the ticket's whole history. On a
   500-event ticket that's 31–46% faster, and as fast as a new ticket —
-  see `docs/ticket-snapshot-report-2026-10-05.md`. `CreateTicket` does
-  the same per company (`CompanySnapshot`): without it, every new
-  ticket re-read every ticket its company ever filed, and the load
-  ramp's throughput decayed within minutes (27.7 → 105 accepted/s at
-  40 workers, `docs/create-ticket-latency-report-2026-10-09.md`).
+  see `docs/ticket-snapshot-report-2026-10-05.md`.
+- **A consistency query for every command**: each names what its
+  decision needs. The ticket commands name their ticket's
+  `TicketSnapshot` state as a snapshot item, `MergeTickets` both
+  tickets'; `CreateTicket` and the company and activity commands the few
+  events they read (a company's latest lifecycle event, not every ticket
+  it filed); the marketing commands nothing at all. No command's cost
+  grows with its company any more: at a company's 2,000th ticket
+  `CreateTicket` is 3.6× faster, a company command 12×, a merge 3× —
+  see `docs/consistency-query-report-2026-10-11.md`.
 - **A real login**: a self-hosted OIDC provider (Dex), Authorization
   Code + PKCE, a real customer/staff dashboard in the browser — with a
   dark mode (`frontend/src/theme.rs`) that follows the system's own
@@ -287,7 +292,7 @@ running it (see below).
 
 skilj ships two terminal consoles for running a deployment. Neither is
 part of this repo; install them with
-`cargo install skilj-tui skilj-inspector --version 0.0.9`.
+`cargo install skilj-tui skilj-inspector --version 0.0.10`.
 `scripts/dev.sh` prints both commands, filled in, when it starts.
 
 **`skilj-tui`** is a GraphQL client, so it goes through the same login
@@ -317,7 +322,7 @@ skilj reports a grant below Admin.
 **`skilj-inspector`** reads Postgres directly, read-only, for when the
 server itself is down. It lists every bounded context (tenants
 included), registered types and projections, and the most recent 200
-events per context. It never decrypts sensitive fields. In 0.0.9 the
+events per context. It never decrypts sensitive fields. Through 0.0.10 the
 Events tab's title says "newest first" but it lists those 200 oldest
 first.
 
@@ -600,6 +605,28 @@ surfaced five real bugs, each confirmed failing first, then fixed:
    `TicketInternalNotes`'s own doc comment in `src/helpdesk.rs`) —
    `tests/cross_company_projection_scoping.rs` now proves this half live
    too.
+
+## Running on skilj 0.0.10
+
+- **Consistency queries.** Every command type names what its
+  `decide()` needs (see "A consistency query for every command" above
+  and `docs/consistency-query-report-2026-10-11.md`): ticket commands a
+  `TicketSnapshot` snapshot item, the marketing commands
+  `QueryItemMapping::nothing()`.
+- **Slow-command warnings**, on by default: a command whose read before
+  the lock takes over 250 ms, or whose `decide()` takes over 10 ms, is
+  logged at most once a minute per command type, with the number of
+  events it read or decided on.
+- **Statement cache.** Every tenant is its own bounded context, and each
+  brings its own prepared statements. skilj warns at startup when the
+  per-connection cache (sqlx's default, 100) is under 10 per active
+  bounded context. With many busy tenants, raise it with
+  `statement-cache-capacity=<n>` on `DATABASE_URL`; skilj's
+  docs/performance.md suggests about 20 per busy bounded context, plus
+  20, and what that costs in Postgres memory.
+- **Idempotency keys are kept 48 hours** instead of one, so the email
+  bridge's redelivered NATS messages are deduplicated across a longer
+  outage.
 
 ## Running on skilj 0.0.9
 
