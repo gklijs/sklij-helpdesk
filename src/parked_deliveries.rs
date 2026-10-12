@@ -1,7 +1,7 @@
 //! Watching parked deliveries.
 //!
 //! Three `CrossContextRoute`s (`marketing.rs`) and three
-//! `ScheduleDeadline`s (`helpdesk.rs`) submit commands from skilj's own
+//! `ScheduleDeadline`s (`helpdesk/`) submit commands from skilj's own
 //! background loops. When one of those submissions keeps *failing* - an
 //! error, not a rejection, which skilj treats as a legitimate answer - it
 //! is retried with backoff and then parked in the target bounded

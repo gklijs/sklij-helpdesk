@@ -112,7 +112,10 @@ rule EngagementDeclineIsFlagged {
 -- hand, not a queue with its own workflow. Modeled as a surface's
 -- `exposes` clause rather than a formal entity `Projection`, because the
 -- three source entities don't share a base type or a declared
--- relationship for a `where`-filtered projection to select from.
+-- relationship for a `where`-filtered projection to select from. In code
+-- it is the `MarketingSignals` projection, one row per company that folds
+-- all three facts (staff-only, company-scoped), which the dashboard's
+-- company panel reads.
 surface MarketingOutreachSignals {
     facing staff: helpdesk/StaffMember
 

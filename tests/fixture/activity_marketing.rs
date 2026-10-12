@@ -170,3 +170,70 @@ fn the_engagement_route_keeps_the_original_flag_time() {
     assert_eq!(flag.company_id, "acme");
     assert_eq!(flag.flagged_at, "2026-10-01T00:00:00Z");
 }
+
+// --- projections ---
+
+#[test]
+fn company_engagement_counts_person_days_per_kind_and_keeps_the_latest_day() {
+    let staff_day = ActivityEvent::DailyActivityRecorded(DailyActivityRecordedPayload {
+        company_id: "acme".into(),
+        person_kind: PersonKind::Staff,
+        person_subject: "staff-1".into(),
+        day: "2026-10-03".into(),
+    });
+    skilj_test_fixture::projection::GivenEvents::<CompanyEngagement>::new()
+        .event(activity_on("customer-1", "2026-10-04"))
+        .event(activity_on("customer-2", "2026-10-02"))
+        .event(staff_day)
+        .event(ActivityEvent::CompanyEngagementDeclined(
+            CompanyEngagementDeclinedPayload {
+                company_id: "acme".into(),
+                flagged_at: "2026-10-20T00:00:00Z".into(),
+            },
+        ))
+        .then(|state| {
+            assert_eq!(state.customer_active_days, 2);
+            assert_eq!(state.staff_active_days, 1);
+            assert_eq!(state.last_customer_day.as_deref(), Some("2026-10-04"));
+            assert_eq!(state.last_staff_day.as_deref(), Some("2026-10-03"));
+            assert_eq!(
+                state.engagement_declined_at.as_deref(),
+                Some("2026-10-20T00:00:00Z")
+            );
+        });
+}
+
+#[test]
+fn marketing_signals_track_the_latest_trial_outcome_and_count_each() {
+    use marketing::*;
+    let lapsed = |at: &str| {
+        MarketingEvent::TrialLapsed(TrialLapsedPayload {
+            company_id: "acme".into(),
+            lapsed_at: at.into(),
+        })
+    };
+    let converted = |at: &str| {
+        MarketingEvent::TrialConverted(TrialConvertedPayload {
+            company_id: "acme".into(),
+            converted_at: at.into(),
+        })
+    };
+    skilj_test_fixture::projection::GivenEvents::<MarketingSignals>::new()
+        .event(lapsed("2026-10-01"))
+        .event(converted("2026-10-02"))
+        .event(lapsed("2026-11-01"))
+        .event(MarketingEvent::EngagementDeclineFlagged(
+            EngagementDeclineFlaggedPayload {
+                company_id: "acme".into(),
+                flagged_at: "2026-10-20".into(),
+            },
+        ))
+        .then(|state| {
+            assert_eq!(state.trial_status.as_deref(), Some("lapsed"));
+            assert_eq!(state.lapse_count, 2);
+            assert_eq!(state.last_lapsed_at.as_deref(), Some("2026-11-01"));
+            assert_eq!(state.conversion_count, 1);
+            assert_eq!(state.last_converted_at.as_deref(), Some("2026-10-02"));
+            assert_eq!(state.engagement_declined_at.as_deref(), Some("2026-10-20"));
+        });
+}

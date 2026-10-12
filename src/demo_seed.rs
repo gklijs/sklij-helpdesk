@@ -171,7 +171,7 @@ pub enum SeedTicketStatus {
     /// `MergeTickets`'s own outcome for the duplicate side - see that
     /// action's own handling in `next_action`/`apply_outcome` below.
     /// Never itself advanced further; a merged ticket is as terminal
-    /// here as it is for real (`helpdesk.rs`'s own `TicketStatus::Merged`).
+    /// here as it is for real (`helpdesk/`'s own `TicketStatus::Merged`).
     Merged,
 }
 
@@ -185,7 +185,7 @@ pub struct SeedTicket {
 }
 
 /// This module's own idea of what's out there - deliberately separate
-/// from the real projections `helpdesk.rs` builds: the whole point is a
+/// from the real projections `helpdesk/` builds: the whole point is a
 /// cheap, in-memory tracker so the loop knows which REST call is legal
 /// to try next, not another consumer of skilj's own read side.
 pub struct SeedState {
@@ -204,7 +204,7 @@ impl SeedState {
     /// two workers' own `next_seq` counters would both mint
     /// `seed-ticket-0` and race on ticket_id - a real ticket_id is
     /// globally unique (`CreateTicket`'s own `ticket_already_exists`
-    /// guard in `helpdesk.rs`), so the loser's `CreateTicket` would be
+    /// guard in `helpdesk/`), so the loser's `CreateTicket` would be
     /// rejected forever, and since a worker only ever advances tickets
     /// *it* successfully created (see `apply_outcome` below), a
     /// permanently-empty, permanently-colliding worker would spin doing
@@ -445,7 +445,7 @@ pub fn next_action(state: &SeedState, rng: &mut Rng) -> SeedAction {
 
 /// Picks two of this worker's own tracked tickets that share a company
 /// and aren't already merged - `MergeTickets` itself also rejects a
-/// cross-company or already-merged attempt (`helpdesk.rs`'s own
+/// cross-company or already-merged attempt (`helpdesk/`'s own
 /// `tickets_belong_to_different_companies`/status guards), so this is a
 /// courtesy to make the *common* case succeed, not a substitute for
 /// those real guards; a `None` here just means try something else this
@@ -525,7 +525,7 @@ pub fn apply_outcome(state: &mut SeedState, action: &SeedAction, accepted: bool)
         // Cosmetic facts, not lifecycle steps - neither changes the
         // ticket's own tracked status (real `AddInternalNote`/
         // `RateTicket` don't either, see their own doc comments in
-        // `helpdesk.rs`), so there's nothing for this tracker to update.
+        // `helpdesk/`), so there's nothing for this tracker to update.
         SeedAction::AddInternalNote { .. } | SeedAction::RateTicket { .. } => {}
         SeedAction::MergeTickets {
             duplicate_ticket_id,

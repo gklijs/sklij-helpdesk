@@ -291,7 +291,7 @@ fn cors_layer() -> tower_http::cors::CorsLayer {
         .allow_credentials(false)
 }
 
-/// Every `rest_trigger_allowed` command type in `helpdesk.rs`.
+/// Every `rest_trigger_allowed` command type in `helpdesk/`.
 const COMMAND_TYPES: &[&str] = &[
     "SignUpCompany",
     "ConvertCompanyTrial",
@@ -326,7 +326,7 @@ const PROVISIONER_EVENT_TYPES: &[&str] = &["CompanySignedUp"];
 /// independent readers of the same type each needed their own token to
 /// avoid stealing each other's cursor position) - that binary's gone
 /// now, replaced by skilj's native per-entity deadline mechanism
-/// (`helpdesk.rs`'s own `ScheduleTicketAutoClose` etc.), which reads
+/// (`helpdesk/`'s own `ScheduleTicketAutoClose` etc.), which reads
 /// events through its own internal poller, not a minted `EventReadToken`
 /// at all.
 ///
@@ -349,7 +349,7 @@ const ALERTER_EVENT_TYPES: &[&str] = &[
 /// `src/bin/lifecycle-replicator.rs`'s own event types - the three
 /// company lifecycle facts it mirrors into each company's tenant, so a
 /// Ticket command routed there passes the same `company_status` guard it
-/// would pass in the shared context (see `helpdesk.rs`'s
+/// would pass in the shared context (see `helpdesk/`'s
 /// `CompanyLifecycleMirrored` doc comment for why that mirror is needed
 /// at all). Its own token set, one per event type, for the same
 /// "each consumer gets its own cursor" reason `PROVISIONER_EVENT_TYPES`
@@ -1305,7 +1305,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // {label}"` prose because `Role` has no separate "team" field -
         // `TicketInternalNotes`'s own `Projection::TEAM_ONLY` and
         // `AddInternalNote`/`TicketInternalNoteAdded`'s own
-        // `private_fields()` (see `src/helpdesk.rs`, skilj 0.0.4)
+        // `private_fields()` (see `src/helpdesk/`, skilj 0.0.4)
         // compare against `name` directly, so the staff-lead Role's
         // `name` must literally be `"staff"` for it to still read
         // those. staff-lead stays unrestricted (`scope: None`) on
@@ -1424,6 +1424,65 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             db::insert_role(&pool, &demo_role).await?;
             db::insert_role_access_mapping(&pool, &demo_mapping(demo_role)).await?;
             println!("server: seeded demo Role for {label} (sub {sub:?})");
+        }
+
+        // The dashboard reaches past `helpdesk` too: both demo users ping
+        // `RecordDailyActivity` on every load, and staff read
+        // `activity::CompanyEngagement` and `marketing::MarketingSignals`
+        // in the company panel. Each projection is `TEAM_ONLY` staff, so
+        // the customer's activity grant (scoped to its own company, like
+        // its helpdesk one) only lets it record its own pings.
+        let demo_roles = db::list_roles(&pool).await?;
+        for (sub, context, level, scope) in [
+            (
+                DEMO_CUSTOMER_SUB,
+                skilj_helpdesk::activity::BOUNDED_CONTEXT,
+                AccessLevel::Write,
+                Some(DEMO_COMPANY_ID.to_string()),
+            ),
+            (
+                DEMO_STAFF_LEAD_SUB,
+                skilj_helpdesk::activity::BOUNDED_CONTEXT,
+                AccessLevel::Write,
+                None,
+            ),
+            (
+                DEMO_STAFF_LEAD_SUB,
+                skilj_helpdesk::marketing::BOUNDED_CONTEXT,
+                AccessLevel::Read,
+                None,
+            ),
+        ] {
+            let Some(role) = demo_roles
+                .iter()
+                .find(|r| r.external_subject == sub && r.status == RoleStatus::Active)
+            else {
+                continue;
+            };
+            if db::get_active_role_access_mapping(&pool, &role.id, context)
+                .await?
+                .is_some()
+            {
+                continue;
+            }
+            let bounded_context = db::get_bounded_context(&pool, context)
+                .await?
+                .expect("ensured above, before the demo Roles");
+            db::insert_role_access_mapping(
+                &pool,
+                &RoleAccessMapping {
+                    role: role.clone(),
+                    bounded_context,
+                    level,
+                    can_read_sensitive: false,
+                    scope,
+                    status: RoleStatus::Active,
+                    created_at: Utc::now(),
+                    revoked_at: None,
+                },
+            )
+            .await?;
+            println!("server: granted demo Role {sub:?} {level:?} on {context:?}");
         }
     }
 

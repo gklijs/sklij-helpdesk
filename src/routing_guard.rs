@@ -45,10 +45,10 @@ use std::sync::Arc;
 /// caller must name it in a `projection` query.
 const TENANT_DIRECTORY: &str = "TenantDirectory";
 
-/// Every Ticket projection in `helpdesk.rs`, so a read of one of them is
+/// Every Ticket projection in `helpdesk/`, so a read of one of them is
 /// recognised as ticket traffic.
 ///
-/// An exhaustive list rather than a prefix rule: `helpdesk.rs` names
+/// An exhaustive list rather than a prefix rule: `helpdesk/` names
 /// Ticket projections `TicketSummary`, `CompanyActiveTickets`,
 /// `CustomerTickets` and `TicketInternalNotes` - inconsistently, because
 /// they're keyed per ticket, per company and per customer. A
@@ -93,7 +93,7 @@ impl Guarded {
 /// recognised as ticket traffic. `Unknown` rather than a guess: a
 /// projection this list doesn't know about is not refused, because
 /// refusing an unrecognised name would let a new projection in
-/// `helpdesk.rs` break reads the moment the cutover is switched on.
+/// `helpdesk/` break reads the moment the cutover is switched on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NameClass {
     Ticket,
@@ -1301,7 +1301,7 @@ mod tests {
     #[test]
     fn every_ticket_projection_in_helpdesk_is_recognised() {
         // The list is hand-written, so assert it against the same
-        // projection names `helpdesk.rs` declares - a new Ticket
+        // projection names `helpdesk/` declares - a new Ticket
         // projection there that isn't listed here would silently skip the
         // guard and split a company's reads across two contexts.
         for name in [
@@ -1328,7 +1328,7 @@ mod tests {
     fn an_unrecognised_command_name_passes_rather_than_being_refused() {
         // Deliberately the opposite of `routing::classify`, which errors:
         // a guard must not refuse traffic it cannot classify, or adding a
-        // command to `helpdesk.rs` would break writes the moment the
+        // command to `helpdesk/` would break writes the moment the
         // cutover was switched on.
         assert_eq!(classify_command_name("NotARealCommand"), NameClass::Other);
         assert_eq!(classify_command_name("SignUpCompany"), NameClass::Other);
@@ -1337,7 +1337,7 @@ mod tests {
 
     #[test]
     fn every_classified_command_type_is_covered_by_a_verdict() {
-        // Guards against a new command type in `helpdesk.rs` being added
+        // Guards against a new command type in `helpdesk/` being added
         // without deciding how this module treats it. `classify` is the
         // exhaustive match that forces the decision; this asserts the
         // resulting behaviour, so the table and the tests can't drift.

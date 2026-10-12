@@ -111,3 +111,26 @@ pub async fn query_projection_after(
         .ok_or_else(|| format!("no {field:?} field in the projection response: {response}"))?;
     serde_json::from_str(raw).map_err(|e| format!("couldn't parse the projection's own JSON: {e}"))
 }
+
+/// `projection(...)` for a projection whose fields are all plain scalars
+/// (`MarketingSignals`, `CompanyEngagement`): those come back typed, not
+/// as the JSON-encoded string `query_projection` unwraps, so this returns
+/// the projection object itself, with GraphQL's camelCase field names.
+/// `wait_for_sequence` as in `query_projection_after`.
+pub async fn query_projection_fields(
+    token: &str,
+    bounded_context: &str,
+    name: &str,
+    key: &str,
+    fields: &str,
+    wait_for_sequence: Option<i64>,
+) -> Result<Value, String> {
+    let wait = wait_for_sequence
+        .map(|seq| format!(", waitForSequence: {seq}"))
+        .unwrap_or_default();
+    let query = format!(
+        "query {{ projection(boundedContext: {bounded_context:?}, name: {name:?}, key: {key:?}{wait}) {{ ... on {bounded_context}_{name} {{ {fields} }} }} }}"
+    );
+    let response = graphql(token, &query).await?;
+    Ok(response["data"]["projection"].clone())
+}

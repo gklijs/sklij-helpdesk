@@ -16,7 +16,7 @@
 //! on an instance whose owner can't be derived at all (a never-touched
 //! key included). Adopted here: `TicketSummary`/`CompanyTicketList` (now `CompanyActiveTickets`/`CustomerTickets`)/
 //! `TicketInternalNotes` all declare `OWNER_TAG_KEY = Some("company")`
-//! (see each one's own doc comment in `src/helpdesk.rs`), and
+//! (see each one's own doc comment in `src/helpdesk/`), and
 //! `server.rs`'s demo customer Role is scoped to its own company.
 //!
 //! This file proves the mechanism actually closes the gap end to end,
@@ -27,7 +27,7 @@
 //! `OWNER_TAG_KEY` alone left a different-axis gap open: a customer
 //! scoped to their own company could still read that company's own
 //! internal notes, a role-type (staff or not) rather than tenancy gap -
-//! see `TicketInternalNotes`'s own doc comment in `src/helpdesk.rs`.
+//! see `TicketInternalNotes`'s own doc comment in `src/helpdesk/`.
 //! skilj 0.0.4's `Projection::TEAM_ONLY` (`docs/architecture.md` §31-32
 //! in the sibling `skilj` repo) closes it; adopted here as
 //! `TicketInternalNotes`'s own `TEAM_ONLY = Some("staff")` and
@@ -224,7 +224,7 @@ fn a_customer_scoped_to_one_company_cannot_read_another_companys_projections() {
         // --- TicketInternalNotes: the same-company role-type half,
         // closed by skilj 0.0.4's `Projection::TEAM_ONLY` (see this
         // file's own module doc comment and `TicketInternalNotes`'s own
-        // doc comment in `src/helpdesk.rs`) - company A's customer must
+        // doc comment in `src/helpdesk/`) - company A's customer must
         // NOT read company A's *own* internal notes either, even though
         // `customer_a_jwt`'s scope is satisfied here (this is the same
         // `ticket_a` note added above, so a pass here would mean the

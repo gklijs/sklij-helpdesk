@@ -496,9 +496,13 @@ pub async fn setup_all_contexts() -> (Skilj, Pool, AllContextMappings) {
     let marketing = seed_mapping_for(&pool, &role, "marketing", AccessLevel::Admin, None).await;
 
     let external_subject = role.external_subject.clone();
+    // An IdP too, so a test can read activity/marketing projections over
+    // GraphQL with `sign_jwt` tokens; REST-only tests never notice it.
+    let jwks_url = serve_jwks().await;
     let (skilj, report) = skilj_helpdesk::register(Skilj::builder(database_url))
         .encryption_master_key(test_master_key())
         .reconciliation_role(external_subject)
+        .identity_provider(test_idp_config(&jwks_url))
         .build()
         .await
         .unwrap();

@@ -1,5 +1,5 @@
 //! The tenant-lifecycle mirroring reactor: the second half of what
-//! `src/helpdesk.rs`'s `CompanyLifecycleMirrored`/`RecordTenantLifecycle`
+//! `src/helpdesk/`'s `CompanyLifecycleMirrored`/`RecordTenantLifecycle`
 //! pair describes, and the first thing in this crate to route a command
 //! *into* a tenant.
 //!
@@ -41,7 +41,7 @@
 //!
 //! **Tenant resolution.** `company_id -> tenant_name` comes from the
 //! shared context's own `TenantDirectory` projection
-//! (`helpdesk.rs`), read over GraphQL. That is the same mapping
+//! (`helpdesk/`), read over GraphQL. That is the same mapping
 //! `RecordCompanyTenant` recorded, projected into a queryable read model
 //! rather than re-derived here - one source of truth, so this binary
 //! cannot disagree with the provisioner about which tenant a company
@@ -198,7 +198,7 @@ struct Config {
     /// set is the `MIRRORED_EVENTS` table above and duplicating that list
     /// a third time as struct fields would be exactly the kind of
     /// independent-literal drift this crate keeps avoiding (see
-    /// `helpdesk.rs`'s own `STAFF_TEAM` note).
+    /// `helpdesk/`'s own `STAFF_TEAM` note).
     event_tokens: HashMap<String, String>,
     superadmin_subject: String,
 }

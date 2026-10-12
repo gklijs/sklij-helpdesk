@@ -22,9 +22,9 @@
 --     TicketAutoCloses), not an event/command shape question, and not
 --     yet built - see the resolved notes near the bottom of this file
 --     for what's decided versus what's still to implement.
---   - Any UI for staff-side activity: staff DailyActivityRecorded events
---     are modeled because there's real value in them (unique daily users,
---     support-coverage visibility), but nothing reads them yet.
+--   - Per-person activity reporting: `surface CompanyEngagementOverview`
+--     shows staff how active a company is in counts and latest days, never
+--     which people were active.
 -- Dependencies: helpdesk/Company, helpdesk/Customer, helpdesk/StaffMember
 --   (skilj-helpdesk.allium) - this context never modifies them, only
 --   reads/references them; skilj/Role (skilj.allium) for the scheduled
@@ -143,6 +143,23 @@ surface StaffActivityPing {
 
     provides:
         RecordDailyActivity(person.company, staff, person.external_subject, day)
+}
+
+-- Staff-facing, per company: implemented as the `CompanyEngagement`
+-- projection (staff-only, company-scoped) behind the dashboard's company
+-- panel. Counts are person-days per PersonKind; the latest `day` per kind
+-- shows whether customers or staff have gone quiet.
+surface CompanyEngagementOverview {
+    facing staff: helpdesk/StaffMember
+
+    exposes:
+        for activity in DailyActivityRecordeds:
+            activity.company
+            activity.person_kind
+            activity.day
+        for flag in CompanyEngagementDeclineds:
+            flag.company
+            flag.flagged_at
 }
 
 surface EngagementDeclineDetection {

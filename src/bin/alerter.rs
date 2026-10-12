@@ -29,7 +29,7 @@
 //! independently needs for its own "gone quiet" rule (a rolling window,
 //! not a one-shot deadline - see `src/activity_scheduling.rs`'s own doc
 //! comment for why that one still needs hand-rolled polling rather than
-//! skilj's native `ScheduleDeadline`, unlike `helpdesk.rs`'s own trial/
+//! skilj's native `ScheduleDeadline`, unlike `helpdesk/`'s own trial/
 //! auto-close reactors).
 //!
 //! **Restart safety.** `mode=auto`'s cursor is server-tracked and
@@ -57,7 +57,7 @@
 //! shared `helpdesk` context. The alerter now discovers tenants by
 //! reading `CompanyTenantProvisioned` events off the shared context's
 //! own REST feed (which is why `CompanyTenantProvisioned` carries
-//! `event_read_allowed = true` in `helpdesk.rs`), then mints per-tenant
+//! `event_read_allowed = true` in `helpdesk/`), then mints per-tenant
 //! `EventReadToken`s for each ticket event type and a per-tenant
 //! `EscalateTicket` `CommandToken` via skilj's own
 //! `createEventReadToken`/`createCommandToken` GraphQL mutations,
@@ -165,7 +165,7 @@ const ALERTER_EVENT_TYPES: &[&str] = &[
 ];
 
 /// The one command type this alerter submits - `EscalateTicket`. Same
-/// single-name-as-constant reasoning `helpdesk.rs` gives for
+/// single-name-as-constant reasoning `helpdesk/` gives for
 /// `RECORD_TENANT_LIFECYCLE_COMMAND`: a `CommandToken` is minted by type
 /// name, not by Rust type, so the literal lives in one place.
 const ESCALATE_TICKET_COMMAND: &str = "EscalateTicket";
@@ -329,7 +329,7 @@ struct State {
     /// `unhandled: status not in {resolved, closed}` derived field, tracked
     /// directly - `merged` counts as handled too, for the same "nothing
     /// left to do" reason `TicketFacts`'s own catch-all treatment in
-    /// `helpdesk.rs` gives it.
+    /// `helpdesk/` gives it.
     unhandled: HashSet<String>,
     /// Ticket ids already escalated (this alerter's own submission, or
     /// read back off the same `TicketEscalated` stream another instance

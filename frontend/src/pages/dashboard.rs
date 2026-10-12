@@ -1,6 +1,9 @@
 use crate::{
     api, auth, config, live,
-    model::{CustomerTicketContent, TicketInternalNote, TicketQueueEntry},
+    model::{
+        CompanyEngagement, CustomerTicketContent, MarketingSignals, TicketInternalNote,
+        TicketQueueEntry,
+    },
     routing::TicketContext,
     theme::ThemeToggle,
 };
@@ -40,7 +43,7 @@ impl AfterWrite {
 
 /// `TicketInternalNotes` is its own projection, queried on demand, not
 /// as part of the eager ticket fetch `Dashboard` already does - see that projection's own doc comment in
-/// `helpdesk.rs`. Shared between the "Notes" toggle's own first fetch
+/// `helpdesk/`. Shared between the "Notes" toggle's own first fetch
 /// and `AddInternalNote`'s own re-fetch-after-success, rather than
 /// duplicated inline in each.
 ///
@@ -137,6 +140,11 @@ pub fn Dashboard() -> impl IntoView {
     // fires once per page load, not once per ticket action. A rejection
     // here is the expected steady state after the first load of the
     // day, not an error worth surfacing in `status`.
+    //
+    // `ping_settled` is `Some` once it has answered, carrying the
+    // sequence it wrote if accepted: the staff company panel waits for it
+    // so the async `CompanyEngagement` read includes this very visit.
+    let (ping_settled, set_ping_settled) = signal(None::<Option<i64>>);
     {
         let token = token.clone();
         let my_sub = my_sub.clone();
@@ -149,13 +157,16 @@ pub fn Dashboard() -> impl IntoView {
             });
             let token = token.clone();
             spawn_local(async move {
-                let _ = api::submit_command(
+                let result = api::submit_command(
                     &token,
                     config::ACTIVITY_BOUNDED_CONTEXT,
                     "RecordDailyActivity",
                     &payload,
                 )
                 .await;
+                set_ping_settled.set(Some(
+                    result.ok().and_then(|r| api::last_triggered_sequence(&r)),
+                ));
             });
         });
     }
@@ -341,6 +352,7 @@ pub fn Dashboard() -> impl IntoView {
         });
     };
 
+    let signals_token = token.clone();
     let log_out = move |_| {
         auth::log_out();
         let _ = window().expect("browser").location().set_href("/login");
@@ -362,6 +374,10 @@ pub fn Dashboard() -> impl IntoView {
             </div>
         </nav>
         <p class="error">{move || status.get()}</p>
+
+        <Show when=move || is_staff>
+            <CompanySignals token=signals_token.clone() ping_settled=ping_settled/>
+        </Show>
 
         <Show when=move || !is_staff>
             <h2>"Create a ticket"</h2>
@@ -444,6 +460,131 @@ pub fn Dashboard() -> impl IntoView {
         </div>
     }
     .into_any()
+}
+
+fn person_days(n: u32) -> String {
+    if n == 1 {
+        "1 person-day".to_string()
+    } else {
+        format!("{n} person-days")
+    }
+}
+
+/// The date part of an RFC 3339 timestamp, for display.
+fn day_of(timestamp: &Option<String>) -> String {
+    timestamp
+        .as_deref()
+        .map(|t| t.chars().take(10).collect())
+        .unwrap_or_else(|| "—".to_string())
+}
+
+/// Staff only: the demo company's `marketing::MarketingSignals` and
+/// `activity::CompanyEngagement` rows, read once per page load. Both
+/// projections are `TEAM_ONLY` staff on the backend, so a customer's read
+/// would be refused anyway - this is not the gate, just not offering it.
+///
+/// `CompanyEngagement` is async and this page's own activity ping is one
+/// of its inputs, so that read waits for the ping to settle and then asks
+/// skilj to wait for the ping's sequence too.
+#[component]
+fn CompanySignals(token: String, ping_settled: ReadSignal<Option<Option<i64>>>) -> impl IntoView {
+    let (signals, set_signals) = signal(None::<MarketingSignals>);
+    let (engagement, set_engagement) = signal(None::<CompanyEngagement>);
+    let (error, set_error) = signal(String::new());
+    {
+        let token = token.clone();
+        spawn_local(async move {
+            match api::query_projection_fields(
+                &token,
+                config::MARKETING_BOUNDED_CONTEXT,
+                "MarketingSignals",
+                config::DEMO_COMPANY_ID,
+                MarketingSignals::FIELDS,
+                None,
+            )
+            .await
+            .and_then(|json| serde_json::from_value(json).map_err(|e| e.to_string()))
+            {
+                Ok(value) => set_signals.set(Some(value)),
+                Err(e) => set_error.set(format!("couldn't load marketing signals: {e}")),
+            }
+        });
+    }
+    Effect::new(move |done: Option<bool>| {
+        if done == Some(true) {
+            return true;
+        }
+        let Some(wait_for_sequence) = ping_settled.get() else {
+            return false;
+        };
+        let token = token.clone();
+        spawn_local(async move {
+            let read = |wait_for_sequence| {
+                api::query_projection_fields(
+                    &token,
+                    config::ACTIVITY_BOUNDED_CONTEXT,
+                    "CompanyEngagement",
+                    config::DEMO_COMPANY_ID,
+                    CompanyEngagement::FIELDS,
+                    wait_for_sequence,
+                )
+            };
+            // As for the ticket queue: a wait that times out is refused,
+            // so fall back to the row as it stands.
+            let result = match read(wait_for_sequence).await {
+                Err(_) if wait_for_sequence.is_some() => read(None).await,
+                result => result,
+            };
+            match result.and_then(|json| serde_json::from_value(json).map_err(|e| e.to_string())) {
+                Ok(value) => set_engagement.set(Some(value)),
+                Err(e) => set_error.set(format!("couldn't load engagement: {e}")),
+            }
+        });
+        true
+    });
+
+    view! {
+        <h2>"Company signals — " {config::DEMO_COMPANY_ID}</h2>
+        <p class="error">{move || error.get()}</p>
+        <div class="signals">
+            {move || signals.get().map(|s| {
+                let trial = s.trial_status.clone().unwrap_or_else(|| "none yet".to_string());
+                view! {
+                    <div class="signal">
+                        <span class="signal-label">"Trial"</span>
+                        <span class=format!("badge trial-{}", trial.replace(' ', "-"))>{trial.clone()}</span>
+                        <span class="signal-detail">
+                            {format!("{} lapsed (last {}), {} converted (last {})",
+                                s.lapse_count, day_of(&s.last_lapsed_at),
+                                s.conversion_count, day_of(&s.last_converted_at))}
+                        </span>
+                    </div>
+                }
+            })}
+            {move || engagement.get().map(|e| view! {
+                <div class="signal">
+                    <span class="signal-label">"Customer activity"</span>
+                    <span class="signal-value">{person_days(e.customer_active_days)}</span>
+                    <span class="signal-detail">"last " {day_of(&e.last_customer_day)}</span>
+                </div>
+                <div class="signal">
+                    <span class="signal-label">"Staff activity"</span>
+                    <span class="signal-value">{person_days(e.staff_active_days)}</span>
+                    <span class="signal-detail">"last " {day_of(&e.last_staff_day)}</span>
+                </div>
+                <div class="signal">
+                    <span class="signal-label">"Engagement"</span>
+                    {match e.engagement_declined_at.clone() {
+                        Some(at) => view! {
+                            <span class="badge engagement-declined">"declining"</span>
+                            <span class="signal-detail">"flagged " {day_of(&Some(at))}</span>
+                        }.into_any(),
+                        None => view! { <span class="badge engagement-ok">"no flag"</span> }.into_any(),
+                    }}
+                </div>
+            })}
+        </div>
+    }
 }
 
 #[component]

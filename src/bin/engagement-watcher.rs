@@ -3,7 +3,7 @@
 //! gone quiet (`rule EngagementDeclineIsRecorded`'s own external
 //! stimulus), the same "external process, not decide() itself, makes
 //! the call" shape `src/bin/alerter.rs` already uses for urgent-ticket
-//! paging (`helpdesk.rs`'s own trial-deadline/auto-close rules moved off
+//! paging (`helpdesk/`'s own trial-deadline/auto-close rules moved off
 //! this shape onto skilj's native `ScheduleDeadline` in 0.0.7 - see
 //! `src/activity_scheduling.rs`'s own doc comment for why "gone quiet"
 //! doesn't fit that mechanism the same way).

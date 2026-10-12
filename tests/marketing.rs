@@ -29,15 +29,9 @@
 //! comment), so the event found inside the polling predicate is captured
 //! out through a shared `Mutex`, not re-fetched afterwards.
 //!
-//! `surface MarketingOutreachSignals` (an `exposes`-only surface, no
-//! `provides`) has no dedicated test here: the spec's own Excludes
-//! section defers the dashboard's concrete read shape ("this file only
-//! names what data it needs, not how it's laid out"), so there's no
-//! endpoint name yet to test against without guessing one. Its
-//! `surface_exposure` obligation - that each of TrialLapsed/
-//! TrialConverted/EngagementDeclineFlagged's fields are readable - is
-//! covered instead by the event-feed assertions each test below already
-//! makes on those three entities directly.
+//! `surface MarketingOutreachSignals` is the `MarketingSignals`
+//! projection; `tests/company_signals.rs` covers it, and its staff-only
+//! gates, separately.
 
 mod support;
 

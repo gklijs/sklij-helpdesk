@@ -204,6 +204,16 @@
          priority; deliberately louder than the priority badges. */
       .badge.escalated { background: var(--danger-bg); color: var(--danger); margin-left: 0.3rem; }
 
+      /* Staff-only company panel: MarketingSignals + CompanyEngagement. */
+      .signals { display: grid; grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr)); gap: 0.75rem; }
+      .signal { display: flex; flex-direction: column; align-items: flex-start; gap: 0.3rem; background: var(--surface); border: 1px solid var(--border); border-radius: 0.5rem; padding: 0.75rem 1rem; }
+      .signal-label { color: var(--muted); font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.03em; }
+      .signal-value { font-size: 1.1rem; font-weight: 700; }
+      .signal-detail { color: var(--muted); font-size: 0.85rem; }
+      .badge.trial-converted, .badge.engagement-ok { background: var(--ok-bg); color: var(--ok); }
+      .badge.trial-lapsed, .badge.engagement-declined { background: var(--warn-bg); color: var(--warn); }
+      .badge.trial-none-yet { background: var(--brand-light); color: var(--brand-dark); }
+
       .rating-given { color: var(--ok); font-weight: 600; margin: 0 0 0.5rem; }
       .internal-notes { margin-top: 0.75rem; padding-top: 0.5rem; border-top: 1px dashed var(--border); }
 

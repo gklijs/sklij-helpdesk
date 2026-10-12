@@ -4,7 +4,7 @@
 //! into its own binary reacting to skilj's REST event feed, rather than
 //! running it inside the command itself.
 //!
-//! `src/helpdesk.rs`'s own `SignUpCompany`/`RecordCompanyTenant` doc
+//! `src/helpdesk/`'s own `SignUpCompany`/`RecordCompanyTenant` doc
 //! comments describe the split this binary is the missing half of:
 //! `SignUpCompany::decide()` stays pure and emits `CompanySignedUp`;
 //! this binary reads that event, calls skilj's own
@@ -16,7 +16,7 @@
 //! durable.
 //!
 //! **What this does not do**: reroute any Ticket command or query into
-//! the tenant it just created. See `helpdesk.rs`'s own module doc
+//! the tenant it just created. See `helpdesk/mod.rs`'s own module doc
 //! comment for why that's a separate, larger piece of work (Company's
 //! own guard reads - `company_status`, read by `CreateTicket` et al. via
 //! one same-context DCB query - would need to reach across two bounded
@@ -199,7 +199,7 @@ async fn tick(client: &reqwest::Client, config: &Config) -> Result<(), reqwest::
             eprintln!("provisioner: CompanySignedUp payload missing company_id: {payload}");
             continue;
         };
-        // `helpdesk.rs`'s own `BOUNDED_CONTEXT` is the template - every
+        // `helpdesk/`'s own `BOUNDED_CONTEXT` is the template - every
         // `CommandType`/`EventType`/`Projection` `#[auto_register]`s onto
         // it becomes this new tenant's own starting registrations
         // (`createBoundedContextFromTemplate`'s own contract - see
