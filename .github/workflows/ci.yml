@@ -84,6 +84,11 @@ jobs:
       - name: Test
         env:
           DATABASE_URL: postgres://postgres:postgres@localhost:5432/skilj_helpdesk_test
+          # tests/failure_recovery.rs restarts Postgres, so it brings up
+          # its own embedded cluster even here; the token keeps
+          # postgresql_embedded's GitHub release lookup from being rate
+          # limited on shared runner IPs.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -o pipefail
           cargo test --locked -- --nocapture 2>&1 | tee test-output.log

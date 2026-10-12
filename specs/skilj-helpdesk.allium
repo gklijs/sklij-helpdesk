@@ -16,6 +16,8 @@
 --   - Ticket creation, priority, and the states a ticket moves through
 --     on the way to being handled
 --   - Alerting staff with a given role about tickets that need attention
+--   - SLA policies: per-company first-response and resolution targets per
+--     priority, counted in business hours, escalating a ticket on breach
 --   - Full ticket/event history, browsable in a UI, via SkilJ's own
 --     GraphQL surface (SkilJ already specifies that surface; this spec
 --     only says what history must be visible, not the wire contract)
@@ -44,6 +46,18 @@
 --   (EventReadToken, GET /v1/events/consume) that a separately
 --   deployable alerting service consumes rather than being part of
 --   SkilJ core itself - see the design note below.
+-- Bounded contexts (weeded 2026-10-12, see
+--   docs/allium-spec-drift-2026-10-12.md): this spec is the shared
+--   `helpdesk` context plus the per-company tenants stamped from it.
+--   Company lifecycle is decided only in the shared context; each
+--   tenant holds a mirror of it (rule TenantLifecycleIsMirrored) for its
+--   own ticket-creation guard to read. Ticket traffic runs in the
+--   shared context unless the deployment opts in to routing it into the
+--   company's tenant (TICKET_ROUTING=tenant, falling back to the shared
+--   context for a company with no tenant yet) - a deployment choice,
+--   not a behaviour this spec distinguishes. activity.allium and
+--   marketing.allium are two further bounded contexts reading from this
+--   one.
 
 -- Design note (resolved, not an open question): whether alerting needs
 -- new SkilJ platform functionality, or can be built as a plain consumer
@@ -65,8 +79,14 @@
 --   subject act here," not "where do we send a message." That's
 --   StaffMember below, not a SkilJ concept.
 
+enum CompanyStatus { trialing | active | expired }
+
 config {
     trial_duration: Duration = 1.month
+
+    -- The CSAT scale RateTicket accepts - see CustomerRatesTicket.
+    min_rating: Integer = 1
+    max_rating: Integer = 5
 
     -- A ticket nobody has picked up in this long is overdue - see
     -- TicketBecomesOverdue. Common industry default (e.g. Zendesk,
@@ -90,6 +110,38 @@ config {
 --   allium check specs/skilj-helpdesk.allium ../skilj/specs/skilj.allium
 use "../../skilj/specs/skilj.allium" as skilj
 
+-- SLA policies (issue #42). Zendesk/Zammad treat them as core; FreeScout
+-- is criticised for lacking them. A company's policy sets, per ticket
+-- priority, how long until staff first answer the customer and how long
+-- until the ticket is resolved, both counted in business hours only.
+--
+-- Resolved: business hours are a UTC hour range on a set of weekdays, not
+-- local time in a named timezone - `src/sla.rs`'s own doc comment gives
+-- the trade-off (no tz/DST rules to specify; a non-UTC company enters its
+-- hours shifted). Resolved: the policy lives on the company, with one
+-- default for every company that never set its own (09:00-17:00 UTC,
+-- Monday to Friday; urgent 1h/8h, high 4h/16h, medium 8h/40h, low
+-- 16h/80h first response/resolution - `SlaPolicy::default()`).
+
+value BusinessHours {
+    open_hour: Integer              -- UTC, 0..23
+    close_hour: Integer             -- UTC, 1..24, after open_hour
+    working_days: Set<Integer>      -- ISO weekdays: 1 = Monday ... 7 = Sunday, at least one
+}
+
+value SlaTarget {
+    first_response: Duration        -- business time, at most the resolution target
+    resolution: Duration            -- business time
+}
+
+value SlaPolicy {
+    business_hours: BusinessHours
+    low: SlaTarget
+    medium: SlaTarget
+    high: SlaTarget
+    urgent: SlaTarget
+}
+
 entity Company {
     -- Caller-supplied, checked for uniqueness on signup (see rule
     -- CompanySignsUp) - the same caller-supplied-identifier shape
@@ -102,14 +154,27 @@ entity Company {
 
     name: String
     contact_email: String
-    status: trialing | active | expired
+    status: CompanyStatus
     trial_started_at: Timestamp
 
-    -- Provisioned the moment the company signs up (resolved below) -
-    -- one tenant per company, for the lifetime of the company.
-    tenant: skilj/BoundedContext
+    -- Provisioned in reaction to the signup (resolved below) - one
+    -- tenant per company, for the lifetime of the company. Absent until
+    -- the provisioner has reported back (rule CompanyTenantIsRecorded):
+    -- caught during weeding, this was previously set by CompanySignsUp
+    -- itself, but decide() is I/O-free and the tenant is created
+    -- afterwards, by a separate reactor.
+    tenant: skilj/BoundedContext?
+
+    -- The company's status as its own tenant last heard it - see rule
+    -- TenantLifecycleIsMirrored. Absent until the first mirror lands.
+    -- Never decided in the tenant, only copied there.
+    mirrored_status: CompanyStatus?
 
     tickets: Ticket with company = this
+
+    -- Absent until the company sets one (rule CompanySetsSlaPolicy);
+    -- tickets created meanwhile run under the default policy.
+    sla_policy: SlaPolicy?
 
     -- Resolved: expiry is a soft, reversible restriction, not a
     -- cutoff. Creating new tickets is the only thing disallowed while
@@ -139,20 +204,52 @@ rule CompanySignsUp {
     -- used - caught during weeding: the real decide() has always
     -- guarded this, just missing from this rule.
     requires: not exists Company{company_id: company_id}
-    let tenant = skilj/CreateBoundedContextFromTemplate(template: "helpdesk")
-        -- Black box, same register as PaymentGateway.charge below: this
-        -- app's own backend calls skilj's own rule of that name, with
-        -- superadmin authority, per the resolved design above. What that
-        -- rule itself requires/guarantees is skilj.allium's concern, not
-        -- re-specified here.
+    -- Also rejected for an empty company_id or name, either longer than
+    -- 256 characters, or a contact_email that isn't a plausible address
+    -- (`empty_company_id`, `empty_company_name`, `company_id_too_long`,
+    -- `company_name_too_long`, `invalid_email`) - input validation,
+    -- left to the code rather than restated here.
     ensures: Company.created(
         company_id: company_id,
         name: name,
         contact_email: contact_email,
         status: trialing,
-        trial_started_at: now,
-        tenant: tenant
+        trial_started_at: now
     )
+    @guidance
+        -- The tenant is provisioned in reaction to the CompanySignedUp
+        -- this commits, not inside the decision (decide() is pure): the
+        -- provisioner calls skilj/CreateBoundedContextFromTemplate with
+        -- template "helpdesk", with superadmin authority, and reports the
+        -- result back through rule CompanyTenantIsRecorded. Black box,
+        -- same register as PaymentGateway.charge below: what that skilj
+        -- rule requires/guarantees is skilj.allium's concern.
+}
+
+-- Weeded 2026-10-12: the provisioner's report-back, previously folded
+-- into CompanySignsUp. Rejected as `company_not_found` for a company
+-- that never signed up, and as `tenant_already_provisioned` for a
+-- redelivered report - the event feed can deliver CompanySignedUp twice.
+rule CompanyTenantIsRecorded {
+    when: RecordCompanyTenant(company, tenant)
+    requires: company.tenant = null
+    ensures: company.tenant = tenant
+}
+
+-- Weeded 2026-10-12: the lifecycle mirror the multi-context move added.
+-- A tenant has no copy of the shared context's lifecycle events, so the
+-- lifecycle replicator copies each one in. Only ever forwards along the
+-- lifecycle (trialing, then expired, then active), never back, which
+-- makes the mirror independent of the order the replicator's separate
+-- feeds deliver in; a repeat is rejected `lifecycle_already_mirrored`, a
+-- step back `lifecycle_regression`. Within a tenant the mirror is the
+-- status CustomerCreatesTicket/StaffLogsTicketOnBehalf read.
+rule TenantLifecycleIsMirrored {
+    when: RecordTenantLifecycle(company, status)
+    requires: status != company.mirrored_status
+    requires: company.mirrored_status != active
+    requires: status != trialing or company.mirrored_status = null
+    ensures: company.mirrored_status = status
 }
 
 rule TrialPeriodEnds {
@@ -165,6 +262,14 @@ rule TrialPeriodEnds {
             company.status = active
         else:
             company.status = expired
+    @guidance
+        -- The mocked charge is decided when the company signs up, not
+        -- when the trial ends: skilj's native deadlines schedule one
+        -- fixed command per source event, so the code schedules either
+        -- the conversion or the expiry up front (both re-check
+        -- `trialing` when they fire, `company_not_trialing` otherwise).
+        -- Equivalent while the mock is deterministic; a real gateway
+        -- would move the charge to fire time.
 }
 
 -- Resolved: a company that lapsed (or never converted) can subscribe at
@@ -185,6 +290,10 @@ rule CompanySubscribes {
     when: ReactivateCompany(company)
     requires: company.status = expired
     ensures: company.status = active
+    @guidance
+        -- Reachable over REST with a ReactivateCompany command token;
+        -- the frontend has no resubscribe button yet (see
+        -- CompanyResubscription).
 }
 
 -- Ticket system. Shaped after standard helpdesk convention (Zendesk,
@@ -245,7 +354,9 @@ entity Ticket {
     requester: Customer
     logged_by: StaffMember?         -- absent when the customer filed it themselves;
                                      -- present when staff logged it on their behalf
-    assigned_to: StaffMember? when status = in_progress | waiting_on_customer | resolved | closed
+    -- Kept when the ticket is merged away (weeded 2026-10-12): the
+    -- merge doesn't unassign the duplicate.
+    assigned_to: StaffMember? when status = in_progress | waiting_on_customer | resolved | closed | merged
     created_at: Timestamp
     resolved_at: Timestamp? when status = resolved | closed
 
@@ -256,7 +367,33 @@ entity Ticket {
     -- showcase's own telemetry work wanted real traffic variety to
     -- demonstrate.
     escalated: Boolean = false
-    rating: Integer? when status = resolved | closed
+
+    -- One CSAT rating per ticket, for good (weeded 2026-10-12): it was
+    -- previously present only `when status = resolved | closed`, but a
+    -- rated ticket that is reopened or merged keeps its rating, and the
+    -- code refuses a second one (`already_rated`) even after the ticket
+    -- is resolved again.
+    rating: Integer?
+
+    -- SLA (issue #42), fixed at creation from the company's policy (or
+    -- the default) for the ticket's priority at that moment: a later
+    -- policy change or escalation doesn't move its deadlines.
+    sla_hours: BusinessHours
+    sla: SlaTarget
+    first_response_due_at: add_business_time(created_at, sla.first_response, sla_hours)
+    resolution_due_at: add_business_time(created_at, sla.resolution, sla_hours)
+    -- Set by the first staff message to the customer (a question, or a
+    -- macro's reply - see StaffAppliesMacro), or by resolving - picking a
+    -- ticket up is not a response.
+    first_responded_at: Timestamp?
+    -- Set by the first resolution and never cleared, unlike
+    -- `resolved_at`: what meets the resolution SLA (weeded 2026-10-12 -
+    -- the breach rule previously read `resolved_at`, which a reopen
+    -- clears, so a reopened ticket that met its target could still be
+    -- marked breached).
+    first_resolved_at: Timestamp?
+    first_response_breached: Boolean = false
+    resolution_breached: Boolean = false
 
     -- What "keeps track of what's not handled" means concretely: any
     -- ticket short of resolved, closed, or merged - a merged ticket has
@@ -289,23 +426,43 @@ entity Ticket {
     -- below still sets `ticket.priority` via an ordinary `ensures`.
 }
 
+-- Both creation rules are one CreateTicket command in code
+-- (`logged_by_staff_id` tells them apart). Besides the company guard it
+-- is rejected `company_not_found` for a company that never signed up,
+-- and `ticket_already_exists` for a ticket id already used - by any
+-- company (weeded 2026-10-12: ticket ids were only unique per company,
+-- yet the ticket's tag, snapshot and read models know it by id alone,
+-- so a second company's ticket landed on the first one's and reset it
+-- to open). The ticket's identity is implicit here, as usual.
+-- `sla_policy_for(company)`: the company's own `sla_policy`, or the
+-- default policy when it has none (black box: the default's values are in
+-- the SLA note above). `target_for(policy, priority)`: the policy's
+-- SlaTarget for that priority.
 rule CustomerCreatesTicket {
     when: CreateTicket(company, requester, title, description, priority)
     requires: company.status != expired
+    let policy = sla_policy_for(company)
     ensures: Ticket.created(
         company: company, title: title, description: description,
-        priority: priority, status: open, requester: requester, created_at: now
+        priority: priority, status: open, requester: requester, created_at: now,
+        sla_hours: policy.business_hours, sla: target_for(policy, priority)
     )
 }
 
 rule StaffLogsTicketOnBehalf {
     when: LogTicketOnBehalf(company, staff, requester, title, description, priority)
     requires: company.status != expired
+    let policy = sla_policy_for(company)
     ensures: Ticket.created(
         company: company, title: title, description: description,
         priority: priority, status: open, requester: requester,
-        logged_by: staff, created_at: now
+        logged_by: staff, created_at: now,
+        sla_hours: policy.business_hours, sla: target_for(policy, priority)
     )
+    @guidance
+        -- CreateTicket is not role-gated, so `logged_by` is whatever the
+        -- caller names; nothing checks it is a staff member. The
+        -- frontend never sets it yet.
 }
 
 rule StaffPicksUpTicket {
@@ -319,10 +476,13 @@ rule StaffRequestsInfo {
     when: RequestInfoFromCustomer(ticket, staff)
     requires: ticket.status = in_progress
     ensures: ticket.status = waiting_on_customer
+    ensures: ticket.first_responded_at = ticket.first_responded_at ?? now
 }
 
 rule CustomerReplies {
     when: CustomerRespondsToTicket(ticket, requester)
+    -- `requester_mismatch` otherwise - see Customer's guidance.
+    requires: requester = ticket.requester
     requires: ticket.status = waiting_on_customer
     ensures: ticket.status = in_progress
 }
@@ -332,12 +492,24 @@ rule StaffResolvesTicket {
     requires: ticket.status = in_progress
     ensures: ticket.status = resolved
     ensures: ticket.resolved_at = now
+    ensures: ticket.first_resolved_at = ticket.first_resolved_at ?? now
+    ensures: ticket.first_responded_at = ticket.first_responded_at ?? now
 }
 
 rule TicketReopened {
     when: ReopenTicket(ticket)
     requires: ticket.status = resolved
     ensures: ticket.status = in_progress
+}
+
+-- Weeded 2026-10-12: staff can close a resolved ticket without waiting
+-- for TicketAutoCloses - the same CloseTicket command, staff-only, behind
+-- the dashboard's Close button. The pending auto-close then fires into a
+-- closed ticket and is rejected.
+rule StaffClosesTicket {
+    when: CloseTicket(ticket, staff)
+    requires: ticket.status = resolved
+    ensures: ticket.status = closed
 }
 
 rule TicketAutoCloses {
@@ -355,7 +527,7 @@ rule TicketAutoCloses {
         -- unspecified.
         -- The timer runs from the latest `resolved_at`: a ticket resolved,
         -- reopened and resolved again waits the full period from its
-        -- second resolution. `src/helpdesk.rs` keeps this by cancelling
+        -- second resolution. `src/helpdesk/ticket_commands.rs` keeps this by cancelling
         -- a resolution's deadline when it is reopened
         -- (`CancelTicketAutoCloseOnReopen`), not only by re-checking
         -- status when the deadline fires.
@@ -381,7 +553,7 @@ rule TicketAutoCloses {
 --     to show, not only a console alert. `escalate` is a black box
 --     (same treatment as `PaymentGateway.charge` above): a one-tier
 --     priority bump, low -> medium -> high -> urgent, clamped at
---     urgent - see `src/helpdesk.rs`'s own `escalate_priority`.
+--     urgent - see `src/helpdesk/ticket.rs`'s own `escalate_priority`.
 rule TicketBecomesOverdue {
     when: ticket: Ticket.created_at + config.unhandled_alert_after <= now
     requires: ticket.unhandled
@@ -391,6 +563,58 @@ rule TicketBecomesOverdue {
     ensures: ticket.escalated = true
     for lead in StaffMembers where company = ticket.company and role = lead:
         ensures: TicketNeedsAttention(ticket, lead)
+}
+
+-- SLA breaches (issue #42). `add_business_time(start, duration, hours)`
+-- is a black box: `start` plus `duration` counted only inside `hours`'
+-- daily window on its working days - nights, weekends and other days
+-- don't count (`src/sla.rs`'s `add_business_minutes`, unit-tested there).
+--
+-- @guidance
+--     Implemented with skilj's native deadlines: `TicketCreated` schedules
+--     one deadline per SLA (`ScheduleFirstResponseSla`/
+--     `ScheduleResolutionSla`), and the events that meet an SLA cancel it
+--     (`CancelFirstResponseSlaOnStaffReply`/`...OnMacroReply`/`...OnResolve`,
+--     `CancelResolutionSlaOnResolve`) - the `requires` below are still
+--     re-checked when a deadline fires, so one that escaped its cancel
+--     changes nothing. The resolution SLA runs to the first resolution
+--     only: a reopen doesn't restart it (TicketBecomesOverdue still
+--     covers a reopened ticket). Escalation is TicketBecomesOverdue's
+--     own one-tier bump, applied only if the ticket isn't escalated
+--     already; the breach is recorded either way.
+rule TicketBreachesFirstResponseSla {
+    when: ticket: Ticket.first_response_due_at <= now
+    requires: ticket.unhandled
+    requires: ticket.first_responded_at = null
+    requires: not ticket.first_response_breached
+    ensures: ticket.first_response_breached = true
+    ensures: SlaBreached(ticket, first_response)
+    if not ticket.escalated:
+        ensures: ticket.priority = escalate(ticket.priority)
+        ensures: ticket.escalated = true
+}
+
+rule TicketBreachesResolutionSla {
+    when: ticket: Ticket.resolution_due_at <= now
+    requires: ticket.unhandled
+    requires: ticket.first_resolved_at = null
+    requires: not ticket.resolution_breached
+    ensures: ticket.resolution_breached = true
+    ensures: SlaBreached(ticket, resolution)
+    if not ticket.escalated:
+        ensures: ticket.priority = escalate(ticket.priority)
+        ensures: ticket.escalated = true
+}
+
+rule CompanySetsSlaPolicy {
+    when: SetCompanySlaPolicy(company, policy)
+    requires: valid_sla_policy(policy)
+    ensures: company.sla_policy = policy
+    @guidance
+        -- `valid_sla_policy` is the black box `SlaPolicy::validate`:
+        -- the constraints written beside BusinessHours/SlaTarget's own
+        -- fields, plus each target at most a year. Replaces the whole
+        -- policy; tickets already created keep theirs.
 }
 
 rule UrgentTicketNeedsImmediateAttention {
@@ -408,9 +632,9 @@ rule UrgentTicketNeedsImmediateAttention {
 
 -- The showcase of skilj's own DCB model this spec hadn't yet
 -- demonstrated: one command, two tickets, no aggregate boundary needed -
--- `src/helpdesk.rs`'s own `MergeTickets::tag_mappings` is the real
--- mechanism this requires-guard relies on (two ticket tags read at
--- once). `duplicate.company = primary.company` is stated as its own
+-- `src/helpdesk/ticket_commands.rs`'s own `MergeTickets` is the real
+-- mechanism this requires-guard relies on (two ticket snapshots read
+-- at once). `duplicate.company = primary.company` is stated as its own
 -- `requires` rather than left implicit, since nothing else here compares
 -- two different tickets' own company at all.
 rule StaffMergesTickets {
@@ -425,15 +649,16 @@ rule StaffMergesTickets {
 -- A CSAT survey response - standard practice once a ticket is handled,
 -- not gated on `closed` alone: real tools survey right after
 -- resolution, not after `config.auto_close_after`'s own multi-day wait.
--- One rating per ticket - `rating`'s own `when` clause already makes a
--- second `RateTicket` on a ticket outside `{resolved, closed}`
--- impossible to re-target this way, but nothing here stops rating twice
--- while still resolved; `src/helpdesk.rs`'s own `already_rated` guard is
--- stricter than this spec states, deliberately so - noted here rather
--- than silently drifted from.
+-- One rating per ticket, ever (`already_rated`), on the
+-- config.min_rating..max_rating scale (`invalid_rating`), and only by the
+-- ticket's own requester (`requester_mismatch`) - all three in the code
+-- all along, stated here since weeding 2026-10-12.
 rule CustomerRatesTicket {
-    when: RateTicket(ticket, rating)
+    when: RateTicket(ticket, requester, rating)
+    requires: requester = ticket.requester
     requires: ticket.status = resolved | closed
+    requires: ticket.rating = null
+    requires: rating >= config.min_rating and rating <= config.max_rating
     ensures: ticket.rating = rating
 }
 
@@ -448,6 +673,118 @@ rule StaffAddsInternalNote {
     ensures: InternalNoteAdded(ticket, staff)
 }
 
+-- Macros (canned responses, issue #43): a company's reusable staff
+-- replies, each optionally also moving the ticket's status and/or
+-- priority. Standard helpdesk tooling (Zendesk macros, Freshdesk canned
+-- responses).
+--
+-- @guidance
+--     Lives in the helpdesk context itself, not a context of its own:
+--     applying one decides on the macro and the ticket together, and a
+--     skilj consistency query only reads its own context. A separate
+--     context would leave the caller to send the macro's content along,
+--     so a macro deleted or edited meanwhile would still be applied as
+--     it was. See `src/helpdesk/macros.rs`.
+entity Macro {
+    company: Company
+    macro_id: String        -- caller-supplied, never reused, deleted or not
+    name: String
+    body: String            -- `{{ticket_id}}`/`{{staff_id}}` filled in on apply
+    sets_status: waiting_on_customer | resolved | none
+    sets_priority: low | medium | high | urgent | none
+}
+
+rule StaffCreatesMacro {
+    when: CreateMacro(company, macro_id, name, body, sets_status, sets_priority)
+    requires: exists company
+    -- Stricter in code (`macro_already_exists`): a deleted macro's id
+    -- stays used too - see Macro.macro_id.
+    requires: not exists Macro{company: company, macro_id: macro_id}
+    requires: name != "" and body != ""
+    ensures: Macro.created(
+        company: company, macro_id: macro_id, name: name, body: body,
+        sets_status: sets_status, sets_priority: sets_priority
+    )
+}
+
+rule StaffEditsMacro {
+    when: UpdateMacro(macro, name, body, sets_status, sets_priority)
+    requires: name != "" and body != ""
+    ensures: macro.name = name
+    ensures: macro.body = body
+    ensures: macro.sets_status = sets_status
+    ensures: macro.sets_priority = sets_priority
+}
+
+rule StaffDeletesMacro {
+    when: DeleteMacro(macro)
+    ensures: not exists macro
+}
+
+-- One command, all or nothing: the reply, a priority change when the
+-- macro sets a different one, and the status change through the very
+-- rule of `StaffRequestsInfo`/`StaffResolvesTicket` (both `requires:
+-- ticket.status = in_progress`) - any part rejected rejects the whole.
+-- A `waiting_on_customer` macro's reply *is* the info request; any other
+-- reply is a `StaffReplied` that leaves the status alone.
+rule StaffAppliesMacro {
+    when: ApplyMacro(ticket, macro, staff)
+    requires: macro.company = ticket.company
+    requires: ticket.status not in {closed, merged}
+    requires: macro.sets_status = none or ticket.status = in_progress
+    let reply = render(macro.body, ticket, staff)
+    ensures:
+        if macro.sets_priority != none:
+            ticket.priority = macro.sets_priority
+    ensures:
+        if macro.sets_status = waiting_on_customer:
+            ticket.status = waiting_on_customer
+        else:
+            StaffReplied(ticket, staff, reply)
+    -- Either way the customer heard from staff: it meets the
+    -- first-response SLA (TicketBreachesFirstResponseSla).
+    ensures: ticket.first_responded_at = ticket.first_responded_at ?? now
+    ensures:
+        if macro.sets_status = resolved:
+            ticket.status = resolved
+            ticket.resolved_at = now
+            ticket.first_resolved_at = ticket.first_resolved_at ?? now
+    @guidance
+        -- Resolving through a macro is StaffResolvesTicket's own decision,
+        -- so it frees the assignee up for StaffAutoAssignsTicket exactly
+        -- as a direct resolve does.
+}
+
+-- Load-based auto-assignment (issue #44): the open ticket goes to
+-- whichever of the named candidates has the fewest open tickets - an
+-- agent's open tickets being those assigned to them with status
+-- in_progress or waiting_on_customer. `least_loaded` is a black box
+-- (same treatment as `escalate` above): fewest open tickets, a tie going
+-- to the candidate listed first. The candidates are the caller's to name
+-- (who is on shift is not modelled here), so this is a staff action, not
+-- a reaction to ticket creation.
+rule StaffAutoAssignsTicket {
+    when: AutoAssignTicket(ticket, candidates)
+    requires: ticket.status = open
+    requires: candidates.count > 0
+    let chosen = least_loaded(candidates)
+    ensures: ticket.status = in_progress
+    ensures: ticket.assigned_to = chosen
+    @guidance
+        -- The second DCB showcase after `StaffMergesTickets`: the rule
+        -- reads every candidate's open tickets across the whole ticket
+        -- set, with no aggregate owning them. `src/helpdesk/auto_assign.rs`
+        -- keys a `StaffWorkload` snapshot by a `staff` tag carried by
+        -- `TicketAssigned`, `TicketResolved`, `TicketReopened` and
+        -- `TicketsMerged`, and reads one per candidate. Two
+        -- auto-assignments deciding at once conflict on the agents they
+        -- both read, and the later one is decided again with the
+        -- earlier one's assignment counted, so `least_loaded` always
+        -- sees every assignment committed before its own.
+        -- Assignments stored before the `staff` tag existed are not
+        -- counted: skilj tags an event once, when it is appended.
+}
+
 -- Surfaces. Wires up every trigger above to an actual entry point -
 -- resolves all of `allium analyse`'s unreachable-trigger findings from
 -- the previous pass. Split into a public boundary (nobody has an
@@ -455,6 +792,28 @@ rule StaffAddsInternalNote {
 -- each split into a list/create surface and a single-ticket surface
 -- (a surface's context binds one entity at a time - see
 -- StaffTicketView/CustomerTicketView).
+
+-- Weeded 2026-10-12: the two background binaries the multi-context move
+-- added (src/bin/provisioner.rs, src/bin/lifecycle-replicator.rs) -
+-- code, not people, holding superadmin-minted command tokens; the same
+-- shape as activity.allium's EngagementWatcher.
+actor PlatformReactor {
+    identified_by: skilj/Role where superadmin = true
+}
+
+surface TenantProvisioning {
+    facing reactor: PlatformReactor
+
+    provides:
+        RecordCompanyTenant(company, tenant)
+}
+
+surface TenantLifecycleReplication {
+    facing reactor: PlatformReactor
+
+    provides:
+        RecordTenantLifecycle(company, status)
+}
 
 surface CompanySignup {
     provides:
@@ -502,11 +861,21 @@ surface CustomerTicketView {
             when ticket.status = waiting_on_customer
         ReopenTicket(ticket)
             when ticket.status = resolved
-        RateTicket(ticket, rating)
-            when ticket.status = resolved | closed
+        RateTicket(ticket, customer, rating)
+            when ticket.status = resolved | closed and ticket.rating = null
 
     timeout:
         TicketAutoCloses
+}
+
+surface StaffSlaSettings {
+    facing staff: StaffMember
+
+    exposes:
+        staff.company.sla_policy
+
+    provides:
+        SetCompanySlaPolicy(staff.company, policy)
 }
 
 surface StaffTicketQueue {
@@ -541,9 +910,15 @@ surface StaffTicketView {
         ticket.logged_by
         ticket.created_at
         ticket.resolved_at
+        ticket.first_response_due_at
+        ticket.resolution_due_at
+        ticket.first_response_breached
+        ticket.resolution_breached
 
     provides:
         AssignTicket(ticket, staff)
+            when ticket.status = open
+        AutoAssignTicket(ticket, candidates)
             when ticket.status = open
         RequestInfoFromCustomer(ticket, staff)
             when ticket.status = in_progress
@@ -551,12 +926,33 @@ surface StaffTicketView {
             when ticket.status = in_progress
         ReopenTicket(ticket)
             when ticket.status = resolved
+        CloseTicket(ticket, staff)
+            when ticket.status = resolved
         AddInternalNote(ticket, staff)
         MergeTickets(ticket, duplicate)
             when ticket.status = open | in_progress | waiting_on_customer | resolved
+        ApplyMacro(ticket, macro, staff)
+            when ticket.status not in {closed, merged}
 
     timeout:
         TicketAutoCloses
+}
+
+-- Staff-only: macros are internal tooling, never shown to customers.
+surface StaffMacroLibrary {
+    facing staff: StaffMember
+
+    exposes:
+        for macro in Macros where company = staff.company:
+            macro.name
+            macro.body
+            macro.sets_status
+            macro.sets_priority
+
+    provides:
+        CreateMacro(staff.company, macro_id, name, body, sets_status, sets_priority)
+        UpdateMacro(macro, name, body, sets_status, sets_priority)
+        DeleteMacro(macro)
 }
 
 -- Open questions: none currently. Every question raised during

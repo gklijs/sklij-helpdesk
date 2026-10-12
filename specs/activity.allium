@@ -17,11 +17,10 @@
 -- Excludes:
 --   - The actual sweep that walks every company and decides who's gone
 --     quiet - `config.quiet_after`'s own threshold check is
---     `engagement-watcher`'s decision logic (the same kind of thing
---     helpdesk's own scheduling.rs already is for TrialPeriodEnds/
---     TicketAutoCloses), not an event/command shape question, and not
---     yet built - see the resolved notes near the bottom of this file
---     for what's decided versus what's still to implement.
+--     `engagement-watcher`'s decision logic
+--     (src/activity_scheduling.rs, driven by src/bin/engagement-watcher.rs),
+--     not an event/command shape question - see the resolved notes near
+--     the bottom of this file.
 --   - Per-person activity reporting: `surface CompanyEngagementOverview`
 --     shows staff how active a company is in counts and latest days, never
 --     which people were active.
@@ -119,8 +118,8 @@ rule EngagementDeclineIsRecorded {
 -- Not a person: the new scheduled binary, resolved as `engagement-
 -- watcher` (see the resolved note near the bottom of this file), the
 -- same "external process, not decide() itself, makes the call" shape
--- helpdesk's own alerter.rs/scheduler.rs already use for urgent-ticket
--- paging and trial-deadline/auto-close. It operates across every
+-- helpdesk's own alerter.rs already uses for urgent-ticket paging and
+-- overdue escalation. It operates across every
 -- company, not one tenant, so it authenticates as a superadmin skilj
 -- Role rather than a per-company StaffMember/Customer.
 actor EngagementWatcher {
@@ -189,11 +188,14 @@ surface EngagementDeclineDetection {
 -- Resolved: a company counts as "gone quiet" when it has zero
 -- customer-kind DailyActivityRecorded events in the trailing
 -- config.quiet_after window (see Config above) - a fixed-threshold
--- sweep, the same shape scheduling.rs's own trial-duration/auto-close
--- checks already are. Not modeled as an Allium rule here, for the same
--- reason those aren't: this is a scheduled binary's own decision logic
--- over data it has already read, not a decide()-shaped accept/reject
--- question.
+-- sweep over a rolling window, which is why it stays a polling binary
+-- rather than one of skilj's native one-shot deadlines (the way
+-- TrialPeriodEnds/TicketAutoCloses now are). Not modeled as an Allium
+-- rule here: this is a scheduled binary's own decision logic over data
+-- it has already read, not a decide()-shaped accept/reject question.
+-- Weeded 2026-10-12: the window only starts at a company's first
+-- customer activity the watcher has seen - a company with no customer
+-- activity at all is never flagged, by design of the first pass.
 
 -- Resolved: staff activity, and helpdesk's own TicketCreated/
 -- TicketCustomerResponded feed, are both excluded from what counts as
@@ -203,10 +205,10 @@ surface EngagementDeclineDetection {
 -- skilj-helpdesk.allium's own Dependencies) rather than a considered
 -- product judgement that ticket replies never signal engagement.
 
--- Resolved: the new scheduled binary is called `engagement-watcher`,
--- named and structured the same way `alerter.rs`/`scheduler.rs` already
--- are - its own printed EventReadTokens (DAILY_ACTIVITY_RECORDED_TOKEN)
--- and CommandToken (RECORD_ENGAGEMENT_DECLINE_TOKEN), the same
--- env-var-configuration style scheduler.rs's own doc comment describes.
--- Not yet implemented - the config/actor/surface shape above is ready
--- for it, but no src/bin/engagement-watcher.rs exists yet.
+-- Resolved: the scheduled binary is `engagement-watcher`
+-- (src/bin/engagement-watcher.rs), named and structured the same way
+-- `alerter.rs` is - its own printed EventReadToken
+-- (DAILY_ACTIVITY_RECORDED_TOKEN) and CommandToken
+-- (RECORD_ENGAGEMENT_DECLINE_TOKEN), QUIET_AFTER_DAYS overriding
+-- config.quiet_after. Built since this note first said it wasn't
+-- (weeded 2026-10-12).

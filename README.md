@@ -179,9 +179,10 @@ without a restart.
 
 ## Context map
 
-Three bounded contexts share one Postgres, plus one tenant context per
+Four bounded contexts share one Postgres, plus one tenant context per
 company. All of them are hosted by `server`. Inside `server`, skilj also
-runs the cross-context routes (thick arrows, `src/marketing.rs`) and the
+runs the cross-context routes (thick arrows, `src/marketing.rs` and
+`src/knowledge_base.rs`) and the
 deadlines (rounded, `src/helpdesk/`). `lib.rs`'s `register()` wires in
 both.
 
@@ -198,9 +199,11 @@ flowchart LR
     end
     activity["activity<br/>⟶ CompanyEngagement"]
     marketing["marketing<br/>⟶ MarketingSignals"]
+    knowledge_base["knowledge_base<br/>⟶ KnowledgeBaseReview (staff)<br/>PublishedArticles"]
 
     company == "CompanyExpired ⟶ RecordTrialLapse<br/>CompanyActivated ⟶ RecordTrialConversion" ==> marketing
     activity == "CompanyEngagementDeclined ⟶<br/>RecordEngagementDecline" ==> marketing
+    tickets == "TicketResolved ⟶ SuggestArticle" ==> knowledge_base
 ```
 
 The other binaries are clients of `server`. Each one reads an event feed
@@ -248,6 +251,7 @@ flowchart LR
 | `src/helpdesk/` | The `helpdesk` context, the core domain logic: `company.rs` (signup, trial/subscription lifecycle, `TenantDirectory`), `ticket.rs` (ticket events, `TicketFacts`/`TicketSnapshot`), `ticket_commands.rs`, `read_models.rs` (the ticket projections); `mod.rs` holds the shared tags and `HelpdeskEvent` |
 | `src/activity.rs` | The `activity` context: daily activity pings, engagement-decline flags, `CompanyEngagement` |
 | `src/marketing.rs` | The `marketing` context: the three cross-context routes and `MarketingSignals` |
+| `src/knowledge_base.rs` | The `knowledge_base` context: resolved tickets routed in as article suggestions, staff review/draft/edit/publish, `KnowledgeBaseReview` (staff) and `PublishedArticles` |
 | `src/alerting.rs` | Pure decision logic `src/bin/alerter.rs` drives |
 | `src/scheduling.rs` | Env-driven durations + the mocked payment call `src/helpdesk/`'s own deadline reactors (`ScheduleCompanyTrialConversion`/`ScheduleTicketAutoClose`) use |
 | `src/telemetry.rs` | Shared OTel wiring every binary calls into (see "Telemetry & dashboards" below) |
@@ -349,6 +353,15 @@ skips without it.
 command's accept/reject paths and every projection fold, through
 `skilj-test-fixture`, with no database (`tests/fixture/`), so those
 never skip.
+`cargo test --test failure_recovery` runs the failure scenarios against
+the real compiled binaries: a `server` SIGKILLed mid command batch next
+to a second instance (a rolling deploy) must leave no partial commit,
+and every `Idempotency-Key` retry must land exactly once; and Postgres
+restarted under load must see the server accept commands again within
+30s while `alerter` and `engagement-watcher` carry on from their
+cursors with no gap or duplicate. The restart test needs a Postgres it
+can stop, so it always uses its own embedded cluster, CI included
+(where `DATABASE_URL` is shared by every test binary).
 `cd frontend && cargo test --target wasm32-unknown-unknown` isn't a
 thing (no frontend unit tests this pass) — it's verified by actually
 running it (see below).

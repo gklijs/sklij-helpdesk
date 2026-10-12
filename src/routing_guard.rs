@@ -61,6 +61,7 @@ const TICKET_PROJECTIONS: &[&str] = &[
     "CompanyActiveTickets",
     "CustomerTickets",
     "TicketInternalNotes",
+    "CompanyMacros",
 ];
 
 /// The one ticket projection keyed by customer - see
@@ -326,8 +327,9 @@ pub async fn tenant_for_company(
 ///
 /// Only `company_id` is looked for, and only at the top level. That is
 /// enough for `CreateTicket` - the one command that both names a company
-/// and starts a company's ticket history - and for the `CompanyActiveTickets`
-/// read. A `CustomerTickets` read reports the row whose owner to look up.
+/// and starts a company's ticket history - for the macro commands, and
+/// for the company-keyed `CompanyActiveTickets`/`CompanyMacros` reads. A
+/// `CustomerTickets` read reports the row whose owner to look up.
 /// Everything else reports `Unattributed`, which the caller then refuses
 /// conservatively rather than guessing a company from a `ticket_id`.
 pub fn subject_of(
@@ -340,9 +342,11 @@ pub fn subject_of(
             .and_then(|payload| payload["company_id"].as_str())
             .map(|company_id| Subject::Company(company_id.to_string()))
             .unwrap_or(Subject::Unattributed),
-        Guarded::Projection(name) if name == "CompanyActiveTickets" => projection_key
-            .map(|key| Subject::Company(key.to_string()))
-            .unwrap_or(Subject::Unattributed),
+        Guarded::Projection(name) if name == "CompanyActiveTickets" || name == "CompanyMacros" => {
+            projection_key
+                .map(|key| Subject::Company(key.to_string()))
+                .unwrap_or(Subject::Unattributed)
+        }
         Guarded::Projection(name) if name == CUSTOMER_TICKETS => projection_key
             .map(|key| Subject::OwnerOfRow {
                 projection: name.clone(),
@@ -1353,6 +1357,7 @@ mod tests {
             "MergeTickets",
             "RateTicket",
             "AddInternalNote",
+            "AutoAssignTicket",
             "SignUpCompany",
             "ConvertCompanyTrial",
             "ExpireCompanyTrial",

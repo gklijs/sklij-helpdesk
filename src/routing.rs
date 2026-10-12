@@ -91,7 +91,14 @@ pub fn classify(command_type_name: &str) -> Result<CommandClass, UnclassifiedCom
         | "EscalateTicket"
         | "MergeTickets"
         | "RateTicket"
-        | "AddInternalNote" => CommandClass::Ticket,
+        | "AddInternalNote"
+        | "AutoAssignTicket"
+        // Macros: per-company, and `ApplyMacro` reads one beside a
+        // ticket, so they must live wherever the company's tickets do.
+        | "CreateMacro"
+        | "UpdateMacro"
+        | "DeleteMacro"
+        | "ApplyMacro" => CommandClass::Ticket,
         // Lifecycle: authoritative in the shared context, never routed.
         "SignUpCompany" | "ConvertCompanyTrial" | "ExpireCompanyTrial" | "ReactivateCompany" => {
             CommandClass::CompanyLifecycle
@@ -340,6 +347,11 @@ mod tests {
         "MergeTickets",
         "RateTicket",
         "AddInternalNote",
+        "CreateMacro",
+        "UpdateMacro",
+        "DeleteMacro",
+        "ApplyMacro",
+        "AutoAssignTicket",
     ];
     const LIFECYCLE: &[&str] = &[
         "SignUpCompany",

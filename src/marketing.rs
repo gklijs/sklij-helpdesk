@@ -1,7 +1,7 @@
 //! The "marketing" bounded context: a staff-visible record of company
 //! signals worth a marketing follow-up - no outreach automation, no
 //! paging. Implements `specs/marketing.allium` in full - see that file
-//! for the domain spec, and `specs/activity-marketing-event-model.md`
+//! for the domain spec, and `docs/activity-marketing-event-model.md`
 //! (its own precursor doc) for the wider picture.
 //!
 //! This is the half of the two-context pair that showcases skilj 0.0.4's

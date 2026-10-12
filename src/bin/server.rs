@@ -308,7 +308,14 @@ const COMMAND_TYPES: &[&str] = &[
     "MergeTickets",
     "RateTicket",
     "AddInternalNote",
+    "AutoAssignTicket",
     "RecordCompanyTenant",
+    "SetCompanySlaPolicy",
+    "BreachTicketSla",
+    "CreateMacro",
+    "UpdateMacro",
+    "DeleteMacro",
+    "ApplyMacro",
 ];
 
 /// `src/bin/provisioner.rs`'s own event type - one `CompanySignedUp` per
@@ -1257,6 +1264,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _marketing_mapping =
         ensure_bounded_context_and_grant(&pool, &role, skilj_helpdesk::marketing::BOUNDED_CONTEXT)
             .await?;
+    // A fourth, for `knowledge_base` - the target of lib.rs's
+    // `HelpdeskResolutionToArticleSuggestion` route, which would skip
+    // every resolved ticket for want of this grant, exactly as above.
+    let _knowledge_base_mapping = ensure_bounded_context_and_grant(
+        &pool,
+        &role,
+        skilj_helpdesk::knowledge_base::BOUNDED_CONTEXT,
+    )
+    .await?;
 
     // Real IdP when OIDC_ISSUER_URL is set (a running Dex instance - see
     // this file's own module doc comment), the local JWKS/JWT shortcut
@@ -1451,6 +1467,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 skilj_helpdesk::marketing::BOUNDED_CONTEXT,
                 AccessLevel::Read,
                 None,
+            ),
+            // Staff review and write articles; the customer reads
+            // `PublishedArticles` only - `KnowledgeBaseReview`, where the
+            // drafts are, is `TEAM_ONLY` staff.
+            (
+                DEMO_STAFF_LEAD_SUB,
+                skilj_helpdesk::knowledge_base::BOUNDED_CONTEXT,
+                AccessLevel::Write,
+                None,
+            ),
+            (
+                DEMO_CUSTOMER_SUB,
+                skilj_helpdesk::knowledge_base::BOUNDED_CONTEXT,
+                AccessLevel::Read,
+                Some(DEMO_COMPANY_ID.to_string()),
             ),
         ] {
             let Some(role) = demo_roles

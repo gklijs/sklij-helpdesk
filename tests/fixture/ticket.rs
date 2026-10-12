@@ -46,6 +46,7 @@ fn a_trialing_company_can_create_tickets() {
                 "priority": "high",
                 "requester_name": "Jane Doe",
                 "requester_email": "jane@customer.example",
+                "sla": skilj_helpdesk::sla::SlaPolicy::default().for_priority(TicketPriority::High),
             }),
         )]);
 }
@@ -97,6 +98,17 @@ fn a_ticket_id_can_only_be_used_once() {
     GivenEvents::<CreateTicket>::new()
         .event(signed_up("acme"))
         .events(open_ticket("t1", "acme"))
+        .when(create("t1"))
+        .then_rejected("ticket_already_exists");
+}
+
+#[test]
+fn a_ticket_id_is_used_once_across_companies() {
+    // Another company's ticket under the same id would land on this
+    // one's tag and snapshot - and reopen it, even out of `closed`.
+    GivenEvents::<CreateTicket>::new()
+        .events([signed_up("acme"), signed_up("globex")])
+        .events(closed_ticket("t1", "globex"))
         .when(create("t1"))
         .then_rejected("ticket_already_exists");
 }
@@ -157,7 +169,7 @@ fn an_in_progress_ticket_resolves() {
         })
         .then_accepted(vec![spec(
             "TicketResolved",
-            json!({ "ticket_id": "t1", "company_id": "acme", "resolution": 1, "requester_id": "customer-1" }),
+            json!({ "ticket_id": "t1", "company_id": "acme", "resolution": 1, "requester_id": "customer-1", "assignee_id": "staff-1" }),
         )]);
 }
 
@@ -187,7 +199,7 @@ fn a_resolved_ticket_reopens_and_can_be_resolved_again() {
         })
         .then_accepted(vec![spec(
             "TicketReopened",
-            json!({ "ticket_id": "t1", "company_id": "acme", "resolution": 1 }),
+            json!({ "ticket_id": "t1", "company_id": "acme", "resolution": 1, "assignee_id": "staff-1" }),
         )]);
     let mut history = resolved_ticket("t1", "acme");
     history.push(reopened("t1", "acme", 1));
@@ -198,7 +210,7 @@ fn a_resolved_ticket_reopens_and_can_be_resolved_again() {
         })
         .then_accepted(vec![spec(
             "TicketResolved",
-            json!({ "ticket_id": "t1", "company_id": "acme", "resolution": 2, "requester_id": "customer-1" }),
+            json!({ "ticket_id": "t1", "company_id": "acme", "resolution": 2, "requester_id": "customer-1", "assignee_id": "staff-1" }),
         )]);
     let mut history = resolved_ticket("t1", "acme");
     history.push(reopened("t1", "acme", 1));
@@ -210,7 +222,7 @@ fn a_resolved_ticket_reopens_and_can_be_resolved_again() {
         })
         .then_accepted(vec![spec(
             "TicketReopened",
-            json!({ "ticket_id": "t1", "company_id": "acme", "resolution": 2 }),
+            json!({ "ticket_id": "t1", "company_id": "acme", "resolution": 2, "assignee_id": "staff-1" }),
         )]);
 }
 
@@ -278,6 +290,7 @@ fn resolving_schedules_an_auto_close_for_that_ticket() {
         company_id: "acme".into(),
         resolution: Some(2),
         requester_id: Some("customer-1".into()),
+        assignee_id: Some("staff-1".into()),
     })
     .expect("every resolution schedules an auto-close");
     let after = chrono::Utc::now();
@@ -308,6 +321,7 @@ fn resolving_schedules_an_auto_close_for_that_ticket() {
         company_id: "acme".into(),
         resolution: None,
         requester_id: None,
+        assignee_id: None,
     })
     .expect("every resolution schedules an auto-close");
     assert_eq!(
@@ -325,6 +339,7 @@ fn reopening_cancels_only_the_auto_close_of_the_resolution_it_undoes() {
         ticket_id: "t1".into(),
         company_id: "acme".into(),
         resolution: Some(1),
+        assignee_id: Some("staff-1".into()),
     })
     .expect("a numbered reopen cancels");
     // Only the resolution tag: the deadline's `ticket` tag is shared with
@@ -341,6 +356,7 @@ fn reopening_cancels_only_the_auto_close_of_the_resolution_it_undoes() {
         company_id: "acme".into(),
         resolution: Some(2),
         requester_id: Some("customer-1".into()),
+        assignee_id: Some("staff-1".into()),
     })
     .unwrap();
     assert!(cancel.iter().all(|tag| !next.tags.contains(tag)));
@@ -350,6 +366,7 @@ fn reopening_cancels_only_the_auto_close_of_the_resolution_it_undoes() {
             ticket_id: "t1".into(),
             company_id: "acme".into(),
             resolution: None,
+            assignee_id: None,
         }),
         None,
         "a reopen stored before resolutions were numbered has nothing to name"
@@ -548,7 +565,7 @@ fn two_tickets_of_one_company_merge() {
         .when(merge("t1", "t2"))
         .then_accepted(vec![spec(
             "TicketsMerged",
-            json!({ "primary_ticket_id": "t1", "duplicate_ticket_id": "t2", "company_id": "acme" }),
+            json!({ "primary_ticket_id": "t1", "duplicate_ticket_id": "t2", "company_id": "acme", "duplicate_assignee_id": null }),
         )]);
 }
 
@@ -733,6 +750,12 @@ fn every_ticket_command_rejects_an_unknown_ticket() {
     GivenTicket::<EscalateTicket>::new()
         .when(EscalateTicketPayload {
             ticket_id: "t1".into(),
+        })
+        .then_rejected("ticket_not_found");
+    GivenTicket::<BreachTicketSla>::new()
+        .when(BreachTicketSlaPayload {
+            ticket_id: "t1".into(),
+            sla: skilj_helpdesk::sla::SlaKind::Resolution,
         })
         .then_rejected("ticket_not_found");
 }

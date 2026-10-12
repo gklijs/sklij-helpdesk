@@ -47,17 +47,20 @@ impl CommandType for CreateTicket {
     fn tag_mappings() -> Vec<TagMapping> {
         [company_tag(), ticket_tag()].concat()
     }
-    /// The company's latest lifecycle event, and whether this company
-    /// already has a ticket with this id. Before this, `decide()` read
-    /// every event tagged with the company - every ticket it ever filed -
-    /// and another of its tickets committed meanwhile was a conflict.
-    /// `ticket` first: an item is looked up by its first tag.
+    /// The company's latest lifecycle event, whether any company already
+    /// has a ticket with this id, and the company's latest SLA policy.
+    /// Before this, `decide()` read every event tagged with the company -
+    /// every ticket it ever filed - and another of its tickets committed
+    /// meanwhile was a conflict. Only the `ticket` tag on the second item:
+    /// a ticket id is global (see `CompanyFacts::apply`), so another
+    /// company's use of it must be seen too.
     fn consistency_query() -> Vec<QueryItemMapping> {
         vec![
             company_status_query(),
-            QueryItemMapping::types(&["TicketCreated"])
-                .tagged(ticket_tag())
-                .tagged(company_tag()),
+            QueryItemMapping::types(&["TicketCreated"]).tagged(ticket_tag()),
+            QueryItemMapping::types(&["CompanySlaPolicySet"])
+                .tagged(company_tag())
+                .latest(),
         ]
     }
     /// The stored command holds the same customer data as the event it
@@ -115,6 +118,11 @@ fn create_ticket(payload: &CreateTicketPayload, company: &CompanyFacts) -> Comma
                 "priority": payload.priority,
                 "requester_name": payload.requester_name,
                 "requester_email": payload.requester_email,
+                "sla": company
+                    .sla_policy
+                    .clone()
+                    .unwrap_or_default()
+                    .for_priority(payload.priority),
             }),
         }],
     }
@@ -220,7 +228,10 @@ impl CommandType for ResolveTicket {
 }
 
 impl ResolveTicket {
-    fn decide_on(payload: &ResolveTicketPayload, facts: &TicketFacts) -> CommandDecision {
+    pub(super) fn decide_on(
+        payload: &ResolveTicketPayload,
+        facts: &TicketFacts,
+    ) -> CommandDecision {
         match facts.status {
             None => CommandDecision::Rejected {
                 reason: format!("ticket {} does not exist", payload.ticket_id),
@@ -234,6 +245,7 @@ impl ResolveTicket {
                         "company_id": facts.company_id(),
                         "resolution": facts.resolutions + 1,
                         "requester_id": facts.requester_id,
+                        "assignee_id": facts.assignee_id,
                     }),
                 }],
             },
@@ -296,6 +308,7 @@ impl ReopenTicket {
                         "ticket_id": payload.ticket_id,
                         "company_id": facts.company_id(),
                         "resolution": facts.resolutions,
+                        "assignee_id": facts.assignee_id,
                     }),
                 }],
             },
@@ -356,7 +369,10 @@ impl CommandType for RequestInfoFromCustomer {
 }
 
 impl RequestInfoFromCustomer {
-    fn decide_on(payload: &RequestInfoFromCustomerPayload, facts: &TicketFacts) -> CommandDecision {
+    pub(super) fn decide_on(
+        payload: &RequestInfoFromCustomerPayload,
+        facts: &TicketFacts,
+    ) -> CommandDecision {
         let status = facts.status;
         if status.is_some() {
             if let Some(rejected) = facts.reject_unless_requester(payload.requester_id.as_deref()) {
@@ -704,8 +720,10 @@ impl EscalateTicket {
                         kind: "already_escalated".into(),
                     };
                 }
+                // Its current priority, which `ApplyMacro` may have moved
+                // off the one it was created with.
                 let previous_priority = facts
-                    .created_priority
+                    .current_priority()
                     .expect("a ticket with any status has a TicketCreated in its own history");
                 let new_priority = escalate_priority(previous_priority);
                 CommandDecision::Accepted {
@@ -837,6 +855,7 @@ impl MergeTickets {
                             "primary_ticket_id": payload.primary_ticket_id,
                             "duplicate_ticket_id": payload.duplicate_ticket_id,
                             "company_id": primary_company,
+                            "duplicate_assignee_id": duplicate.assignee_id,
                         }),
                     }],
                 }

@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 4a58e4e6db99bc66b12843bd8313d1cd8edad43622f51e39df8391c75c3f3315 # shrinks to ops = [SignUp("acme"), Create { ticket: "t3", company: "acme", requester: "customer-1", priority: Low }, SignUp("globex"), Create { ticket: "t3", company: "globex", requester: "customer-1", priority: Low }]
+cc 8e9c46acbec71a86872721daba48463396ea6ca60cdcbed7d75525ce03bccd72 # shrinks to ops = [SignUp("acme"), Create { ticket: "t1", company: "acme", requester: "customer-1", priority: Low }, Assign("t1"), Resolve("t1"), Reopen("t1"), Breach("t1", Resolution)]

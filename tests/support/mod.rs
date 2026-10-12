@@ -120,7 +120,7 @@ async fn provision() -> Option<TestDb> {
 /// (`rmdir`, so only once it's empty). `setsid` puts it
 /// in its own session, so the Ctrl-C that stops `cargo test` doesn't stop
 /// it too. Cleanup lands within a second of the process ending.
-fn spawn_reaper(settings: &postgresql_embedded::Settings) {
+pub fn spawn_reaper(settings: &postgresql_embedded::Settings) {
     // The removal below is `rm -rf` on these paths, so only for a
     // throwaway cluster, and never on anything that looks like a root.
     let data_dir = &settings.data_dir;
@@ -237,7 +237,7 @@ static NEW_CONTEXTS_READY: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::co
 async fn ensure_activity_and_marketing_contexts(pool: &Pool) {
     NEW_CONTEXTS_READY
         .get_or_init(|| async {
-            for name in ["activity", "marketing"] {
+            for name in ["activity", "marketing", "knowledge_base"] {
                 if db::get_bounded_context(pool, name).await.unwrap().is_none() {
                     db::insert_bounded_context(
                         pool,
@@ -269,11 +269,15 @@ async fn ensure_activity_and_marketing_contexts(pool: &Pool) {
 fn assert_no_unexpected_skips(skipped_no_access: &[String]) {
     let unexpected: Vec<&String> = skipped_no_access
         .iter()
-        .filter(|s| !s.starts_with("activity/") && !s.starts_with("marketing/"))
+        .filter(|s| {
+            !s.starts_with("activity/")
+                && !s.starts_with("marketing/")
+                && !s.starts_with("knowledge_base/")
+        })
         .collect();
     assert!(
         unexpected.is_empty(),
-        "unexpected skipped_no_access entries (beyond the expected activity/marketing gap): {unexpected:?}"
+        "unexpected skipped_no_access entries (beyond the expected activity/marketing/knowledge_base gap): {unexpected:?}"
     );
 }
 
@@ -465,6 +469,7 @@ pub struct AllContextMappings {
     pub helpdesk: RoleAccessMapping,
     pub activity: RoleAccessMapping,
     pub marketing: RoleAccessMapping,
+    pub knowledge_base: RoleAccessMapping,
 }
 
 /// Like `setup()`, but also reconciles the two new bounded contexts
@@ -494,6 +499,8 @@ pub async fn setup_all_contexts() -> (Skilj, Pool, AllContextMappings) {
     .await;
     let activity = seed_mapping_for(&pool, &role, "activity", AccessLevel::Admin, None).await;
     let marketing = seed_mapping_for(&pool, &role, "marketing", AccessLevel::Admin, None).await;
+    let knowledge_base =
+        seed_mapping_for(&pool, &role, "knowledge_base", AccessLevel::Admin, None).await;
 
     let external_subject = role.external_subject.clone();
     // An IdP too, so a test can read activity/marketing projections over
@@ -515,6 +522,7 @@ pub async fn setup_all_contexts() -> (Skilj, Pool, AllContextMappings) {
             helpdesk,
             activity,
             marketing,
+            knowledge_base,
         },
     )
 }
