@@ -1,6 +1,6 @@
 //! Company signup, tenant provisioning, trial lifecycle and lifecycle
 //! mirroring. `SignUpCompany`'s field validation (email shape, empty
-//! ids/names) is already covered by `helpdesk.rs`'s own
+//! ids/names) is already covered by `helpdesk/`'s own
 //! `sign_up_validation_tests`; only what that module leaves out is here.
 
 use serde_json::json;

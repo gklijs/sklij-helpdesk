@@ -1,6 +1,6 @@
 //! skilj-helpdesk: a showcase SaaS helpdesk built on skilj. See
 //! `specs/skilj-helpdesk.allium` for the domain spec, and
-//! `helpdesk.rs`'s own module doc comment for what this pass of the
+//! `helpdesk/mod.rs`'s own module doc comment for what this pass of the
 //! implementation covers versus defers.
 //!
 //! `activity`/`marketing` are two more bounded contexts alongside
@@ -36,7 +36,7 @@ pub mod tenant_access;
 ///
 /// Must only ever increase: bump it in any change that alters a
 /// registered shape (a new consumed event type, a flag, a new field).
-pub const APPLICATION_VERSION: u64 = 3;
+pub const APPLICATION_VERSION: u64 = 4;
 
 /// Parses `ENCRYPTION_MASTER_KEY`'s value - 64 hex characters, 32 bytes
 /// (`openssl rand -hex 32`) - for `SkiljBuilder::encryption_master_key`.
@@ -69,11 +69,11 @@ pub fn parse_encryption_master_key(hex: &str) -> Result<skilj::EncryptionMasterK
 /// what `auto_register()` can't do on its own: unlike `EventType`/
 /// `CommandType`/`Projection`, neither `CrossContextRoute` nor
 /// `ScheduleDeadline` has `#[auto_register]` support (see `marketing.rs`'s
-/// own doc comment on why for the former; `helpdesk.rs`'s own
+/// own doc comment on why for the former; `helpdesk/`'s own
 /// `ScheduleCompanyTrialConversion` doc comment for the latter), so each
 /// of `specs/marketing.allium`'s three `CrossContextRoute`s and
-/// `helpdesk.rs`'s three `ScheduleDeadline`s is wired in here, by name,
-/// explicitly, as is the one `CancelDeadline` (`helpdesk.rs`'s
+/// `helpdesk/`'s three `ScheduleDeadline`s is wired in here, by name,
+/// explicitly, as is the one `CancelDeadline` (`helpdesk/`'s
 /// `CancelTicketAutoCloseOnReopen`). The trial deadlines have no cancel
 /// on purpose - see `ScheduleCompanyTrialConversion`'s own doc comment.
 pub fn register(builder: skilj::SkiljBuilder) -> skilj::SkiljBuilder {

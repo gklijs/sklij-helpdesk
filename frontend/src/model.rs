@@ -56,3 +56,37 @@ pub struct TicketInternalNote {
     pub staff_id: String,
     pub note: String,
 }
+
+/// Mirrors `skilj_helpdesk::marketing::MarketingSignalsState`, as GraphQL
+/// returns it (camelCase) - minus its `engagement_declined_at`, which the
+/// panel shows from `CompanyEngagement` instead.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MarketingSignals {
+    pub trial_status: Option<String>,
+    pub last_lapsed_at: Option<String>,
+    pub lapse_count: u32,
+    pub last_converted_at: Option<String>,
+    pub conversion_count: u32,
+}
+
+impl MarketingSignals {
+    pub const FIELDS: &str = "trialStatus lastLapsedAt lapseCount lastConvertedAt conversionCount";
+}
+
+/// Mirrors `skilj_helpdesk::activity::CompanyEngagementState`, as GraphQL
+/// returns it (camelCase).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompanyEngagement {
+    pub customer_active_days: u32,
+    pub staff_active_days: u32,
+    pub last_customer_day: Option<String>,
+    pub last_staff_day: Option<String>,
+    pub engagement_declined_at: Option<String>,
+}
+
+impl CompanyEngagement {
+    pub const FIELDS: &str =
+        "customerActiveDays staffActiveDays lastCustomerDay lastStaffDay engagementDeclinedAt";
+}

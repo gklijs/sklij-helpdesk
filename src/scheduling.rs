@@ -1,4 +1,4 @@
-//! The pure/env-driven bits behind `src/helpdesk.rs`'s two deadline
+//! The pure/env-driven bits behind `src/helpdesk/`'s two deadline
 //! reactors (`ScheduleCompanyTrialConversion`/`ScheduleCompanyTrialExpiry`/
 //! `ScheduleTicketAutoClose`) - `specs/skilj-helpdesk.allium`'s `rule
 //! TrialPeriodEnds`/`TicketAutoCloses`. Used to also hold the deadline

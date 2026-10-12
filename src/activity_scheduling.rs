@@ -3,7 +3,7 @@
 //! (`config.quiet_after`), split out the same way `src/alerting.rs`
 //! splits from `src/bin/alerter.rs`: the deadline check is pure and
 //! tested here; the actual event-stream tracking and command submission
-//! live in the binary. Unlike `src/helpdesk.rs`'s own trial/auto-close
+//! live in the binary. Unlike `src/helpdesk/`'s own trial/auto-close
 //! deadlines (`scheduling.rs`, ported onto skilj's native
 //! `ScheduleDeadline`, see `ScheduleCompanyTrialConversion`'s own doc
 //! comment), "gone quiet" doesn't fit that one-shot-per-triggering-event

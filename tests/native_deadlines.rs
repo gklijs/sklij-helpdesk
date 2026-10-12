@@ -1,4 +1,4 @@
-//! End-to-end proof that `src/helpdesk.rs`'s three `ScheduleDeadline`
+//! End-to-end proof that `src/helpdesk/`'s three `ScheduleDeadline`
 //! reactors (`ScheduleCompanyTrialConversion`/`ScheduleCompanyTrialExpiry`/
 //! `ScheduleTicketAutoClose`, ported off the old `src/bin/scheduler.rs`
 //! onto skilj 0.0.7's native per-entity deadline mechanism,
@@ -22,7 +22,7 @@
 //! each other either.
 //!
 //! No projection exposes a company's own `status` directly (only
-//! ticket-shaped projections exist - see `src/helpdesk.rs`'s own
+//! ticket-shaped projections exist - see `src/helpdesk/`'s own
 //! `CompanyActiveTickets`/`TicketSummary`), so the trial-conversion test
 //! proves the deadline fired indirectly: re-submitting `ConvertCompanyTrial`
 //! by hand afterwards, having never submitted it directly itself, and

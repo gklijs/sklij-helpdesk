@@ -11,7 +11,7 @@
 //! correlated OTel log record via `opentelemetry-appender-tracing`'s
 //! bridge, and the counters/histograms already recorded throughout
 //! `skilj-core`/`skilj-rest`/`skilj` exported as OTel metrics - no new
-//! call sites needed anywhere in this crate's own `helpdesk.rs` for any
+//! call sites needed anywhere in this crate's own `helpdesk/` for any
 //! of the three.
 //!
 //! Shared across every binary (`server`/`alerter`/`engagement-watcher`/

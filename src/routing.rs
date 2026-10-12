@@ -13,7 +13,7 @@
 //! Ticket traffic is per-company and belongs in that company's tenant.
 //! Company *lifecycle* traffic is not per-company at all - it is the
 //! authority every tenant's mirrored copy is derived from (see
-//! `helpdesk.rs`'s `CompanyLifecycleMirrored`) - so it stays in the shared
+//! `helpdesk/`'s `CompanyLifecycleMirrored`) - so it stays in the shared
 //! context, and routing it anywhere else would let a tenant move its own
 //! company between states.
 //!
@@ -68,8 +68,8 @@ pub enum CommandClass {
 }
 
 /// Every `rest_trigger_allowed`/`submitCommand`-reachable command type in
-/// `helpdesk.rs`, classified. An exhaustive `match` rather than a lookup
-/// table so that adding a new command to `helpdesk.rs` without deciding
+/// `helpdesk/`, classified. An exhaustive `match` rather than a lookup
+/// table so that adding a new command to `helpdesk/` without deciding
 /// its class is a compile error here - the failure mode this exists to
 /// prevent is a new command silently defaulting to "goes wherever the
 /// company goes" when nobody ever thought about it.

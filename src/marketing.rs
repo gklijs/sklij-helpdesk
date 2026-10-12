@@ -18,7 +18,7 @@
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use skilj::{auto_register, CommandType, CrossContextRoute, EventType};
+use skilj::{auto_register, CommandType, CrossContextRoute, EventType, Projection};
 use skilj_core::event_store::Event;
 use skilj_core::plugin::BoundedContextEvent;
 use skilj_core::shared::{CommandDecision, EventSpec, QueryItemMapping, TagMapping};
@@ -98,7 +98,7 @@ impl EventType for EngagementDeclineFlagged {
 }
 
 /// This bounded context's own hand-written event enum - same technique
-/// `src/helpdesk.rs`'s own `HelpdeskEvent` already uses.
+/// `src/helpdesk/`'s own `HelpdeskEvent` already uses.
 pub enum MarketingEvent {
     TrialLapsed(TrialLapsedPayload),
     TrialConverted(TrialConvertedPayload),
@@ -244,6 +244,72 @@ impl CommandType for RecordEngagementDecline {
     }
 }
 
+// --- projection ---
+
+/// One company's marketing signals: the three facts this context records,
+/// folded into what a staff member deciding on a follow-up needs.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub struct MarketingSignalsState {
+    /// `"lapsed"` or `"converted"`, whichever of `TrialLapsed`/
+    /// `TrialConverted` came last - a company can lapse, reactivate and
+    /// lapse again, so neither alone says where it stands now. A plain
+    /// string, for the reason `helpdesk::TicketSummaryState::priority`
+    /// gives.
+    pub trial_status: Option<String>,
+    pub last_lapsed_at: Option<String>,
+    pub lapse_count: u32,
+    pub last_converted_at: Option<String>,
+    pub conversion_count: u32,
+    /// Set once: activity flags a company at most once (see
+    /// `activity::RecordEngagementDecline`).
+    pub engagement_declined_at: Option<String>,
+}
+
+/// Keyed by `company_id`. `specs/marketing.allium`'s `surface
+/// MarketingOutreachSignals`, as a read model: what the staff dashboard's
+/// company panel shows. Staff-only, the same two gates
+/// `helpdesk::TicketInternalNotes` uses: `OWNER_TAG_KEY` scopes a
+/// company-restricted grant to its own company, and `TEAM_ONLY` keeps a
+/// customer out of their own company's row.
+pub struct MarketingSignals;
+
+#[auto_register(BOUNDED_CONTEXT)]
+impl Projection for MarketingSignals {
+    type State = MarketingSignalsState;
+    type Event = MarketingEvent;
+    const NAME: &'static str = "MarketingSignals";
+    const OWNER_TAG_KEY: Option<&'static str> = Some("company");
+    const TEAM_ONLY: Option<&'static str> = Some(helpdesk::STAFF_TEAM);
+    fn consumed_event_types() -> Vec<&'static str> {
+        vec!["TrialLapsed", "TrialConverted", "EngagementDeclineFlagged"]
+    }
+    fn keys(event: &Self::Event) -> Vec<String> {
+        let company_id = match event {
+            MarketingEvent::TrialLapsed(p) => &p.company_id,
+            MarketingEvent::TrialConverted(p) => &p.company_id,
+            MarketingEvent::EngagementDeclineFlagged(p) => &p.company_id,
+        };
+        vec![company_id.clone()]
+    }
+    fn project(state: &mut Self::State, event: &Self::Event, _key: &str) {
+        match event {
+            MarketingEvent::TrialLapsed(p) => {
+                state.trial_status = Some("lapsed".into());
+                state.last_lapsed_at = Some(p.lapsed_at.clone());
+                state.lapse_count += 1;
+            }
+            MarketingEvent::TrialConverted(p) => {
+                state.trial_status = Some("converted".into());
+                state.last_converted_at = Some(p.converted_at.clone());
+                state.conversion_count += 1;
+            }
+            MarketingEvent::EngagementDeclineFlagged(p) => {
+                state.engagement_declined_at = Some(p.flagged_at.clone());
+            }
+        }
+    }
+}
+
 // --- cross-context routes ---
 //
 // `specs/marketing.allium`'s own "Cross-context wiring" note, made real:
@@ -251,7 +317,7 @@ impl CommandType for RecordEngagementDecline {
 // (no I/O, per `CrossContextRoute::route`'s own contract) - `lapsed_at`/
 // `converted_at` are freshly stamped here since neither
 // `CompanyExpiredPayload` nor `CompanyActivatedPayload` carries its own
-// timestamp (see `src/helpdesk.rs`), matching the spec's own
+// timestamp (see `src/helpdesk/`), matching the spec's own
 // `ensures: ... lapsed_at: now` / `converted_at: now`. The engagement-
 // decline route instead carries the source event's own `flagged_at`
 // through unchanged, matching `specs/marketing.allium`'s own
@@ -275,7 +341,7 @@ impl CrossContextRoute for HelpdeskExpiryToTrialLapse {
 /// `helpdesk.CompanyActivated -> marketing.RecordTrialConversion` - fires
 /// for either edge into `active` (`ConvertCompanyTrial`'s `trialing ->
 /// active` or `ReactivateCompany`'s `expired -> active`), since both
-/// commit the same `CompanyActivated` event (see `src/helpdesk.rs`'s own
+/// commit the same `CompanyActivated` event (see `src/helpdesk/`'s own
 /// doc comment on that event).
 pub struct HelpdeskActivationToTrialConversion;
 

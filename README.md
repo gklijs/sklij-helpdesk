@@ -177,14 +177,79 @@ that reads return the old state until the last moment, and that the
 rebuilt state is what goes live, and that the new field is queryable
 without a restart.
 
+## Context map
+
+Three bounded contexts share one Postgres, plus one tenant context per
+company. All of them are hosted by `server`. Inside `server`, skilj also
+runs the cross-context routes (thick arrows, `src/marketing.rs`) and the
+deadlines (rounded, `src/helpdesk/`). `lib.rs`'s `register()` wires in
+both.
+
+```mermaid
+flowchart LR
+    subgraph helpdesk["helpdesk"]
+        direction TB
+        company["Company lifecycle<br/>⟶ TenantDirectory"]
+        tickets["Tickets<br/>⟶ TicketSummary · CompanyActiveTickets<br/>CustomerTickets · TicketInternalNotes"]
+        trial(["deadlines: trial conversion, trial expiry"])
+        autoclose(["deadline: ticket auto-close<br/>cancelled on reopen"])
+        company -.- trial
+        tickets -.- autoclose
+    end
+    activity["activity<br/>⟶ CompanyEngagement"]
+    marketing["marketing<br/>⟶ MarketingSignals"]
+
+    company == "CompanyExpired ⟶ RecordTrialLapse<br/>CompanyActivated ⟶ RecordTrialConversion" ==> marketing
+    activity == "CompanyEngagementDeclined ⟶<br/>RecordEngagementDecline" ==> marketing
+```
+
+The other binaries are clients of `server`. Each one reads an event feed
+(dotted) and submits commands back (solid). Tickets still run in the
+shared `helpdesk` context unless `TICKET_ROUTING=tenant` (see
+`src/routing_guard.rs`). `alerter` finds each tenant through
+`CompanyTenantProvisioned` and follows it as well.
+
+```mermaid
+flowchart LR
+    frontend[[frontend]]
+    bridge[[email-bridge]]
+    alerter[[alerter]]
+    provisioner[[provisioner]]
+    replicator[[lifecycle-replicator]]
+    watcher[[engagement-watcher]]
+
+    helpdesk[(helpdesk)]
+    tenant[(company_… tenants)]
+    activity[(activity)]
+    marketing[(marketing)]
+
+    frontend -- "ticket commands" --> helpdesk
+    frontend -- RecordDailyActivity --> activity
+    frontend -. "MarketingSignals (staff)" .-> marketing
+    frontend -. "CompanyEngagement (staff)" .-> activity
+    bridge -- "CreateTicket · CustomerRespondsToTicket" --> helpdesk
+    helpdesk -. "Ticket* events" .-> alerter
+    tenant -. "Ticket* events" .-> alerter
+    alerter -- EscalateTicket --> helpdesk
+    helpdesk -. CompanySignedUp .-> provisioner
+    provisioner -- "RecordCompanyTenant" --> helpdesk
+    provisioner -- "createBoundedContextFromTemplate" --> tenant
+    helpdesk -. "Company* lifecycle events" .-> replicator
+    replicator -- RecordTenantLifecycle --> tenant
+    activity -. DailyActivityRecorded .-> watcher
+    watcher -- RecordEngagementDecline --> activity
+```
+
 ## Layout
 
 | Path | What |
 |---|---|
 | `specs/skilj-helpdesk.allium` | The domain spec |
-| `src/helpdesk.rs` | Every `EventType`/`CommandType`/`Projection` — the actual domain logic |
+| `src/helpdesk/` | The `helpdesk` context, the core domain logic: `company.rs` (signup, trial/subscription lifecycle, `TenantDirectory`), `ticket.rs` (ticket events, `TicketFacts`/`TicketSnapshot`), `ticket_commands.rs`, `read_models.rs` (the ticket projections); `mod.rs` holds the shared tags and `HelpdeskEvent` |
+| `src/activity.rs` | The `activity` context: daily activity pings, engagement-decline flags, `CompanyEngagement` |
+| `src/marketing.rs` | The `marketing` context: the three cross-context routes and `MarketingSignals` |
 | `src/alerting.rs` | Pure decision logic `src/bin/alerter.rs` drives |
-| `src/scheduling.rs` | Env-driven durations + the mocked payment call `src/helpdesk.rs`'s own deadline reactors (`ScheduleCompanyTrialConversion`/`ScheduleTicketAutoClose`) use |
+| `src/scheduling.rs` | Env-driven durations + the mocked payment call `src/helpdesk/`'s own deadline reactors (`ScheduleCompanyTrialConversion`/`ScheduleTicketAutoClose`) use |
 | `src/telemetry.rs` | Shared OTel wiring every binary calls into (see "Telemetry & dashboards" below) |
 | `src/demo_seed.rs` | Pure decision logic behind the optional fake-traffic loop (`SEED_DEMO_TRAFFIC=1`) |
 | `src/bin/server.rs` | The runnable server (REST + GraphQL) |
@@ -602,7 +667,7 @@ surfaced five real bugs, each confirmed failing first, then fixed:
    of encryption infrastructure this project would otherwise have had to
    provision; adopted here as `TicketInternalNotes`'s own
    `TEAM_ONLY = Some("staff")` and the demo staff Role's `name` (see
-   `TicketInternalNotes`'s own doc comment in `src/helpdesk.rs`) —
+   `TicketInternalNotes`'s own doc comment in `src/helpdesk/`) —
    `tests/cross_company_projection_scoping.rs` now proves this half live
    too.
 

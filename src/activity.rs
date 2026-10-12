@@ -11,7 +11,7 @@
 //! route *source*, never a target.
 //!
 //! Every id here is caller-supplied, the same convention
-//! `src/helpdesk.rs`'s own module doc comment already establishes -
+//! `src/helpdesk/mod.rs`'s own module doc comment already establishes -
 //! `company_id` is helpdesk's own caller-supplied `Company.company_id`
 //! (see that file), `person_subject` is whichever of `Customer`/
 //! `StaffMember`'s own `external_subject` the caller is, and `day`/
@@ -22,10 +22,12 @@
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use skilj::{auto_register, CommandType, EventType};
+use skilj::{auto_register, CommandType, EventType, Projection};
 use skilj_core::event_store::Event;
 use skilj_core::plugin::BoundedContextEvent;
 use skilj_core::shared::{CommandDecision, EventSpec, QueryItemMapping, TagMapping};
+
+use crate::helpdesk::STAFF_TEAM;
 
 pub const BOUNDED_CONTEXT: &str = "activity";
 
@@ -86,7 +88,7 @@ impl EventType for DailyActivityRecorded {
         ]
     }
     /// `tests/activity.rs`'s own event-feed assertions read this the
-    /// same way `src/helpdesk.rs`'s `CompanySignedUp`/etc. already do -
+    /// same way `src/helpdesk/`'s `CompanySignedUp`/etc. already do -
     /// see that file's own doc comment on why this must opt in.
     fn event_read_allowed() -> bool {
         true
@@ -124,7 +126,7 @@ impl EventType for CompanyEngagementDeclined {
 }
 
 /// This bounded context's own hand-written event enum - same technique
-/// `src/helpdesk.rs`'s own `HelpdeskEvent` already uses.
+/// `src/helpdesk/`'s own `HelpdeskEvent` already uses.
 pub enum ActivityEvent {
     DailyActivityRecorded(DailyActivityRecordedPayload),
     CompanyEngagementDeclined(CompanyEngagementDeclinedPayload),
@@ -266,6 +268,69 @@ impl CommandType for RecordEngagementDecline {
                     "flagged_at": payload.flagged_at,
                 }),
             }],
+        }
+    }
+}
+
+// --- projection ---
+
+/// How active one company's people are, from `DailyActivityRecorded`'s
+/// one-record-per-person-per-day facts. Counts, not subjects: the staff
+/// dashboard needs to see that a company has gone quiet, not who.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub struct CompanyEngagementState {
+    /// Person-days, not people: one customer active on three days is 3.
+    pub customer_active_days: u32,
+    pub staff_active_days: u32,
+    /// The latest `day` recorded, by string order - `day` is a
+    /// caller-truncated RFC 3339 midnight, so that is date order.
+    pub last_customer_day: Option<String>,
+    pub last_staff_day: Option<String>,
+    /// Set once, as `RecordEngagementDecline` only accepts once.
+    pub engagement_declined_at: Option<String>,
+}
+
+/// Keyed by `company_id`. Staff-only, gated the same way as
+/// `marketing::MarketingSignals` (see its doc comment). Async, the
+/// default: every dashboard load pings `RecordDailyActivity`, and that
+/// write doesn't need to wait on this read model.
+pub struct CompanyEngagement;
+
+#[auto_register(BOUNDED_CONTEXT)]
+impl Projection for CompanyEngagement {
+    type State = CompanyEngagementState;
+    type Event = ActivityEvent;
+    const NAME: &'static str = "CompanyEngagement";
+    const OWNER_TAG_KEY: Option<&'static str> = Some("company");
+    const TEAM_ONLY: Option<&'static str> = Some(STAFF_TEAM);
+    fn consumed_event_types() -> Vec<&'static str> {
+        vec!["DailyActivityRecorded", "CompanyEngagementDeclined"]
+    }
+    fn keys(event: &Self::Event) -> Vec<String> {
+        let company_id = match event {
+            ActivityEvent::DailyActivityRecorded(p) => &p.company_id,
+            ActivityEvent::CompanyEngagementDeclined(p) => &p.company_id,
+        };
+        vec![company_id.clone()]
+    }
+    fn project(state: &mut Self::State, event: &Self::Event, _key: &str) {
+        match event {
+            ActivityEvent::DailyActivityRecorded(p) => {
+                let (days, last_day) = match p.person_kind {
+                    PersonKind::Customer => (
+                        &mut state.customer_active_days,
+                        &mut state.last_customer_day,
+                    ),
+                    PersonKind::Staff => (&mut state.staff_active_days, &mut state.last_staff_day),
+                };
+                *days += 1;
+                if last_day.as_deref() < Some(p.day.as_str()) {
+                    *last_day = Some(p.day.clone());
+                }
+            }
+            ActivityEvent::CompanyEngagementDeclined(p) => {
+                state.engagement_declined_at = Some(p.flagged_at.clone());
+            }
         }
     }
 }

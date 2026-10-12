@@ -1,6 +1,6 @@
 //! Proves the claim `Cargo.toml`'s own doc comment makes: skilj-graphql
 //! auto-builds a real, usable GraphQL surface from whatever's
-//! registered in `helpdesk.rs`, with zero GraphQL-specific code written
+//! registered in `helpdesk/`, with zero GraphQL-specific code written
 //! in this crate. Real HTTP requests through `Skilj::graphql_router()`,
 //! authenticated with a real JWT against a real local JWKS server -
 //! adapted from `skilj-demo/tests/graphql_auth.rs`, which proves the
@@ -103,7 +103,7 @@ fn graphql_surfaces_a_business_rejection_as_typed_data_not_a_graphql_error() {
 }
 
 /// `#[requires_role("staff")]` on `AssignTicket` (and the other
-/// staff-only command types in `helpdesk.rs`): over GraphQL, a Role
+/// staff-only command types in `helpdesk/`): over GraphQL, a Role
 /// whose `name` isn't `STAFF_TEAM` is refused before `decide()` runs,
 /// however much access its mapping grants. REST triggering is not
 /// covered by this gate - a `CommandToken` is its own per-command grant.

@@ -1,5 +1,5 @@
 //! `TicketInternalNotes`'s own `Projection::TEAM_ONLY = Some(STAFF_TEAM)`
-//! (see its doc comment in `src/helpdesk.rs`, skilj 0.0.4) only gates
+//! (see its doc comment in `src/helpdesk/`, skilj 0.0.4) only gates
 //! `ProjectionQuery` - it says nothing about skilj's generic
 //! `CommandQuery`/`EventQuery` (`fetchCommands`/`queryEvents` -
 //! `AdminAccess`-gated, the read path skilj-inspector/skilj-tui use,
@@ -147,7 +147,7 @@ fn an_admin_role_off_the_staff_team_cannot_read_an_internal_notes_command_payloa
 }
 
 /// The event-side counterpart of the test above - `TicketInternalNoteAdded`'s
-/// own `private_fields()` (see its doc comment in `src/helpdesk.rs`),
+/// own `private_fields()` (see its doc comment in `src/helpdesk/`),
 /// found missing in review after the command-side one above was already
 /// verified: `queryEvents` doesn't check `event_read_allowed` at all
 /// (only the REST feed's `fetch_events`/`consume_events` do), so this

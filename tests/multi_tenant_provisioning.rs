@@ -13,7 +13,7 @@
 //! already keeps *that* binary out of `cargo test`.
 //!
 //! What's still open, deliberately left that way rather than glossed
-//! over (see `helpdesk.rs`'s own module doc comment and this crate's
+//! over (see `helpdesk/mod.rs`'s own module doc comment and this crate's
 //! `README.md` for the same list from the production side):
 //!   - Nothing yet routes a `CreateTicket` (or any other Ticket command/
 //!     query) for a signed-up company into the tenant `provisioner.rs`
@@ -33,7 +33,7 @@
 //!     only ever writing - by minting a per-tenant `CommandToken` on
 //!     demand and caching it, which is a hint at one answer and not yet
 //!     a general one.) The trial/auto-close deadline reactors
-//!     (`helpdesk.rs`'s own `ScheduleDeadline`s) sidestep the token half
+//!     (`helpdesk/`'s own `ScheduleDeadline`s) sidestep the token half
 //!     of this, reading through skilj's internal poller rather than a
 //!     minted `EventReadToken`, but registering a plugin trait per
 //!     bounded context still means N tenants means N registrations,
@@ -64,7 +64,7 @@ fn a_new_tenant_provisioned_from_the_shared_context_works_independently_and_in_i
         }
         // `setup_graphql()` also ensures the shared `helpdesk` context
         // exists with every `EventType`/`CommandType`/`Projection`
-        // `helpdesk.rs` declares already registered on it - exactly the
+        // `helpdesk/` declares already registered on it - exactly the
         // "current registrations" `createBoundedContextFromTemplate`
         // copies onto the new tenant below.
         let (skilj, pool, _mapping, _admin_jwt) = setup_graphql().await;
@@ -85,7 +85,7 @@ fn a_new_tenant_provisioned_from_the_shared_context_works_independently_and_in_i
         // `BoundedContext`'s own GraphQL shape (skilj-graphql's
         // `bounded_context_object()`) has no `template` field to
         // sub-select - the template relationship is proven below
-        // instead, by the new tenant actually running `helpdesk.rs`'s
+        // instead, by the new tenant actually running `helpdesk/`'s
         // own command types the same way `helpdesk` itself does.
         // `accessMappings` is what's exposed instead, and doubles as
         // proof of `@guarantee AccessGrantedWithCreation`: `tenant_role`

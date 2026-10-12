@@ -85,7 +85,7 @@ impl TicketContext {
 ///
 /// Reads the shared context's `TenantDirectory` projection - the one read
 /// that deliberately stays shared, since it is the lookup every piece of
-/// routing needs (see its own doc comment in the backend's `helpdesk.rs`).
+/// routing needs (see its own doc comment in the backend's `helpdesk/`).
 ///
 /// A failure to resolve falls back to the shared context rather than
 /// surfacing an error: this is the same fallback the backend's own

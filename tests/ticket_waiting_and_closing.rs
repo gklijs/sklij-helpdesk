@@ -23,7 +23,7 @@ async fn token(
 
 /// `logged_by_staff_id` set (not null) is `StaffLogsTicketOnBehalf`'s
 /// own shape - same `CreateTicket` command, the field is what tells the
-/// two cases apart (see `helpdesk.rs`'s own doc comment).
+/// two cases apart (see `helpdesk/`'s own doc comment).
 #[test]
 fn staff_can_log_a_ticket_on_a_customers_behalf() {
     runtime().block_on(async {

@@ -1,6 +1,6 @@
 //! Integration tests for `EscalateTicket`/`MergeTickets` - two of the
 //! four flows added beyond `specs/skilj-helpdesk.allium`'s original
-//! scope (each type's own doc comment in `src/helpdesk.rs` explains
+//! scope (each type's own doc comment in `src/helpdesk/` explains
 //! why it exists). Split from `RateTicket`/`AddInternalNote`'s own
 //! `tests/csat_and_notes.rs` for the same reason every other test file
 //! here is split by concern - see `tests/company.rs`'s own doc comment:

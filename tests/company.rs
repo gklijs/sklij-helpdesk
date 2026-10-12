@@ -91,7 +91,7 @@ fn signing_up_the_same_company_twice_is_rejected() {
     });
 }
 
-/// The bug `helpdesk.rs`'s own `CreateTicket` doc comment describes:
+/// The bug `helpdesk/`'s own `CreateTicket` doc comment describes:
 /// the spec originally required `company.status = active` for ticket
 /// creation, which would have blocked it for the entire free trial.
 /// Fixed in the spec (`requires: company.status != expired`) and here -
@@ -124,7 +124,7 @@ fn tickets_can_be_created_during_the_trial_without_converting_first() {
 }
 
 /// `RecordCompanyTenant`'s own two guards - see that command's doc
-/// comment in `helpdesk.rs`. `src/bin/provisioner.rs` is what submits
+/// comment in `helpdesk/`. `src/bin/provisioner.rs` is what submits
 /// this for real, reacting to `CompanySignedUp` over skilj's REST event
 /// feed (not exercised by `cargo test` - see that binary's own doc
 /// comment, and `alerter.rs`'s identical reasoning); this drives the

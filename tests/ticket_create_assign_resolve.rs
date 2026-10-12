@@ -20,7 +20,7 @@ async fn token(
 }
 
 /// `specs/skilj-helpdesk.allium`'s `requires: company.status != expired`
-/// (originally, and buggily, `= active` - see `helpdesk.rs`'s own doc
+/// (originally, and buggily, `= active` - see `helpdesk/`'s own doc
 /// comment on `CreateTicket`).
 #[test]
 fn creating_a_ticket_for_an_unknown_company_is_rejected() {

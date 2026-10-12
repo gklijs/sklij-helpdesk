@@ -33,6 +33,10 @@ pub const BOUNDED_CONTEXT: &str = "helpdesk";
 /// once-per-load `RecordDailyActivity` ping goes here, not `helpdesk`.
 pub const ACTIVITY_BOUNDED_CONTEXT: &str = "activity";
 
+/// `specs/marketing.allium`'s own bounded context - staff read its
+/// `MarketingSignals` in the dashboard's company panel.
+pub const MARKETING_BOUNDED_CONTEXT: &str = "marketing";
+
 /// Every ticket in this showcase belongs to one demo company - matches
 /// `server.rs`'s own printed `curl` example (`company_id: "acme"`).
 /// Sign it up first (that example, or the GraphQL equivalent) before
