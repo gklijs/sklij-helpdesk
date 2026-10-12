@@ -1,22 +1,87 @@
-//! `TicketSnapshot`: every single-ticket command must reach the same
-//! decision from a stored snapshot plus the events since as `decide()`
-//! reaches from the full history - skilj's own correctness obligation on
-//! `decide_from_snapshot` (issue #14).
+//! `TicketSnapshot` as the single-ticket commands and `MergeTickets` read
+//! it: a snapshot item in their consistency query (skilj
+//! docs/architecture.md §202). skilj folds the state itself, with
+//! `TicketSnapshot::fold_for`, once for every ticket an event carries, so
+//! what is checked here is that fold: from the default state, with only
+//! the tag value to say which ticket it is, it must reach the
+//! `TicketFacts` the ticket's history gives (`TicketFacts::of`), both
+//! sides of a merge included.
 //!
-//! The snapshot here is folded the way skilj's catch-up folds it - from
-//! the default state, through `TicketSnapshot::fold`, with no ticket id
-//! handed in - and split at every point of each history, including "no
-//! snapshot yet" (split at 0, which is also what an older-`VERSION` row
-//! is treated as).
+//! `GivenTicket` is the given/when/then the ticket tests use: it folds
+//! the given events into each ticket's state the same way, and hands
+//! `decide_with()` those states.
+
+use std::marker::PhantomData;
 
 use skilj::{CommandType, Snapshot};
+use skilj_core::plugin::{Decision, SnapshotState};
 use skilj_core::shared::CommandDecision;
 use skilj_helpdesk::helpdesk::*;
+use skilj_test_fixture::command::{CommandOutcome, GivenEvents};
 
+use crate::consistency_query::{derive, Described};
 use crate::events::*;
 
-/// Histories for ticket `t1`, each only the events tagged `ticket: t1` -
-/// what `matching_events` holds for a single-ticket command.
+/// `ticket`'s state, folded as skilj folds it: every event carrying the
+/// tag `ticket: <ticket>`, from the default state.
+pub(crate) fn ticket_state(history: &[HelpdeskEvent], ticket: &str) -> TicketFacts {
+    let tag = ("ticket".to_string(), ticket.to_string());
+    let mut state = TicketFacts::default();
+    for event in history {
+        let (event_type, payload) = event.describe();
+        if derive(&HelpdeskEvent::tag_mappings(event_type), &payload).contains(&tag) {
+            TicketSnapshot::fold_for(&mut state, ticket, event);
+        }
+    }
+    state
+}
+
+/// `GivenEvents` for a command whose query is `TicketSnapshot` items:
+/// the events given are folded into the state of every ticket the
+/// payload names, which is what `decide_with()` is handed.
+pub(crate) struct GivenTicket<C> {
+    events: Vec<HelpdeskEvent>,
+    command: PhantomData<C>,
+}
+
+impl<C: CommandType<Event = HelpdeskEvent>> GivenTicket<C> {
+    pub(crate) fn new() -> Self {
+        Self {
+            events: Vec::new(),
+            command: PhantomData,
+        }
+    }
+
+    pub(crate) fn event(mut self, event: HelpdeskEvent) -> Self {
+        self.events.push(event);
+        self
+    }
+
+    pub(crate) fn events(mut self, events: impl IntoIterator<Item = HelpdeskEvent>) -> Self {
+        self.events.extend(events);
+        self
+    }
+
+    pub(crate) fn when(self, payload: C::Payload) -> CommandOutcome {
+        let json = serde_json::to_value(&payload).unwrap();
+        let mut given = GivenEvents::<C>::new();
+        for item in C::consistency_query() {
+            assert_eq!(
+                item.snapshot.as_deref(),
+                Some(TicketSnapshot::NAME),
+                "{}",
+                C::NAME
+            );
+            for (_, ticket) in derive(&item.tag_mappings, &json) {
+                given =
+                    given.snapshot::<TicketSnapshot>(&ticket, ticket_state(&self.events, &ticket));
+            }
+        }
+        given.when(payload)
+    }
+}
+
+/// Histories for ticket `t1`, each with the events tagged `ticket: t1`.
 fn histories() -> Vec<Vec<HelpdeskEvent>> {
     let mut long = vec![
         created("t1", "acme", TicketPriority::Medium),
@@ -59,117 +124,110 @@ fn then(mut events: Vec<HelpdeskEvent>, event: HelpdeskEvent) -> Vec<HelpdeskEve
     events
 }
 
-/// Folds `events` the way skilj's snapshot catch-up does.
-fn snapshot_of(events: &[HelpdeskEvent]) -> String {
-    let mut state = TicketFacts::default();
-    for event in events {
-        TicketSnapshot::fold(&mut state, event);
-    }
-    serde_json::to_string(&state).unwrap()
-}
-
-/// `CommandDecision` has no `PartialEq`; its `Debug` output covers every
-/// field, event payloads included.
-fn same(a: &CommandDecision, b: &CommandDecision) -> bool {
-    format!("{a:?}") == format!("{b:?}")
-}
-
-fn assert_snapshot_agrees<C: CommandType<Event = HelpdeskEvent>>(payload: C::Payload) {
-    assert_eq!(C::snapshot(), Some(TicketSnapshot::NAME), "{}", C::NAME);
-    for history in histories() {
-        let full = C::decide(&payload, &history);
-        for split in 0..=history.len() {
-            let (before, after) = history.split_at(split);
-            let resumed = C::decide_from_snapshot(&payload, &snapshot_of(before), after);
-            assert!(
-                same(&full, &resumed),
-                "{} split at {split}/{}:\n  decide():               {full:?}\n  decide_from_snapshot(): {resumed:?}",
-                C::NAME,
-                history.len(),
-            );
+#[test]
+fn the_snapshot_folds_a_ticket_from_its_tag_value_alone() {
+    for (i, history) in histories().into_iter().enumerate() {
+        let state = ticket_state(&history, "t1");
+        let mut expected = TicketFacts::of(&history, "t1");
+        if history.is_empty() {
+            // Nothing folded: the default state, whose id
+            // `decide_on_ticket` fills in.
+            expected.ticket_id.clear();
         }
+        assert_eq!(state, expected, "history {i}");
     }
+    let long = ticket_state(&histories()[6], "t1");
+    assert_eq!(long.status, Some(TicketStatus::Closed));
+    assert_eq!(long.resolutions, 2);
+    assert!(long.escalated && long.rated);
+    assert_eq!(long.created_priority, Some(TicketPriority::Medium));
 }
 
 #[test]
-fn every_single_ticket_command_decides_the_same_from_a_snapshot() {
-    let requester = || Some("customer-1".to_string());
-    assert_snapshot_agrees::<AssignTicket>(AssignTicketPayload {
-        ticket_id: "t1".into(),
-        staff_id: "staff-2".into(),
-    });
-    assert_snapshot_agrees::<ResolveTicket>(ResolveTicketPayload {
-        ticket_id: "t1".into(),
-    });
-    assert_snapshot_agrees::<ReopenTicket>(ReopenTicketPayload {
-        ticket_id: "t1".into(),
-    });
-    for requester_id in [requester(), Some("someone-else".into()), None] {
-        assert_snapshot_agrees::<RequestInfoFromCustomer>(RequestInfoFromCustomerPayload {
-            ticket_id: "t1".into(),
-            staff_id: "staff-1".into(),
-            message: "more?".into(),
-            requester_id: requester_id.clone(),
-        });
-        assert_snapshot_agrees::<RateTicket>(RateTicketPayload {
-            ticket_id: "t1".into(),
-            rating: 5,
-            comment: None,
-            requester_id,
-        });
-    }
-    for requester_id in ["customer-1", "someone-else"] {
-        assert_snapshot_agrees::<CustomerRespondsToTicket>(CustomerRespondsToTicketPayload {
-            ticket_id: "t1".into(),
-            requester_id: requester_id.into(),
-            message: "here".into(),
-        });
-    }
-    assert_snapshot_agrees::<CloseTicket>(CloseTicketPayload {
-        ticket_id: "t1".into(),
-        requester_id: requester(),
-        requester_email: None,
-    });
-    assert_snapshot_agrees::<EscalateTicket>(EscalateTicketPayload {
-        ticket_id: "t1".into(),
-    });
-    assert_snapshot_agrees::<AddInternalNote>(AddInternalNotePayload {
+fn a_merge_is_folded_into_both_tickets_and_changes_only_the_duplicate() {
+    let mut history = open_ticket("t1", "acme");
+    history.extend(in_progress_ticket("t2", "acme"));
+    history.push(merged("t1", "t2", "acme"));
+    assert_eq!(
+        ticket_state(&history, "t1").status,
+        Some(TicketStatus::Open)
+    );
+    assert_eq!(
+        ticket_state(&history, "t2").status,
+        Some(TicketStatus::Merged)
+    );
+}
+
+fn assign() -> AssignTicketPayload {
+    AssignTicketPayload {
         ticket_id: "t1".into(),
         staff_id: "staff-1".into(),
-        note: "n".into(),
-    });
-}
-
-#[test]
-fn the_snapshot_folds_a_ticket_without_being_told_which_one() {
-    // skilj's catch-up hands `fold` no key; the ticket's own id comes from
-    // its `TicketCreated`, which is what tells the two sides of a merge
-    // apart afterwards.
-    let history = histories().remove(6);
-    let mut state = TicketFacts::default();
-    for event in &history {
-        TicketSnapshot::fold(&mut state, event);
     }
-    assert_eq!(state, TicketFacts::of(&history, "t1"));
-    assert_eq!(state.ticket_id, "t1");
-    assert_eq!(state.status, Some(TicketStatus::Closed));
-    assert_eq!(state.resolutions, 2);
-    assert!(state.escalated && state.rated);
-    assert_eq!(state.created_priority, Some(TicketPriority::Medium));
 }
 
 #[test]
-fn an_unreadable_snapshot_is_rejected_rather_than_trusted() {
-    let decision = AssignTicket::decide_from_snapshot(
-        &AssignTicketPayload {
-            ticket_id: "t1".into(),
-            staff_id: "staff-1".into(),
-        },
-        r#"{"status": 42}"#,
-        &[],
+fn every_ticket_command_reads_its_ticket_through_the_snapshot() {
+    fn snapshot_items<C: CommandType>() -> Vec<String> {
+        C::consistency_query()
+            .into_iter()
+            .map(|item| {
+                assert_eq!(
+                    item.snapshot.as_deref(),
+                    Some(TicketSnapshot::NAME),
+                    "{}",
+                    C::NAME
+                );
+                assert!(item.event_types.is_empty() && item.latest.is_none());
+                item.tag_mappings.iter().map(|m| m.field.clone()).collect()
+            })
+            .collect()
+    }
+    let single = ["ticket_id".to_string()];
+    assert_eq!(snapshot_items::<AssignTicket>(), single);
+    assert_eq!(snapshot_items::<ResolveTicket>(), single);
+    assert_eq!(snapshot_items::<ReopenTicket>(), single);
+    assert_eq!(snapshot_items::<RequestInfoFromCustomer>(), single);
+    assert_eq!(snapshot_items::<CustomerRespondsToTicket>(), single);
+    assert_eq!(snapshot_items::<CloseTicket>(), single);
+    assert_eq!(snapshot_items::<EscalateTicket>(), single);
+    assert_eq!(snapshot_items::<RateTicket>(), single);
+    assert_eq!(snapshot_items::<AddInternalNote>(), single);
+    assert_eq!(
+        snapshot_items::<MergeTickets>(),
+        ["primary_ticket_id", "duplicate_ticket_id"]
     );
-    assert!(
-        matches!(&decision, CommandDecision::Rejected { kind, .. } if kind == "snapshot_unreadable"),
-        "{decision:?}"
-    );
+}
+
+#[test]
+fn the_events_beside_the_snapshot_are_not_what_decides() {
+    // Only the state counts: an open ticket's state with no events is
+    // assigned, events saying otherwise are ignored.
+    let state = ticket_state(&open_ticket("t1", "acme"), "t1");
+    GivenEvents::<AssignTicket>::new()
+        .events(closed_ticket("t1", "acme"))
+        .snapshot::<TicketSnapshot>("t1", state)
+        .when(assign())
+        .then(|decision| {
+            assert!(
+                matches!(decision, CommandDecision::Accepted { .. }),
+                "{decision:?}"
+            )
+        });
+}
+
+#[test]
+fn a_missing_or_unreadable_state_is_rejected_rather_than_trusted() {
+    let unreadable = [SnapshotState {
+        snapshot: TicketSnapshot::NAME.into(),
+        tag_value: "t1".into(),
+        state_json: r#"{"status": 42}"#.into(),
+        folded_through: -1,
+    }];
+    for states in [&unreadable[..], &[]] {
+        let decision = AssignTicket::decide_with(&assign(), &Decision::new(&[], states));
+        assert!(
+            matches!(&decision, CommandDecision::Rejected { kind, .. } if kind == "snapshot_unreadable"),
+            "{decision:?}"
+        );
+    }
 }

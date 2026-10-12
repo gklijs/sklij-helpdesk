@@ -67,9 +67,10 @@ use skilj::{
     ScheduleDeadline, Snapshot,
 };
 use skilj_core::event_store::Event;
-use skilj_core::plugin::{BoundedContextEvent, DeadlinePollStartFrom, DeadlineSpec};
+use skilj_core::plugin::{BoundedContextEvent, DeadlinePollStartFrom, DeadlineSpec, Decision};
 use skilj_core::shared::{
-    CommandDecision, EventSpec, PrivateField, PrivateFieldKind, SensitiveField, Tag, TagMapping,
+    CommandDecision, EventSpec, PrivateField, PrivateFieldKind, QueryItemMapping, SensitiveField,
+    Tag, TagMapping,
 };
 
 use crate::scheduling;
@@ -149,6 +150,33 @@ fn ticket_tag() -> Vec<TagMapping> {
         key: "ticket".into(),
         field: "ticket_id".into(),
     }]
+}
+
+/// The four events `company_status` folds.
+const COMPANY_LIFECYCLE_EVENTS: [&str; 4] = [
+    "CompanySignedUp",
+    "CompanyActivated",
+    "CompanyExpired",
+    "CompanyLifecycleMirrored",
+];
+
+/// What `company_status` needs as a consistency query (skilj
+/// docs/architecture.md §198): its last event wins, so only the
+/// company's latest lifecycle event - not the company's tickets, which
+/// carry its tag too.
+fn company_status_query() -> QueryItemMapping {
+    QueryItemMapping::types(&COMPANY_LIFECYCLE_EVENTS)
+        .tagged(company_tag())
+        .latest()
+}
+
+/// The consistency query of every single-ticket command: the ticket's
+/// `TicketSnapshot` state, as a snapshot item (skilj docs/architecture.md
+/// §202). The command reads the stored row and the ticket's events since
+/// it, skilj folds those in, and `decide_with()` gets the `TicketFacts`.
+/// Every event of the ticket still conflicts with it.
+fn ticket_snapshot_query() -> Vec<QueryItemMapping> {
+    vec![QueryItemMapping::snapshot::<TicketSnapshot>("ticket_id")]
 }
 
 /// `company_tag()`'s own counterpart for `ScheduleDeadline`/
@@ -867,19 +895,17 @@ pub enum TicketStatus {
 /// history, folded in one pass - same technique as `banking.rs`'s
 /// `balance_of`/`courses.rs`'s roster folds, gathered into one struct so
 /// it can also be `TicketSnapshot`'s stored state (issue #14). Every
-/// single-ticket command decides from this alone, whether it was folded
-/// from the full `matching_events` (`decide()`) or resumed from a stored
-/// snapshot plus the events since (`decide_from_snapshot()`), so the two
-/// paths can't drift apart.
+/// single-ticket command, and `MergeTickets`, decides from this alone,
+/// handed over by skilj as a snapshot item's state (skilj
+/// docs/architecture.md §202).
 ///
 /// Changing what this folds, or its shape, means bumping
 /// `TicketSnapshot::VERSION`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct TicketFacts {
-    /// Which ticket this is - set up front by `of`/`resume`, or by the
-    /// first `TicketCreated` when `TicketSnapshot` folds from nothing
-    /// (its `fold` gets no key). Needed for `TicketsMerged`, the one
-    /// event tagged with two tickets.
+    /// Which ticket this is - set up front by `of`, or by
+    /// `TicketSnapshot::fold_for` from the tag value it folds for.
+    /// Needed for `TicketsMerged`, the one event tagged with two tickets.
     pub ticket_id: String,
     /// `None` means the ticket doesn't exist (no `TicketCreated` found).
     pub status: Option<TicketStatus>,
@@ -913,30 +939,9 @@ impl TicketFacts {
         facts
     }
 
-    /// A stored `TicketSnapshot` state brought up to date with the events
-    /// stored after it. `state_json` is the default state when there is
-    /// no usable snapshot yet, and then `events_since` is the full
-    /// history - see `CommandType::decide_from_snapshot`.
-    pub fn resume(
-        state_json: &str,
-        events_since: &[HelpdeskEvent],
-        ticket_id: &str,
-    ) -> Result<Self, serde_json::Error> {
-        let mut facts: Self = serde_json::from_str(state_json)?;
-        if facts.ticket_id.is_empty() {
-            facts.ticket_id = ticket_id.to_string();
-        }
-        for event in events_since {
-            facts.apply(event);
-        }
-        Ok(facts)
-    }
-
     fn apply(&mut self, event: &HelpdeskEvent) {
         match event {
-            HelpdeskEvent::TicketCreated(p)
-                if self.ticket_id.is_empty() || p.ticket_id == self.ticket_id =>
-            {
+            HelpdeskEvent::TicketCreated(p) if p.ticket_id == self.ticket_id => {
                 self.ticket_id = p.ticket_id.clone();
                 self.status = Some(TicketStatus::Open);
                 self.company_id.get_or_insert_with(|| p.company_id.clone());
@@ -1018,11 +1023,9 @@ impl TicketFacts {
 
 /// `TicketFacts`, kept per ticket - lets every single-ticket command
 /// decide from a stored state plus the events since, instead of reading
-/// the ticket's whole history each time (issue #14). skilj only uses it
-/// for a command whose one derived tag is `ticket`, so `MergeTickets`
-/// (two tickets) keeps plain `decide()`, and `CreateTicket` (tagged by
-/// company) uses `CompanySnapshot`. See
-/// `docs/ticket-snapshot-report-2026-10-05.md`.
+/// the ticket's whole history each time (issue #14). Read through a
+/// snapshot item (`ticket_snapshot_query`), also twice by `MergeTickets`,
+/// once per ticket. See `docs/ticket-snapshot-report-2026-10-05.md`.
 pub struct TicketSnapshot;
 
 #[auto_register(BOUNDED_CONTEXT)]
@@ -1039,27 +1042,35 @@ impl Snapshot for TicketSnapshot {
     /// over every partition - see that projection's `PARTITION_COUNT`
     /// and `docs/partitioned-projection-report-2026-10-05.md`.
     const PARTITION_COUNT: u32 = 4;
-    fn fold(state: &mut Self::State, event: &Self::Event) {
+    /// A `TicketsMerged` carries both tickets, and is folded once for
+    /// each: `tag_value` says which side this state is.
+    fn fold_for(state: &mut Self::State, tag_value: &str, event: &Self::Event) {
+        if state.ticket_id.is_empty() {
+            state.ticket_id = tag_value.to_string();
+        }
         state.apply(event);
     }
 }
 
-/// The `decide_from_snapshot()` every single-ticket command shares: the
-/// stored state brought up to date, then the same decision `decide()`
-/// makes from the full history.
-fn decide_from_ticket_snapshot(
+/// `ticket_id`'s `TicketFacts` from `decision`'s snapshot items, then
+/// `decide`. skilj hands the default state for a ticket with no events,
+/// so a missing or unreadable state is a bug, reported as a rejection
+/// rather than as a wrong decision.
+fn decide_on_ticket(
+    decision: &Decision<'_, HelpdeskEvent>,
     ticket_id: &str,
-    state_json: &str,
-    events_since: &[HelpdeskEvent],
     decide: impl FnOnce(&TicketFacts) -> CommandDecision,
 ) -> CommandDecision {
-    match TicketFacts::resume(state_json, events_since, ticket_id) {
-        Ok(facts) => decide(&facts),
-        // Only written by `TicketSnapshot::fold` itself, and an
-        // older-`VERSION` row is never handed over - so this is a bug,
-        // reported as a rejection rather than a wrong decision.
-        Err(e) => CommandDecision::Rejected {
-            reason: format!("stored TicketSnapshot for {ticket_id} is unreadable: {e}"),
+    match decision.snapshot::<TicketSnapshot>(ticket_id) {
+        Some(mut facts) => {
+            // The default state, for a ticket no event has been folded for.
+            if facts.ticket_id.is_empty() {
+                facts.ticket_id = ticket_id.to_string();
+            }
+            decide(&facts)
+        }
+        None => CommandDecision::Rejected {
+            reason: format!("no readable TicketSnapshot state for ticket {ticket_id}"),
             kind: "snapshot_unreadable".into(),
         },
     }
@@ -1134,22 +1145,12 @@ fn company_status(matching_events: &[HelpdeskEvent], company_id: &str) -> Option
 }
 
 /// What `CreateTicket` decides from: the company's status and which
-/// ticket ids it has already created, folded in one pass. Kept per
-/// company by `CompanySnapshot`, so a ticket's creation reads that row
-/// plus the events since, instead of the company's whole history: every
-/// `TicketCreated` (and `TicketInternalNoteAdded`) carries the "company"
-/// tag, so that history grows with every ticket the company ever filed
-/// (docs/create-ticket-latency-report-2026-10-09.md). Same split as
-/// `TicketFacts`, so `decide()` and `decide_from_snapshot()` can't drift
-/// apart.
-///
-/// Changing what this folds, or its shape, means bumping
-/// `CompanySnapshot::VERSION`.
+/// of its ticket ids are already used, folded from its consistency
+/// query's events (the company's latest lifecycle event, and this
+/// ticket id's `TicketCreated` if any).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct CompanyFacts {
-    /// Which company this is - set up front by `of`/`resume`, or by the
-    /// first event when `CompanySnapshot` folds from nothing (its `fold`
-    /// gets no key).
+    /// Which company this is - events of any other are skipped.
     pub company_id: String,
     /// `None` means the company doesn't exist - see `company_status`.
     pub status: Option<CompanyStatus>,
@@ -1170,23 +1171,6 @@ impl CompanyFacts {
         facts
     }
 
-    /// A stored `CompanySnapshot` state brought up to date with the
-    /// events stored after it - see `TicketFacts::resume`.
-    pub fn resume(
-        state_json: &str,
-        events_since: &[HelpdeskEvent],
-        company_id: &str,
-    ) -> Result<Self, serde_json::Error> {
-        let mut facts: Self = serde_json::from_str(state_json)?;
-        if facts.company_id.is_empty() {
-            facts.company_id = company_id.to_string();
-        }
-        for event in events_since {
-            facts.apply(event);
-        }
-        Ok(facts)
-    }
-
     fn apply(&mut self, event: &HelpdeskEvent) {
         let company_id = match event {
             HelpdeskEvent::CompanySignedUp(p) => &p.company_id,
@@ -1196,9 +1180,7 @@ impl CompanyFacts {
             HelpdeskEvent::TicketCreated(p) => &p.company_id,
             _ => return,
         };
-        if self.company_id.is_empty() {
-            self.company_id = company_id.clone();
-        } else if *company_id != self.company_id {
+        if *company_id != self.company_id {
             return;
         }
         if let HelpdeskEvent::TicketCreated(p) = event {
@@ -1206,30 +1188,6 @@ impl CompanyFacts {
         } else {
             self.status = company_status(std::slice::from_ref(event), company_id).or(self.status);
         }
-    }
-}
-
-/// `CompanyFacts`, kept per company - see its doc comment. skilj uses it
-/// for `CreateTicket`, the one command whose only derived tag is
-/// "company" and that runs on every new ticket. The company lifecycle
-/// commands keep plain `decide()`: they run a few times per company.
-pub struct CompanySnapshot;
-
-#[auto_register(BOUNDED_CONTEXT)]
-impl Snapshot for CompanySnapshot {
-    type State = CompanyFacts;
-    type Event = HelpdeskEvent;
-    const NAME: &'static str = "CompanySnapshot";
-    const TAG_KEY: &'static str = "company";
-    /// The company is its own owner, as for every company-keyed
-    /// projection.
-    const OWNER_TAG_KEY: Option<&'static str> = Some("company");
-    const VERSION: u64 = 1;
-    /// Keyed by company, so it spreads over as many partitions as there
-    /// are companies - same as `CompanyActiveTickets`.
-    const PARTITION_COUNT: u32 = 4;
-    fn fold(state: &mut Self::State, event: &Self::Event) {
-        state.apply(event);
     }
 }
 
@@ -1273,6 +1231,9 @@ impl CommandType for SignUpCompany {
     const NAME: &'static str = "SignUpCompany";
     fn tag_mappings() -> Vec<TagMapping> {
         company_tag()
+    }
+    fn consistency_query() -> Vec<QueryItemMapping> {
+        vec![company_status_query()]
     }
     fn rest_trigger_allowed() -> bool {
         true
@@ -1387,6 +1348,12 @@ impl CommandType for RecordCompanyTenant {
     fn tag_mappings() -> Vec<TagMapping> {
         company_tag()
     }
+    fn consistency_query() -> Vec<QueryItemMapping> {
+        vec![
+            company_status_query(),
+            QueryItemMapping::types(&["CompanyTenantProvisioned"]).tagged(company_tag()),
+        ]
+    }
     fn rest_trigger_allowed() -> bool {
         true
     }
@@ -1462,6 +1429,9 @@ impl CommandType for RecordTenantLifecycle {
     const NAME: &'static str = RECORD_TENANT_LIFECYCLE_COMMAND;
     fn tag_mappings() -> Vec<TagMapping> {
         company_tag()
+    }
+    fn consistency_query() -> Vec<QueryItemMapping> {
+        vec![company_status_query()]
     }
     fn rest_trigger_allowed() -> bool {
         true
@@ -1562,6 +1532,9 @@ impl CommandType for ConvertCompanyTrial {
     fn tag_mappings() -> Vec<TagMapping> {
         company_tag()
     }
+    fn consistency_query() -> Vec<QueryItemMapping> {
+        vec![company_status_query()]
+    }
     fn rest_trigger_allowed() -> bool {
         true
     }
@@ -1607,6 +1580,9 @@ impl CommandType for ExpireCompanyTrial {
     const NAME: &'static str = "ExpireCompanyTrial";
     fn tag_mappings() -> Vec<TagMapping> {
         company_tag()
+    }
+    fn consistency_query() -> Vec<QueryItemMapping> {
+        vec![company_status_query()]
     }
     fn rest_trigger_allowed() -> bool {
         true
@@ -1753,6 +1729,9 @@ impl CommandType for ReactivateCompany {
     fn tag_mappings() -> Vec<TagMapping> {
         company_tag()
     }
+    fn consistency_query() -> Vec<QueryItemMapping> {
+        vec![company_status_query()]
+    }
     fn rest_trigger_allowed() -> bool {
         true
     }
@@ -1818,8 +1797,23 @@ impl CommandType for CreateTicket {
     type Payload = CreateTicketPayload;
     type Event = HelpdeskEvent;
     const NAME: &'static str = "CreateTicket";
+    /// The company for its status, and the ticket so that a used id is
+    /// found by its own tag rather than among all the company's tickets.
     fn tag_mappings() -> Vec<TagMapping> {
-        company_tag()
+        [company_tag(), ticket_tag()].concat()
+    }
+    /// The company's latest lifecycle event, and whether this company
+    /// already has a ticket with this id. Before this, `decide()` read
+    /// every event tagged with the company - every ticket it ever filed -
+    /// and another of its tickets committed meanwhile was a conflict.
+    /// `ticket` first: an item is looked up by its first tag.
+    fn consistency_query() -> Vec<QueryItemMapping> {
+        vec![
+            company_status_query(),
+            QueryItemMapping::types(&["TicketCreated"])
+                .tagged(ticket_tag())
+                .tagged(company_tag()),
+        ]
     }
     /// The stored command holds the same customer data as the event it
     /// produces, so it needs the same protection.
@@ -1835,33 +1829,9 @@ impl CommandType for CreateTicket {
             &CompanyFacts::of(matching_events, &payload.company_id),
         )
     }
-    fn snapshot() -> Option<&'static str> {
-        Some(CompanySnapshot::NAME)
-    }
-    fn decide_from_snapshot(
-        payload: &Self::Payload,
-        snapshot_state_json: &str,
-        events_since_snapshot: &[Self::Event],
-    ) -> CommandDecision {
-        match CompanyFacts::resume(
-            snapshot_state_json,
-            events_since_snapshot,
-            &payload.company_id,
-        ) {
-            Ok(facts) => create_ticket(payload, &facts),
-            // See `decide_from_ticket_snapshot`.
-            Err(e) => CommandDecision::Rejected {
-                reason: format!(
-                    "stored CompanySnapshot for {} is unreadable: {e}",
-                    payload.company_id
-                ),
-                kind: "snapshot_unreadable".into(),
-            },
-        }
-    }
 }
 
-/// `CreateTicket`'s decision, from either path.
+/// `CreateTicket`'s decision.
 fn create_ticket(payload: &CreateTicketPayload, company: &CompanyFacts) -> CommandDecision {
     match company.status {
         None => {
@@ -1927,31 +1897,22 @@ impl CommandType for AssignTicket {
     fn rest_trigger_allowed() -> bool {
         true
     }
-    fn snapshot() -> Option<&'static str> {
-        Some(TicketSnapshot::NAME)
+    /// See `ticket_snapshot_query`.
+    fn consistency_query() -> Vec<QueryItemMapping> {
+        ticket_snapshot_query()
     }
-    fn decide(payload: &Self::Payload, matching_events: &[Self::Event]) -> CommandDecision {
-        Self::decide_with(
-            payload,
-            &TicketFacts::of(matching_events, &payload.ticket_id),
-        )
-    }
-    fn decide_from_snapshot(
+    fn decide_with(
         payload: &Self::Payload,
-        snapshot_state_json: &str,
-        events_since_snapshot: &[Self::Event],
+        decision: &Decision<'_, Self::Event>,
     ) -> CommandDecision {
-        decide_from_ticket_snapshot(
-            &payload.ticket_id,
-            snapshot_state_json,
-            events_since_snapshot,
-            |facts| Self::decide_with(payload, facts),
-        )
+        decide_on_ticket(decision, &payload.ticket_id, |facts| {
+            Self::decide_on(payload, facts)
+        })
     }
 }
 
 impl AssignTicket {
-    fn decide_with(payload: &AssignTicketPayload, facts: &TicketFacts) -> CommandDecision {
+    fn decide_on(payload: &AssignTicketPayload, facts: &TicketFacts) -> CommandDecision {
         match facts.status {
             None => CommandDecision::Rejected {
                 reason: format!("ticket {} does not exist", payload.ticket_id),
@@ -1999,31 +1960,22 @@ impl CommandType for ResolveTicket {
     fn rest_trigger_allowed() -> bool {
         true
     }
-    fn snapshot() -> Option<&'static str> {
-        Some(TicketSnapshot::NAME)
+    /// See `ticket_snapshot_query`.
+    fn consistency_query() -> Vec<QueryItemMapping> {
+        ticket_snapshot_query()
     }
-    fn decide(payload: &Self::Payload, matching_events: &[Self::Event]) -> CommandDecision {
-        Self::decide_with(
-            payload,
-            &TicketFacts::of(matching_events, &payload.ticket_id),
-        )
-    }
-    fn decide_from_snapshot(
+    fn decide_with(
         payload: &Self::Payload,
-        snapshot_state_json: &str,
-        events_since_snapshot: &[Self::Event],
+        decision: &Decision<'_, Self::Event>,
     ) -> CommandDecision {
-        decide_from_ticket_snapshot(
-            &payload.ticket_id,
-            snapshot_state_json,
-            events_since_snapshot,
-            |facts| Self::decide_with(payload, facts),
-        )
+        decide_on_ticket(decision, &payload.ticket_id, |facts| {
+            Self::decide_on(payload, facts)
+        })
     }
 }
 
 impl ResolveTicket {
-    fn decide_with(payload: &ResolveTicketPayload, facts: &TicketFacts) -> CommandDecision {
+    fn decide_on(payload: &ResolveTicketPayload, facts: &TicketFacts) -> CommandDecision {
         match facts.status {
             None => CommandDecision::Rejected {
                 reason: format!("ticket {} does not exist", payload.ticket_id),
@@ -2071,31 +2023,22 @@ impl CommandType for ReopenTicket {
     fn rest_trigger_allowed() -> bool {
         true
     }
-    fn snapshot() -> Option<&'static str> {
-        Some(TicketSnapshot::NAME)
+    /// See `ticket_snapshot_query`.
+    fn consistency_query() -> Vec<QueryItemMapping> {
+        ticket_snapshot_query()
     }
-    fn decide(payload: &Self::Payload, matching_events: &[Self::Event]) -> CommandDecision {
-        Self::decide_with(
-            payload,
-            &TicketFacts::of(matching_events, &payload.ticket_id),
-        )
-    }
-    fn decide_from_snapshot(
+    fn decide_with(
         payload: &Self::Payload,
-        snapshot_state_json: &str,
-        events_since_snapshot: &[Self::Event],
+        decision: &Decision<'_, Self::Event>,
     ) -> CommandDecision {
-        decide_from_ticket_snapshot(
-            &payload.ticket_id,
-            snapshot_state_json,
-            events_since_snapshot,
-            |facts| Self::decide_with(payload, facts),
-        )
+        decide_on_ticket(decision, &payload.ticket_id, |facts| {
+            Self::decide_on(payload, facts)
+        })
     }
 }
 
 impl ReopenTicket {
-    fn decide_with(payload: &ReopenTicketPayload, facts: &TicketFacts) -> CommandDecision {
+    fn decide_on(payload: &ReopenTicketPayload, facts: &TicketFacts) -> CommandDecision {
         match facts.status {
             None => CommandDecision::Rejected {
                 reason: format!("ticket {} does not exist", payload.ticket_id),
@@ -2153,34 +2096,22 @@ impl CommandType for RequestInfoFromCustomer {
     fn rest_trigger_allowed() -> bool {
         true
     }
-    fn snapshot() -> Option<&'static str> {
-        Some(TicketSnapshot::NAME)
+    /// See `ticket_snapshot_query`.
+    fn consistency_query() -> Vec<QueryItemMapping> {
+        ticket_snapshot_query()
     }
-    fn decide(payload: &Self::Payload, matching_events: &[Self::Event]) -> CommandDecision {
-        Self::decide_with(
-            payload,
-            &TicketFacts::of(matching_events, &payload.ticket_id),
-        )
-    }
-    fn decide_from_snapshot(
+    fn decide_with(
         payload: &Self::Payload,
-        snapshot_state_json: &str,
-        events_since_snapshot: &[Self::Event],
+        decision: &Decision<'_, Self::Event>,
     ) -> CommandDecision {
-        decide_from_ticket_snapshot(
-            &payload.ticket_id,
-            snapshot_state_json,
-            events_since_snapshot,
-            |facts| Self::decide_with(payload, facts),
-        )
+        decide_on_ticket(decision, &payload.ticket_id, |facts| {
+            Self::decide_on(payload, facts)
+        })
     }
 }
 
 impl RequestInfoFromCustomer {
-    fn decide_with(
-        payload: &RequestInfoFromCustomerPayload,
-        facts: &TicketFacts,
-    ) -> CommandDecision {
+    fn decide_on(payload: &RequestInfoFromCustomerPayload, facts: &TicketFacts) -> CommandDecision {
         let status = facts.status;
         if status.is_some() {
             if let Some(rejected) = facts.reject_unless_requester(payload.requester_id.as_deref()) {
@@ -2242,31 +2173,22 @@ impl CommandType for CustomerRespondsToTicket {
     fn rest_trigger_allowed() -> bool {
         true
     }
-    fn snapshot() -> Option<&'static str> {
-        Some(TicketSnapshot::NAME)
+    /// See `ticket_snapshot_query`.
+    fn consistency_query() -> Vec<QueryItemMapping> {
+        ticket_snapshot_query()
     }
-    fn decide(payload: &Self::Payload, matching_events: &[Self::Event]) -> CommandDecision {
-        Self::decide_with(
-            payload,
-            &TicketFacts::of(matching_events, &payload.ticket_id),
-        )
-    }
-    fn decide_from_snapshot(
+    fn decide_with(
         payload: &Self::Payload,
-        snapshot_state_json: &str,
-        events_since_snapshot: &[Self::Event],
+        decision: &Decision<'_, Self::Event>,
     ) -> CommandDecision {
-        decide_from_ticket_snapshot(
-            &payload.ticket_id,
-            snapshot_state_json,
-            events_since_snapshot,
-            |facts| Self::decide_with(payload, facts),
-        )
+        decide_on_ticket(decision, &payload.ticket_id, |facts| {
+            Self::decide_on(payload, facts)
+        })
     }
 }
 
 impl CustomerRespondsToTicket {
-    fn decide_with(
+    fn decide_on(
         payload: &CustomerRespondsToTicketPayload,
         facts: &TicketFacts,
     ) -> CommandDecision {
@@ -2346,31 +2268,22 @@ impl CommandType for CloseTicket {
     fn rest_trigger_allowed() -> bool {
         true
     }
-    fn snapshot() -> Option<&'static str> {
-        Some(TicketSnapshot::NAME)
+    /// See `ticket_snapshot_query`.
+    fn consistency_query() -> Vec<QueryItemMapping> {
+        ticket_snapshot_query()
     }
-    fn decide(payload: &Self::Payload, matching_events: &[Self::Event]) -> CommandDecision {
-        Self::decide_with(
-            payload,
-            &TicketFacts::of(matching_events, &payload.ticket_id),
-        )
-    }
-    fn decide_from_snapshot(
+    fn decide_with(
         payload: &Self::Payload,
-        snapshot_state_json: &str,
-        events_since_snapshot: &[Self::Event],
+        decision: &Decision<'_, Self::Event>,
     ) -> CommandDecision {
-        decide_from_ticket_snapshot(
-            &payload.ticket_id,
-            snapshot_state_json,
-            events_since_snapshot,
-            |facts| Self::decide_with(payload, facts),
-        )
+        decide_on_ticket(decision, &payload.ticket_id, |facts| {
+            Self::decide_on(payload, facts)
+        })
     }
 }
 
 impl CloseTicket {
-    fn decide_with(payload: &CloseTicketPayload, facts: &TicketFacts) -> CommandDecision {
+    fn decide_on(payload: &CloseTicketPayload, facts: &TicketFacts) -> CommandDecision {
         match facts.status {
             None => CommandDecision::Rejected {
                 reason: format!("ticket {} does not exist", payload.ticket_id),
@@ -2506,31 +2419,22 @@ impl CommandType for EscalateTicket {
     fn rest_trigger_allowed() -> bool {
         true
     }
-    fn snapshot() -> Option<&'static str> {
-        Some(TicketSnapshot::NAME)
+    /// See `ticket_snapshot_query`.
+    fn consistency_query() -> Vec<QueryItemMapping> {
+        ticket_snapshot_query()
     }
-    fn decide(payload: &Self::Payload, matching_events: &[Self::Event]) -> CommandDecision {
-        Self::decide_with(
-            payload,
-            &TicketFacts::of(matching_events, &payload.ticket_id),
-        )
-    }
-    fn decide_from_snapshot(
+    fn decide_with(
         payload: &Self::Payload,
-        snapshot_state_json: &str,
-        events_since_snapshot: &[Self::Event],
+        decision: &Decision<'_, Self::Event>,
     ) -> CommandDecision {
-        decide_from_ticket_snapshot(
-            &payload.ticket_id,
-            snapshot_state_json,
-            events_since_snapshot,
-            |facts| Self::decide_with(payload, facts),
-        )
+        decide_on_ticket(decision, &payload.ticket_id, |facts| {
+            Self::decide_on(payload, facts)
+        })
     }
 }
 
 impl EscalateTicket {
-    fn decide_with(payload: &EscalateTicketPayload, facts: &TicketFacts) -> CommandDecision {
+    fn decide_on(payload: &EscalateTicketPayload, facts: &TicketFacts) -> CommandDecision {
         match facts.status {
             None => CommandDecision::Rejected {
                 reason: format!("ticket {} does not exist", payload.ticket_id),
@@ -2585,11 +2489,27 @@ pub struct MergeTickets;
 
 /// Not in the original spec - the showcase of skilj's own DCB model this
 /// crate hadn't yet demonstrated: `tag_mappings` below declares *two*
-/// `"ticket"` tags (one per payload field), so `matching_events` is the
-/// union of both tickets' own histories - no classic aggregate boundary,
-/// no two-phase commit, one ordinary `decide()` reasoning about two
-/// entities' consistency at once. See `TicketsMerged`'s own doc comment
+/// `"ticket"` tags (one per payload field), and its query one
+/// `TicketSnapshot` item per ticket, so it decides on both tickets'
+/// states - no classic aggregate boundary, no two-phase commit, one
+/// ordinary decision about two entities' consistency at once. See `TicketsMerged`'s own doc comment
 /// for the event side of the same trick.
+impl MergeTickets {
+    fn primary() -> Vec<TagMapping> {
+        vec![TagMapping {
+            key: "ticket".into(),
+            field: "primary_ticket_id".into(),
+        }]
+    }
+
+    fn duplicate() -> Vec<TagMapping> {
+        vec![TagMapping {
+            key: "ticket".into(),
+            field: "duplicate_ticket_id".into(),
+        }]
+    }
+}
+
 #[auto_register(BOUNDED_CONTEXT)]
 #[requires_role("staff")]
 impl CommandType for MergeTickets {
@@ -2597,29 +2517,43 @@ impl CommandType for MergeTickets {
     type Event = HelpdeskEvent;
     const NAME: &'static str = "MergeTickets";
     fn tag_mappings() -> Vec<TagMapping> {
+        [Self::primary(), Self::duplicate()].concat()
+    }
+    /// Each ticket's `TicketSnapshot` state - one snapshot item per
+    /// ticket, so both are read from their stored rows.
+    fn consistency_query() -> Vec<QueryItemMapping> {
         vec![
-            TagMapping {
-                key: "ticket".into(),
-                field: "primary_ticket_id".into(),
-            },
-            TagMapping {
-                key: "ticket".into(),
-                field: "duplicate_ticket_id".into(),
-            },
+            QueryItemMapping::snapshot::<TicketSnapshot>("primary_ticket_id"),
+            QueryItemMapping::snapshot::<TicketSnapshot>("duplicate_ticket_id"),
         ]
     }
     fn rest_trigger_allowed() -> bool {
         true
     }
-    fn decide(payload: &Self::Payload, matching_events: &[Self::Event]) -> CommandDecision {
+    fn decide_with(
+        payload: &Self::Payload,
+        decision: &Decision<'_, Self::Event>,
+    ) -> CommandDecision {
         if payload.primary_ticket_id == payload.duplicate_ticket_id {
             return CommandDecision::Rejected {
                 reason: "a ticket cannot be merged into itself".into(),
                 kind: "cannot_merge_ticket_into_itself".into(),
             };
         }
-        let primary = TicketFacts::of(matching_events, &payload.primary_ticket_id);
-        let duplicate = TicketFacts::of(matching_events, &payload.duplicate_ticket_id);
+        decide_on_ticket(decision, &payload.primary_ticket_id, |primary| {
+            decide_on_ticket(decision, &payload.duplicate_ticket_id, |duplicate| {
+                Self::decide_on(payload, primary, duplicate)
+            })
+        })
+    }
+}
+
+impl MergeTickets {
+    fn decide_on(
+        payload: &MergeTicketsPayload,
+        primary: &TicketFacts,
+        duplicate: &TicketFacts,
+    ) -> CommandDecision {
         match (primary.status, duplicate.status) {
             (None, _) => CommandDecision::Rejected {
                 reason: format!("ticket {} does not exist", payload.primary_ticket_id),
@@ -2697,31 +2631,22 @@ impl CommandType for RateTicket {
     fn rest_trigger_allowed() -> bool {
         true
     }
-    fn snapshot() -> Option<&'static str> {
-        Some(TicketSnapshot::NAME)
+    /// See `ticket_snapshot_query`.
+    fn consistency_query() -> Vec<QueryItemMapping> {
+        ticket_snapshot_query()
     }
-    fn decide(payload: &Self::Payload, matching_events: &[Self::Event]) -> CommandDecision {
-        Self::decide_with(
-            payload,
-            &TicketFacts::of(matching_events, &payload.ticket_id),
-        )
-    }
-    fn decide_from_snapshot(
+    fn decide_with(
         payload: &Self::Payload,
-        snapshot_state_json: &str,
-        events_since_snapshot: &[Self::Event],
+        decision: &Decision<'_, Self::Event>,
     ) -> CommandDecision {
-        decide_from_ticket_snapshot(
-            &payload.ticket_id,
-            snapshot_state_json,
-            events_since_snapshot,
-            |facts| Self::decide_with(payload, facts),
-        )
+        decide_on_ticket(decision, &payload.ticket_id, |facts| {
+            Self::decide_on(payload, facts)
+        })
     }
 }
 
 impl RateTicket {
-    fn decide_with(payload: &RateTicketPayload, facts: &TicketFacts) -> CommandDecision {
+    fn decide_on(payload: &RateTicketPayload, facts: &TicketFacts) -> CommandDecision {
         let status = facts.status;
         if status.is_some() {
             if let Some(rejected) = facts.reject_unless_requester(payload.requester_id.as_deref()) {
@@ -2839,31 +2764,22 @@ impl CommandType for AddInternalNote {
             },
         ]
     }
-    fn snapshot() -> Option<&'static str> {
-        Some(TicketSnapshot::NAME)
+    /// See `ticket_snapshot_query`.
+    fn consistency_query() -> Vec<QueryItemMapping> {
+        ticket_snapshot_query()
     }
-    fn decide(payload: &Self::Payload, matching_events: &[Self::Event]) -> CommandDecision {
-        Self::decide_with(
-            payload,
-            &TicketFacts::of(matching_events, &payload.ticket_id),
-        )
-    }
-    fn decide_from_snapshot(
+    fn decide_with(
         payload: &Self::Payload,
-        snapshot_state_json: &str,
-        events_since_snapshot: &[Self::Event],
+        decision: &Decision<'_, Self::Event>,
     ) -> CommandDecision {
-        decide_from_ticket_snapshot(
-            &payload.ticket_id,
-            snapshot_state_json,
-            events_since_snapshot,
-            |facts| Self::decide_with(payload, facts),
-        )
+        decide_on_ticket(decision, &payload.ticket_id, |facts| {
+            Self::decide_on(payload, facts)
+        })
     }
 }
 
 impl AddInternalNote {
-    fn decide_with(payload: &AddInternalNotePayload, facts: &TicketFacts) -> CommandDecision {
+    fn decide_on(payload: &AddInternalNotePayload, facts: &TicketFacts) -> CommandDecision {
         match facts.status {
             None => CommandDecision::Rejected {
                 reason: format!("ticket {} does not exist", payload.ticket_id),

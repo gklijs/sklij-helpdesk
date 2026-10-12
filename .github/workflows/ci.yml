@@ -1,9 +1,8 @@
 name: CI
 
 # Two independent jobs, matching this repo's own crate split:
-# `backend` (this crate - depends on the sibling `skilj`/`skilj-core`
-# crates via a *path* dependency, see Cargo.toml's own comment on why -
-# so it needs that sibling repo checked out too, not just this one) and
+# `backend` (this crate - depends on the released skilj crates from
+# crates.io) and
 # `frontend` (frontend/ - a separate crate, no workspace, no skilj
 # dependency at all: see frontend/Cargo.toml's own doc comment).
 on:
@@ -51,23 +50,6 @@ jobs:
       # are credential-persistence hardening and fork-PR protections,
       # neither touched by this plain default checkout.
       - uses: actions/checkout@v7
-
-      # Cargo.toml's `[patch.crates-io]` points every skilj crate at
-      # `../skilj` - a sibling checkout, not the crates.io release,
-      # matching this project's own local-dev convention
-      # (README.md's own `[skilj](../skilj)` link assumes the same
-      # layout). Pinned to a commit so a CI run is reproducible and a
-      # breaking change on skilj's `main` can't turn an unrelated PR
-      # red - bump SKILJ_COMMIT deliberately, in the same commit that
-      # adapts this crate to it. `git clone` can't take a SHA, hence
-      # init + a shallow fetch of exactly that commit.
-      - name: Clone skilj (sibling path dependency)
-        env:
-          SKILJ_COMMIT: 61c84b8b08fb6342c46ddf54ea5f98a3de2db100
-        run: |
-          git init -q ../skilj
-          git -C ../skilj fetch -q --depth 1 https://codeberg.org/gklijs/SkilJ.git "$SKILJ_COMMIT"
-          git -C ../skilj checkout -q FETCH_HEAD
 
       - uses: dtolnay/rust-toolchain@stable
         with:
