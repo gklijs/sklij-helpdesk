@@ -15,9 +15,10 @@
 
 use serde_json::Value;
 use skilj::{CommandType, EventType};
-use skilj_core::shared::{CommandDecision, TagMapping};
+use skilj_core::shared::{CommandDecision, QueryItemMapping, TagMapping};
 use skilj_helpdesk::activity::{self, *};
 use skilj_helpdesk::helpdesk::*;
+use skilj_helpdesk::knowledge_base::*;
 
 use crate::events::*;
 
@@ -75,11 +76,26 @@ described!(HelpdeskEvent {
     TicketsMerged,
     TicketRated,
     TicketInternalNoteAdded,
+    MacroCreated,
+    MacroUpdated,
+    MacroDeleted,
+    TicketStaffReplied,
+    TicketPriorityChanged,
+    CompanySlaPolicySet,
+    TicketSlaBreached,
 });
 
 described!(ActivityEvent {
     DailyActivityRecorded,
     CompanyEngagementDeclined,
+});
+
+described!(KnowledgeBaseEvent {
+    ArticleSuggested,
+    SuggestionDismissed,
+    ArticleDrafted,
+    ArticleEdited,
+    ArticlePublished,
 });
 
 struct Stored {
@@ -125,18 +141,15 @@ fn rebuild<E: Described>(history: &[Stored], keep: &[bool]) -> Vec<E> {
 }
 
 /// What skilj handed `decide()` without a query: every event carrying
-/// any of the command's tags - as they were before the queries.
-/// `CreateTicket` was tagged by company alone; its `ticket` tag is only
-/// there for its query to look the ticket up by.
+/// any of the command's tags. For `CreateTicket` that includes the
+/// `ticket` tag: a ticket id is used once across all companies (see
+/// `CompanyFacts::apply`), so another company's `TicketCreated` under the
+/// same id is part of what it decides from.
 fn tagged<C: CommandType>(history: &[Stored], payload: &Value) -> Vec<C::Event>
 where
     C::Event: Described,
 {
-    let mut mappings = C::tag_mappings();
-    if C::NAME == CreateTicket::NAME {
-        mappings.retain(|m| m.key == "company");
-    }
-    let tags = derive(&mappings, payload);
+    let tags = derive(&C::tag_mappings(), payload);
     let keep: Vec<bool> = history
         .iter()
         .map(|s| s.tags.iter().any(|t| tags.contains(t)))
@@ -144,15 +157,19 @@ where
     rebuild(history, &keep)
 }
 
-/// What the command's query selects.
-fn queried<C: CommandType>(history: &[Stored], payload: &Value) -> (Vec<C::Event>, usize)
-where
-    C::Event: Described,
-{
+/// Which of `history` the non-snapshot items of `items` select - a
+/// snapshot item's events reach `decide_with()` folded into its state,
+/// not as events (see `ticket_snapshot.rs`).
+fn keep_for(
+    items: &[QueryItemMapping],
+    history: &[Stored],
+    payload: &Value,
+    name: &str,
+) -> Vec<bool> {
     let mut keep = vec![false; history.len()];
-    for item in C::consistency_query() {
+    for item in items.iter().filter(|item| item.snapshot.is_none()) {
         let tags = derive(&item.tag_mappings, payload);
-        assert_eq!(tags.len(), item.tag_mappings.len(), "{}", C::NAME);
+        assert_eq!(tags.len(), item.tag_mappings.len(), "{name}");
         let matches: Vec<usize> = (0..history.len())
             .filter(|&i| {
                 let s = &history[i];
@@ -167,6 +184,29 @@ where
             keep[i] = true;
         }
     }
+    keep
+}
+
+/// The events `C`'s query hands `decide_with()` beside its snapshot
+/// states - what `GivenTicket` gives a command whose query mixes both.
+pub(crate) fn selected_events<C: CommandType>(
+    history: &[C::Event],
+    payload: &Value,
+) -> Vec<C::Event>
+where
+    C::Event: Described,
+{
+    let stored = store(history);
+    let keep = keep_for(&C::consistency_query(), &stored, payload, C::NAME);
+    rebuild(&stored, &keep)
+}
+
+/// What the command's query selects.
+fn queried<C: CommandType>(history: &[Stored], payload: &Value) -> (Vec<C::Event>, usize)
+where
+    C::Event: Described,
+{
+    let keep = keep_for(&C::consistency_query(), history, payload, C::NAME);
     let count = keep.iter().filter(|k| **k).count();
     (rebuild(history, &keep), count)
 }
@@ -219,7 +259,10 @@ fn helpdesk_history() -> Vec<HelpdeskEvent> {
         created("t2", "acme", TicketPriority::Low),
         created("t3", "acme", TicketPriority::High),
         tenant_provisioned("acme", "tenant-acme"),
+        sla_policy_set("acme", skilj_helpdesk::sla::SlaPolicy::default()),
         assigned("t1", "acme", "staff-1"),
+        // Stored before ticket ids were global: `CreateTicket` now
+        // rejects this, but a history may still hold one.
         created("t1", "globex", TicketPriority::Urgent),
     ];
     for round in 0..4 {
@@ -229,13 +272,38 @@ fn helpdesk_history() -> Vec<HelpdeskEvent> {
     }
     h.extend([
         activated("acme"),
+        macro_created("m1", "acme", None, None),
+        macro_created("m1", "globex", Some(MacroStatus::Resolved), None),
+        sla_policy_set("globex", skilj_helpdesk::sla::SlaPolicy::default()),
         escalated("t1", "acme", TicketPriority::Medium, TicketPriority::High),
+        macro_created(
+            "m2",
+            "acme",
+            Some(MacroStatus::WaitingOnCustomer),
+            Some(TicketPriority::Urgent),
+        ),
+        staff_replied("t1", "acme", "on it"),
+        priority_changed("t1", "acme", TicketPriority::High, TicketPriority::Low),
+        macro_updated(
+            "m1",
+            "acme",
+            Some(MacroStatus::Resolved),
+            Some(TicketPriority::High),
+        ),
         assigned("t2", "acme", "staff-2"),
+        macro_created("m3", "acme", None, Some(TicketPriority::Low)),
+        macro_deleted("m2", "acme"),
         merged("t2", "t3", "acme"),
         note_added("t3", "acme", "merged away"),
         resolved("t1", "acme", 1),
         reopened("t1", "acme", 1),
         mirrored("acme", CompanyStatus::Active),
+        // A second policy for acme: only this, the latest, may count.
+        sla_policy_set("acme", {
+            let mut policy = skilj_helpdesk::sla::SlaPolicy::default();
+            policy.low.first_response_minutes = 1;
+            policy
+        }),
         resolved("t1", "acme", 2),
         rated("t1", "acme", 4),
         expired("globex"),
@@ -303,6 +371,13 @@ fn every_helpdesk_command_decides_the_same_from_its_query() {
             },
             &history,
         );
+        assert_query_agrees::<SetCompanySlaPolicy>(
+            &SetCompanySlaPolicyPayload {
+                company_id: company_id.clone(),
+                policy: skilj_helpdesk::sla::SlaPolicy::default(),
+            },
+            &history,
+        );
         for ticket in tickets {
             assert_query_agrees::<CreateTicket>(
                 &CreateTicketPayload {
@@ -323,10 +398,105 @@ fn every_helpdesk_command_decides_the_same_from_its_query() {
 }
 
 #[test]
+fn every_macro_command_decides_the_same_from_its_query() {
+    let history = helpdesk_history();
+    for company in ["acme", "globex", "nobody"] {
+        for macro_id in ["m1", "m2", "m3", "m4"] {
+            let definition =
+                macro_definition(macro_id, company, None, Some(TicketPriority::Urgent));
+            assert_query_agrees::<CreateMacro>(&definition, &history);
+            assert_query_agrees::<UpdateMacro>(&definition, &history);
+            assert_query_agrees::<DeleteMacro>(
+                &MacroDeletedPayload {
+                    company_id: company.into(),
+                    macro_id: macro_id.into(),
+                    staff_id: "staff-1".into(),
+                },
+                &history,
+            );
+        }
+    }
+    // One macro's latest event, not the company's tickets and other macros.
+    let (queried, tagged) =
+        assert_query_agrees::<UpdateMacro>(&macro_definition("m1", "acme", None, None), &history);
+    assert_eq!(queried, 1);
+    assert!(tagged > 10, "{tagged}");
+}
+
+/// `ApplyMacro`'s query is a `TicketSnapshot` item plus the macro's
+/// latest event. The snapshot item's state is the same either way, so
+/// what's checked is the other half: from the macro's latest event,
+/// `decide_with()` must reach the decision it reaches from every event
+/// carrying the company's or the macro's tag.
+#[test]
+fn apply_macro_decides_the_same_from_its_query() {
+    use skilj::Snapshot;
+    use skilj_core::plugin::{Decision, SnapshotState};
+
+    let history = helpdesk_history();
+    let stored = store(&history);
+    for end in 0..=history.len() {
+        let prefix = &history[..end];
+        for company in ["acme", "globex"] {
+            for ticket in ["t1", "t2", "t3", "t4", "t5"] {
+                for macro_id in ["m1", "m2", "m3", "m4"] {
+                    let payload = ApplyMacroPayload {
+                        ticket_id: ticket.into(),
+                        company_id: company.into(),
+                        macro_id: macro_id.into(),
+                        staff_id: "staff-9".into(),
+                    };
+                    let json = serde_json::to_value(&payload).unwrap();
+                    let snapshots = [SnapshotState {
+                        snapshot: TicketSnapshot::NAME.into(),
+                        tag_value: ticket.into(),
+                        state_json: serde_json::to_string(&crate::ticket_snapshot::ticket_state(
+                            prefix, ticket,
+                        ))
+                        .unwrap(),
+                        folded_through: -1,
+                    }];
+                    let tags = derive(&[company_tag_mapping(), macro_tag_mapping()], &json);
+                    let keep: Vec<bool> = stored[..end]
+                        .iter()
+                        .map(|s| s.tags.iter().any(|t| tags.contains(t)))
+                        .collect();
+                    let tagged: Vec<HelpdeskEvent> = rebuild(&stored[..end], &keep);
+                    let queried = selected_events::<ApplyMacro>(prefix, &json);
+                    assert!(queried.len() <= 1, "{json}");
+                    let by_tags =
+                        ApplyMacro::decide_with(&payload, &Decision::new(&tagged, &snapshots));
+                    let by_query =
+                        ApplyMacro::decide_with(&payload, &Decision::new(&queried, &snapshots));
+                    assert!(
+                        same(&by_tags, &by_query),
+                        "ApplyMacro after {end} events, {json}:\n  tags:  {by_tags:?}\n  query: {by_query:?}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+fn company_tag_mapping() -> TagMapping {
+    TagMapping {
+        key: "company".into(),
+        field: "company_id".into(),
+    }
+}
+
+fn macro_tag_mapping() -> TagMapping {
+    TagMapping {
+        key: "macro".into(),
+        field: "macro_id".into(),
+    }
+}
+
+#[test]
 fn the_queries_leave_out_what_a_long_history_is_made_of() {
     let history = helpdesk_history();
-    // A new ticket reads the company's latest lifecycle event, not its
-    // tickets.
+    // A new ticket reads the company's latest lifecycle event and its
+    // latest SLA policy, not its tickets.
     let (queried, tagged) = assert_query_agrees::<CreateTicket>(
         &CreateTicketPayload {
             ticket_id: "t9".into(),
@@ -341,7 +511,7 @@ fn the_queries_leave_out_what_a_long_history_is_made_of() {
         },
         &history,
     );
-    assert_eq!(queried, 1);
+    assert_eq!(queried, 2);
     assert!(tagged > 5, "{tagged}");
 }
 
@@ -410,7 +580,6 @@ fn every_activity_command_decides_the_same_from_its_query() {
 /// They read nothing, and say so.
 #[test]
 fn marketing_commands_read_nothing() {
-    use skilj_core::shared::QueryItemMapping;
     use skilj_helpdesk::marketing::*;
     for items in [
         RecordTrialLapse::consistency_query(),
@@ -418,5 +587,96 @@ fn marketing_commands_read_nothing() {
         RecordEngagementDecline::consistency_query(),
     ] {
         assert_eq!(items, vec![QueryItemMapping::nothing()]);
+    }
+}
+
+fn kb_drafted(article: &str, ticket: &str, title: &str) -> KnowledgeBaseEvent {
+    KnowledgeBaseEvent::ArticleDrafted(ArticleDraftedPayload {
+        article_id: article.into(),
+        from_ticket_id: Some(ticket.into()),
+        title: title.into(),
+        body: format!("{title}!"),
+    })
+}
+
+/// Three suggestions - one dismissed, two drafted - and two articles, one
+/// published then edited. Every command, against every id in play plus
+/// one that isn't. `DraftArticle` only from a suggestion: a scratch
+/// draft's missing `from_ticket_id` derives a valueless tag in skilj,
+/// which `derive` above can't represent.
+#[test]
+fn every_knowledge_base_command_decides_the_same_from_its_query() {
+    let suggested = |ticket: &str| {
+        KnowledgeBaseEvent::ArticleSuggested(ArticleSuggestedPayload {
+            ticket_id: ticket.into(),
+            company_id: "c1".into(),
+            suggested_at: "2026-10-12T00:00:00Z".into(),
+        })
+    };
+    let history = vec![
+        suggested("t1"),
+        suggested("t2"),
+        suggested("t3"),
+        KnowledgeBaseEvent::SuggestionDismissed(SuggestionDismissedPayload {
+            ticket_id: "t2".into(),
+            reason: None,
+        }),
+        kb_drafted("a1", "t1", "One"),
+        KnowledgeBaseEvent::ArticlePublished(ArticlePublishedPayload {
+            article_id: "a1".into(),
+            title: "One".into(),
+            body: "One!".into(),
+            revision: 1,
+        }),
+        KnowledgeBaseEvent::ArticleEdited(ArticleEditedPayload {
+            article_id: "a1".into(),
+            title: "One, revised".into(),
+            body: "One, revised!".into(),
+        }),
+        kb_drafted("a2", "t3", "Two"),
+    ];
+    for ticket in ["t1", "t2", "t3", "t4"] {
+        assert_query_agrees::<SuggestArticle>(
+            &SuggestArticlePayload {
+                ticket_id: ticket.into(),
+                company_id: "c1".into(),
+                suggested_at: "2026-10-13T00:00:00Z".into(),
+            },
+            &history,
+        );
+        assert_query_agrees::<DismissSuggestion>(
+            &DismissSuggestionPayload {
+                ticket_id: ticket.into(),
+                reason: None,
+            },
+            &history,
+        );
+        for article in ["a1", "a3"] {
+            assert_query_agrees::<DraftArticle>(
+                &DraftArticlePayload {
+                    article_id: article.into(),
+                    from_ticket_id: Some(ticket.into()),
+                    title: "New".into(),
+                    body: "New!".into(),
+                },
+                &history,
+            );
+        }
+    }
+    for article in ["a1", "a2", "a3"] {
+        assert_query_agrees::<EditArticle>(
+            &EditArticlePayload {
+                article_id: article.into(),
+                title: "Edit".into(),
+                body: "Edit!".into(),
+            },
+            &history,
+        );
+        assert_query_agrees::<PublishArticle>(
+            &PublishArticlePayload {
+                article_id: article.into(),
+            },
+            &history,
+        );
     }
 }

@@ -40,6 +40,9 @@
 //!                                         checkpointing - see
 //!                                         `alerter.rs`'s own
 //!                                         ALERTER_STATE_FILE doc.
+//!   ENGAGEMENT_WATCHER_POLL_INTERVAL_MS - default 30000. Only
+//!                                         tests/failure_recovery.rs
+//!                                         lowers it.
 //!   One EventReadToken ("id.secret"):
 //!     DAILY_ACTIVITY_RECORDED_TOKEN
 //!   One CommandToken ("id.secret"):
@@ -63,6 +66,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration as StdDuration;
 
+/// The default between two ticks; `ENGAGEMENT_WATCHER_POLL_INTERVAL_MS`
+/// overrides it.
 const POLL_INTERVAL: StdDuration = StdDuration::from_secs(30);
 
 struct Config {
@@ -73,6 +78,7 @@ struct Config {
     /// `None` when `ENGAGEMENT_WATCHER_STATE_FILE` is set to an empty
     /// string - see `alerter.rs`'s identical field for why this exists.
     state_file: Option<PathBuf>,
+    poll_interval: StdDuration,
 }
 
 impl Config {
@@ -99,6 +105,10 @@ impl Config {
             daily_activity_recorded_token: required("DAILY_ACTIVITY_RECORDED_TOKEN"),
             record_engagement_decline_token: required("RECORD_ENGAGEMENT_DECLINE_TOKEN"),
             state_file,
+            poll_interval: std::env::var("ENGAGEMENT_WATCHER_POLL_INTERVAL_MS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .map_or(POLL_INTERVAL, StdDuration::from_millis),
         }
     }
 }
@@ -125,8 +135,8 @@ async fn main() {
         None => State::default(),
     };
     println!(
-        "engagement-watcher: polling {} every {POLL_INTERVAL:?}",
-        config.base_url
+        "engagement-watcher: polling {} every {:?}",
+        config.base_url, config.poll_interval
     );
 
     loop {
@@ -139,7 +149,7 @@ async fn main() {
         if let Some(path) = &config.state_file {
             save_state(path, &state);
         }
-        tokio::time::sleep(POLL_INTERVAL).await;
+        tokio::time::sleep(config.poll_interval).await;
     }
 }
 

@@ -70,6 +70,7 @@ pub fn created(ticket_id: &str, company_id: &str, priority: TicketPriority) -> H
         priority,
         requester_name: None,
         requester_email: None,
+        sla: None,
     })
 }
 
@@ -87,6 +88,8 @@ pub fn resolved(ticket_id: &str, company_id: &str, resolution: u32) -> HelpdeskE
         company_id: company_id.into(),
         resolution: Some(resolution),
         requester_id: Some("customer-1".into()),
+        // `in_progress_ticket`'s agent.
+        assignee_id: Some("staff-1".into()),
     })
 }
 
@@ -95,6 +98,7 @@ pub fn reopened(ticket_id: &str, company_id: &str, resolution: u32) -> HelpdeskE
         ticket_id: ticket_id.into(),
         company_id: company_id.into(),
         resolution: Some(resolution),
+        assignee_id: Some("staff-1".into()),
     })
 }
 
@@ -143,6 +147,7 @@ pub fn merged(primary: &str, duplicate: &str, company_id: &str) -> HelpdeskEvent
         primary_ticket_id: primary.into(),
         duplicate_ticket_id: duplicate.into(),
         company_id: company_id.into(),
+        duplicate_assignee_id: None,
     })
 }
 
@@ -162,6 +167,97 @@ pub fn note_added(ticket_id: &str, company_id: &str, note: &str) -> HelpdeskEven
         company_id: company_id.into(),
         staff_id: "staff-1".into(),
         note: note.into(),
+    })
+}
+
+// --- macros ---
+
+pub fn macro_definition(
+    macro_id: &str,
+    company_id: &str,
+    status: Option<MacroStatus>,
+    priority: Option<TicketPriority>,
+) -> MacroDefinitionPayload {
+    MacroDefinitionPayload {
+        company_id: company_id.into(),
+        macro_id: macro_id.into(),
+        staff_id: "staff-1".into(),
+        name: format!("{macro_id} name"),
+        body: format!("{macro_id}: about {{{{ticket_id}}}}, from {{{{staff_id}}}}"),
+        status,
+        priority,
+    }
+}
+
+pub fn macro_created(
+    macro_id: &str,
+    company_id: &str,
+    status: Option<MacroStatus>,
+    priority: Option<TicketPriority>,
+) -> HelpdeskEvent {
+    HelpdeskEvent::MacroCreated(macro_definition(macro_id, company_id, status, priority))
+}
+
+pub fn macro_updated(
+    macro_id: &str,
+    company_id: &str,
+    status: Option<MacroStatus>,
+    priority: Option<TicketPriority>,
+) -> HelpdeskEvent {
+    HelpdeskEvent::MacroUpdated(macro_definition(macro_id, company_id, status, priority))
+}
+
+pub fn macro_deleted(macro_id: &str, company_id: &str) -> HelpdeskEvent {
+    HelpdeskEvent::MacroDeleted(MacroDeletedPayload {
+        company_id: company_id.into(),
+        macro_id: macro_id.into(),
+        staff_id: "staff-1".into(),
+    })
+}
+
+pub fn staff_replied(ticket_id: &str, company_id: &str, message: &str) -> HelpdeskEvent {
+    HelpdeskEvent::TicketStaffReplied(TicketStaffRepliedPayload {
+        ticket_id: ticket_id.into(),
+        company_id: company_id.into(),
+        staff_id: "staff-1".into(),
+        message: message.into(),
+        requester_id: "customer-1".into(),
+        macro_id: Some("m1".into()),
+    })
+}
+
+pub fn priority_changed(
+    ticket_id: &str,
+    company_id: &str,
+    previous_priority: TicketPriority,
+    new_priority: TicketPriority,
+) -> HelpdeskEvent {
+    HelpdeskEvent::TicketPriorityChanged(TicketPriorityChangedPayload {
+        ticket_id: ticket_id.into(),
+        company_id: company_id.into(),
+        staff_id: "staff-1".into(),
+        previous_priority,
+        new_priority,
+        macro_id: Some("m1".into()),
+    })
+}
+
+pub fn sla_policy_set(company_id: &str, policy: skilj_helpdesk::sla::SlaPolicy) -> HelpdeskEvent {
+    HelpdeskEvent::CompanySlaPolicySet(CompanySlaPolicySetPayload {
+        company_id: company_id.into(),
+        policy,
+    })
+}
+
+pub fn sla_breached(
+    ticket_id: &str,
+    company_id: &str,
+    sla: skilj_helpdesk::sla::SlaKind,
+) -> HelpdeskEvent {
+    HelpdeskEvent::TicketSlaBreached(TicketSlaBreachedPayload {
+        ticket_id: ticket_id.into(),
+        company_id: company_id.into(),
+        sla,
     })
 }
 

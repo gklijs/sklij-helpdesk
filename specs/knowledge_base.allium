@@ -1,0 +1,194 @@
+-- allium: 3
+-- knowledge_base.allium
+
+-- Scope: New bounded context for help articles, and the review queue that
+--   feeds them: every resolved helpdesk ticket becomes a suggestion that
+--   staff turn into an article or dismiss. A fourth context fed by
+--   skilj's `CrossContextRoute`, after activity.allium/marketing.allium -
+--   see README.md's "Context map".
+-- Includes:
+--   - An article suggestion, routed from helpdesk's TicketResolved, once
+--     per ticket ever
+--   - Staff review of a suggestion: draft an article from it, or dismiss it
+--   - Staff drafting, editing and publishing articles
+--   - A staff-only review surface (pending suggestions, every article in
+--     every state) and a public surface (published articles only)
+-- Excludes:
+--   - Generating article text from the ticket - staff write it; the
+--     suggestion only names the ticket.
+--   - Unpublishing or deleting an article.
+--   - Search, categories, per-company articles: one shared knowledge base.
+-- Dependencies: helpdesk/Ticket, helpdesk/Company, helpdesk/StaffMember,
+--   helpdesk/Customer (skilj-helpdesk.allium). helpdesk is only ever a
+--   *source* of routed events here, never modified.
+
+use "./skilj-helpdesk.allium" as helpdesk
+
+------------------------------------------------------------
+-- Enumerations
+------------------------------------------------------------
+
+enum SuggestionStatus { pending | drafted | dismissed }
+
+-- `edited`: published, with unpublished changes since. Customers keep
+-- seeing the last published text until it is published again.
+enum ArticleStatus { draft | published | edited }
+
+------------------------------------------------------------
+-- Entities and Variants
+------------------------------------------------------------
+
+-- Keyed by its ticket: one suggestion per ticket, ever.
+entity ArticleSuggestion {
+    ticket: helpdesk/Ticket
+    company: helpdesk/Company
+    suggested_at: Timestamp
+    status: SuggestionStatus
+    dismissal_reason: String?
+}
+
+entity Article {
+    article_id: String
+    from_suggestion: ArticleSuggestion?
+    title: String
+    body: String
+    status: ArticleStatus
+
+    -- What customers see: the text as of the last publication, absent
+    -- until the first one.
+    published_title: String?
+    published_body: String?
+    revision: Integer
+}
+
+------------------------------------------------------------
+-- Rules
+------------------------------------------------------------
+
+-- Cross-context wiring, modeled as in marketing.allium: one rule reacting
+-- to the source event and submitting this context's own command, one for
+-- that command's accept/reject. In code:
+-- `HelpdeskResolutionToArticleSuggestion` -> `SuggestArticle`.
+
+rule ArticleSuggestionIsRoutedFromHelpdesk {
+    -- Every resolution, including a re-resolution after a reopen; the
+    -- rule below drops all but the ticket's first.
+    when: ticket: helpdesk/Ticket.status transitions_to resolved
+    ensures: SuggestArticle(ticket: ticket, company: ticket.company, suggested_at: now)
+}
+
+rule ArticleIsSuggested {
+    when: SuggestArticle(ticket, company, suggested_at)
+    -- Rejected as `already_suggested` when this ticket was suggested
+    -- before, whatever became of it - staff already judged it once. This
+    -- is also what makes a replayed route harmless.
+    requires: not exists ArticleSuggestion{ticket}
+    ensures: ArticleSuggestion.created(
+        ticket: ticket, company: company, suggested_at: suggested_at,
+        status: pending
+    )
+}
+
+rule StaffDismissesSuggestion {
+    when: DismissSuggestion(suggestion, reason)
+    -- Rejected as `suggestion_not_found`, `suggestion_already_dismissed`
+    -- or `suggestion_already_drafted`.
+    requires: suggestion.status = pending
+    ensures: suggestion.status = dismissed
+    ensures: suggestion.dismissal_reason = reason
+}
+
+rule StaffDraftsArticle {
+    when: DraftArticle(article_id, suggestion, title, body)
+    -- Accepting a suggestion *is* drafting from it; `suggestion` is
+    -- absent for an article started from scratch. Rejected as
+    -- `empty_title`, `article_exists`, or - for a suggestion that isn't
+    -- pending - `suggestion_not_found`/`suggestion_already_dismissed`/
+    -- `suggestion_already_drafted`.
+    requires: title != ""
+    requires: not exists Article{article_id}
+    requires: suggestion = null or suggestion.status = pending
+    ensures:
+        if suggestion != null:
+            suggestion.status = drafted
+        Article.created(
+            article_id: article_id, from_suggestion: suggestion,
+            title: title, body: body, status: draft, revision: 0
+        )
+}
+
+rule StaffEditsArticle {
+    when: EditArticle(article, title, body)
+    -- Rejected as `empty_title` or `article_not_found`. Editing a
+    -- published article does not change what customers see.
+    requires: title != ""
+    ensures: article.title = title
+    ensures: article.body = body
+    ensures:
+        if article.status = published:
+            article.status = edited
+}
+
+rule StaffPublishesArticle {
+    when: PublishArticle(article)
+    -- Rejected as `article_not_found`, or `nothing_to_publish` when the
+    -- current text is already the published one.
+    requires: article.status in {draft, edited}
+    ensures: article.status = published
+    ensures: article.published_title = article.title
+    ensures: article.published_body = article.body
+    ensures: article.revision = article.revision + 1
+}
+
+------------------------------------------------------------
+-- Surfaces
+------------------------------------------------------------
+
+-- In code: the staff-only `KnowledgeBaseReview` projection (TEAM_ONLY
+-- staff, one shared instance). The commands are `#[requires_role("staff")]`.
+surface ArticleReview {
+    facing staff: helpdesk/StaffMember
+
+    exposes:
+        for suggestion in ArticleSuggestions where status = pending:
+            suggestion.ticket
+            suggestion.company
+            suggestion.suggested_at
+        for article in Articles:
+            article.article_id
+            article.from_suggestion
+            article.title
+            article.status
+            article.revision
+
+    provides:
+        DismissSuggestion(suggestion, reason)
+        DraftArticle(article_id, suggestion, title, body)
+        EditArticle(article, title, body)
+        PublishArticle(article)
+}
+
+-- In code: the `PublishedArticles` projection, which folds only
+-- `ArticlePublished` - a draft or an unpublished edit cannot reach it.
+surface KnowledgeBase {
+    facing customer: helpdesk/Customer
+
+    exposes:
+        for article in Articles where published_title != null:
+            article.article_id
+            article.published_title
+            article.published_body
+            article.revision
+}
+
+------------------------------------------------------------
+-- Open Questions
+------------------------------------------------------------
+
+-- Should a ticket reopened and resolved again with a *different* fix be
+-- suggested again? Currently no (one suggestion per ticket ever) - the
+-- simplest rule that keeps the queue from refilling with the same ticket.
+
+-- Should articles be scoped per company? Currently one shared knowledge
+-- base: suggestions carry their company for staff, published articles
+-- carry none, and staff are trusted to strip company detail when writing.

@@ -1,0 +1,957 @@
+{
+  "encryption_subjects": [
+    "customer:customer-alice (active)"
+  ],
+  "events": [
+    {
+      "at": "#1",
+      "command": {
+        "command_type": "SignUpCompany",
+        "consistency_boundary": null,
+        "consistency_query": [
+          {
+            "event_types": [
+              "CompanySignedUp",
+              "CompanyActivated",
+              "CompanyExpired",
+              "CompanyLifecycleMirrored"
+            ],
+            "latest": 1,
+            "tags": [
+              {
+                "key": "company",
+                "value": "company-acme"
+              }
+            ]
+          }
+        ],
+        "consistency_tags": [
+          {
+            "key": "company",
+            "value": "company-acme"
+          }
+        ],
+        "metadata_type": "SignUpCompany",
+        "metadata_version": 1,
+        "payload": {
+          "company_id": "company-acme",
+          "contact_email": "support@acme.example",
+          "name": "Acme"
+        },
+        "schema_version": 1
+      },
+      "event_type": "CompanySignedUp",
+      "metadata_type": "CompanySignedUp",
+      "metadata_version": 1,
+      "payload": {
+        "company_id": "company-acme",
+        "contact_email": "support@acme.example",
+        "name": "Acme"
+      },
+      "schema_version": 1,
+      "tags": [
+        {
+          "key": "company",
+          "value": "company-acme"
+        }
+      ]
+    },
+    {
+      "at": "#2",
+      "command": {
+        "command_type": "CreateTicket",
+        "consistency_boundary": "#1",
+        "consistency_query": [
+          {
+            "event_types": [
+              "CompanySignedUp",
+              "CompanyActivated",
+              "CompanyExpired",
+              "CompanyLifecycleMirrored"
+            ],
+            "latest": 1,
+            "tags": [
+              {
+                "key": "company",
+                "value": "company-acme"
+              }
+            ]
+          },
+          {
+            "event_types": [
+              "TicketCreated"
+            ],
+            "latest": null,
+            "tags": [
+              {
+                "key": "ticket",
+                "value": "ticket-login"
+              }
+            ]
+          },
+          {
+            "event_types": [
+              "CompanySlaPolicySet"
+            ],
+            "latest": 1,
+            "tags": [
+              {
+                "key": "company",
+                "value": "company-acme"
+              }
+            ]
+          }
+        ],
+        "consistency_tags": [
+          {
+            "key": "company",
+            "value": "company-acme"
+          },
+          {
+            "key": "ticket",
+            "value": "ticket-login"
+          }
+        ],
+        "metadata_type": "CreateTicket",
+        "metadata_version": 1,
+        "payload": {
+          "company_id": "company-acme",
+          "description": "500 on /login",
+          "logged_by_staff_id": null,
+          "priority": "medium",
+          "requester_email": "alice@acme.example",
+          "requester_id": "customer-alice",
+          "requester_name": "Alice",
+          "ticket_id": "ticket-login",
+          "title": "Can't log in"
+        },
+        "schema_version": 1
+      },
+      "event_type": "TicketCreated",
+      "metadata_type": "TicketCreated",
+      "metadata_version": 1,
+      "payload": {
+        "company_id": "company-acme",
+        "description": "500 on /login",
+        "logged_by_staff_id": null,
+        "priority": "medium",
+        "requester_email": "alice@acme.example",
+        "requester_id": "customer-alice",
+        "requester_name": "Alice",
+        "sla": {
+          "business_hours": {
+            "close_hour": 17,
+            "open_hour": 9,
+            "working_days": [
+              1,
+              2,
+              3,
+              4,
+              5
+            ]
+          },
+          "first_response_minutes": 480,
+          "resolution_minutes": 2400
+        },
+        "ticket_id": "ticket-login",
+        "title": "Can't log in"
+      },
+      "schema_version": 1,
+      "tags": [
+        {
+          "key": "ticket",
+          "value": "ticket-login"
+        },
+        {
+          "key": "company",
+          "value": "company-acme"
+        }
+      ]
+    },
+    {
+      "at": "#3",
+      "command": {
+        "command_type": "CreateTicket",
+        "consistency_boundary": "#1",
+        "consistency_query": [
+          {
+            "event_types": [
+              "CompanySignedUp",
+              "CompanyActivated",
+              "CompanyExpired",
+              "CompanyLifecycleMirrored"
+            ],
+            "latest": 1,
+            "tags": [
+              {
+                "key": "company",
+                "value": "company-acme"
+              }
+            ]
+          },
+          {
+            "event_types": [
+              "TicketCreated"
+            ],
+            "latest": null,
+            "tags": [
+              {
+                "key": "ticket",
+                "value": "ticket-login-again"
+              }
+            ]
+          },
+          {
+            "event_types": [
+              "CompanySlaPolicySet"
+            ],
+            "latest": 1,
+            "tags": [
+              {
+                "key": "company",
+                "value": "company-acme"
+              }
+            ]
+          }
+        ],
+        "consistency_tags": [
+          {
+            "key": "company",
+            "value": "company-acme"
+          },
+          {
+            "key": "ticket",
+            "value": "ticket-login-again"
+          }
+        ],
+        "metadata_type": "CreateTicket",
+        "metadata_version": 1,
+        "payload": {
+          "company_id": "company-acme",
+          "description": "same 500",
+          "logged_by_staff_id": null,
+          "priority": "low",
+          "requester_email": "alice@acme.example",
+          "requester_id": "customer-alice",
+          "requester_name": "Alice",
+          "ticket_id": "ticket-login-again",
+          "title": "Still can't log in"
+        },
+        "schema_version": 1
+      },
+      "event_type": "TicketCreated",
+      "metadata_type": "TicketCreated",
+      "metadata_version": 1,
+      "payload": {
+        "company_id": "company-acme",
+        "description": "same 500",
+        "logged_by_staff_id": null,
+        "priority": "low",
+        "requester_email": "alice@acme.example",
+        "requester_id": "customer-alice",
+        "requester_name": "Alice",
+        "sla": {
+          "business_hours": {
+            "close_hour": 17,
+            "open_hour": 9,
+            "working_days": [
+              1,
+              2,
+              3,
+              4,
+              5
+            ]
+          },
+          "first_response_minutes": 960,
+          "resolution_minutes": 4800
+        },
+        "ticket_id": "ticket-login-again",
+        "title": "Still can't log in"
+      },
+      "schema_version": 1,
+      "tags": [
+        {
+          "key": "ticket",
+          "value": "ticket-login-again"
+        },
+        {
+          "key": "company",
+          "value": "company-acme"
+        }
+      ]
+    },
+    {
+      "at": "#4",
+      "command": {
+        "command_type": "AssignTicket",
+        "consistency_boundary": "#2",
+        "consistency_query": [
+          {
+            "event_types": [],
+            "latest": null,
+            "snapshot": "TicketSnapshot",
+            "tags": [
+              {
+                "key": "ticket",
+                "value": "ticket-login"
+              }
+            ]
+          }
+        ],
+        "consistency_tags": [
+          {
+            "key": "ticket",
+            "value": "ticket-login"
+          }
+        ],
+        "metadata_type": "AssignTicket",
+        "metadata_version": 1,
+        "payload": {
+          "staff_id": "staff-bob",
+          "ticket_id": "ticket-login"
+        },
+        "schema_version": 1
+      },
+      "event_type": "TicketAssigned",
+      "metadata_type": "TicketAssigned",
+      "metadata_version": 1,
+      "payload": {
+        "company_id": "company-acme",
+        "staff_id": "staff-bob",
+        "ticket_id": "ticket-login"
+      },
+      "schema_version": 1,
+      "tags": [
+        {
+          "key": "ticket",
+          "value": "ticket-login"
+        },
+        {
+          "key": "staff",
+          "value": "staff-bob"
+        }
+      ]
+    },
+    {
+      "at": "#5",
+      "command": {
+        "command_type": "AddInternalNote",
+        "consistency_boundary": "#4",
+        "consistency_query": [
+          {
+            "event_types": [],
+            "latest": null,
+            "snapshot": "TicketSnapshot",
+            "tags": [
+              {
+                "key": "ticket",
+                "value": "ticket-login"
+              }
+            ]
+          }
+        ],
+        "consistency_tags": [
+          {
+            "key": "ticket",
+            "value": "ticket-login"
+          }
+        ],
+        "metadata_type": "AddInternalNote",
+        "metadata_version": 1,
+        "payload": {
+          "note": "Looks like the SSO outage",
+          "staff_id": "staff-bob",
+          "ticket_id": "ticket-login"
+        },
+        "schema_version": 1
+      },
+      "event_type": "TicketInternalNoteAdded",
+      "metadata_type": "TicketInternalNoteAdded",
+      "metadata_version": 1,
+      "payload": {
+        "company_id": "company-acme",
+        "note": "Looks like the SSO outage",
+        "staff_id": "staff-bob",
+        "ticket_id": "ticket-login"
+      },
+      "schema_version": 1,
+      "tags": [
+        {
+          "key": "ticket",
+          "value": "ticket-login"
+        },
+        {
+          "key": "company",
+          "value": "company-acme"
+        }
+      ]
+    },
+    {
+      "at": "#6",
+      "command": {
+        "command_type": "RequestInfoFromCustomer",
+        "consistency_boundary": "#5",
+        "consistency_query": [
+          {
+            "event_types": [],
+            "latest": null,
+            "snapshot": "TicketSnapshot",
+            "tags": [
+              {
+                "key": "ticket",
+                "value": "ticket-login"
+              }
+            ]
+          }
+        ],
+        "consistency_tags": [
+          {
+            "key": "ticket",
+            "value": "ticket-login"
+          }
+        ],
+        "metadata_type": "RequestInfoFromCustomer",
+        "metadata_version": 1,
+        "payload": {
+          "message": "Which browser?",
+          "requester_id": "customer-alice",
+          "staff_id": "staff-bob",
+          "ticket_id": "ticket-login"
+        },
+        "schema_version": 1
+      },
+      "event_type": "TicketInfoRequested",
+      "metadata_type": "TicketInfoRequested",
+      "metadata_version": 1,
+      "payload": {
+        "company_id": "company-acme",
+        "message": "Which browser?",
+        "requester_id": "customer-alice",
+        "staff_id": "staff-bob",
+        "ticket_id": "ticket-login"
+      },
+      "schema_version": 1,
+      "tags": [
+        {
+          "key": "ticket",
+          "value": "ticket-login"
+        }
+      ]
+    },
+    {
+      "at": "#7",
+      "command": {
+        "command_type": "CustomerRespondsToTicket",
+        "consistency_boundary": "#6",
+        "consistency_query": [
+          {
+            "event_types": [],
+            "latest": null,
+            "snapshot": "TicketSnapshot",
+            "tags": [
+              {
+                "key": "ticket",
+                "value": "ticket-login"
+              }
+            ]
+          }
+        ],
+        "consistency_tags": [
+          {
+            "key": "ticket",
+            "value": "ticket-login"
+          }
+        ],
+        "metadata_type": "CustomerRespondsToTicket",
+        "metadata_version": 1,
+        "payload": {
+          "message": "Firefox",
+          "requester_id": "customer-alice",
+          "ticket_id": "ticket-login"
+        },
+        "schema_version": 1
+      },
+      "event_type": "TicketCustomerResponded",
+      "metadata_type": "TicketCustomerResponded",
+      "metadata_version": 1,
+      "payload": {
+        "company_id": "company-acme",
+        "message": "Firefox",
+        "requester_id": "customer-alice",
+        "ticket_id": "ticket-login"
+      },
+      "schema_version": 1,
+      "tags": [
+        {
+          "key": "ticket",
+          "value": "ticket-login"
+        }
+      ]
+    },
+    {
+      "at": "#8",
+      "command": {
+        "command_type": "EscalateTicket",
+        "consistency_boundary": "#7",
+        "consistency_query": [
+          {
+            "event_types": [],
+            "latest": null,
+            "snapshot": "TicketSnapshot",
+            "tags": [
+              {
+                "key": "ticket",
+                "value": "ticket-login"
+              }
+            ]
+          }
+        ],
+        "consistency_tags": [
+          {
+            "key": "ticket",
+            "value": "ticket-login"
+          }
+        ],
+        "metadata_type": "EscalateTicket",
+        "metadata_version": 1,
+        "payload": {
+          "ticket_id": "ticket-login"
+        },
+        "schema_version": 1
+      },
+      "event_type": "TicketEscalated",
+      "metadata_type": "TicketEscalated",
+      "metadata_version": 1,
+      "payload": {
+        "company_id": "company-acme",
+        "new_priority": "high",
+        "previous_priority": "medium",
+        "ticket_id": "ticket-login"
+      },
+      "schema_version": 1,
+      "tags": [
+        {
+          "key": "ticket",
+          "value": "ticket-login"
+        }
+      ]
+    },
+    {
+      "at": "#9",
+      "command": {
+        "command_type": "MergeTickets",
+        "consistency_boundary": "#8",
+        "consistency_query": [
+          {
+            "event_types": [],
+            "latest": null,
+            "snapshot": "TicketSnapshot",
+            "tags": [
+              {
+                "key": "ticket",
+                "value": "ticket-login"
+              }
+            ]
+          },
+          {
+            "event_types": [],
+            "latest": null,
+            "snapshot": "TicketSnapshot",
+            "tags": [
+              {
+                "key": "ticket",
+                "value": "ticket-login-again"
+              }
+            ]
+          }
+        ],
+        "consistency_tags": [
+          {
+            "key": "ticket",
+            "value": "ticket-login"
+          },
+          {
+            "key": "ticket",
+            "value": "ticket-login-again"
+          }
+        ],
+        "metadata_type": "MergeTickets",
+        "metadata_version": 1,
+        "payload": {
+          "duplicate_ticket_id": "ticket-login-again",
+          "primary_ticket_id": "ticket-login"
+        },
+        "schema_version": 1
+      },
+      "event_type": "TicketsMerged",
+      "metadata_type": "TicketsMerged",
+      "metadata_version": 1,
+      "payload": {
+        "company_id": "company-acme",
+        "duplicate_assignee_id": null,
+        "duplicate_ticket_id": "ticket-login-again",
+        "primary_ticket_id": "ticket-login"
+      },
+      "schema_version": 1,
+      "tags": [
+        {
+          "key": "ticket",
+          "value": "ticket-login"
+        },
+        {
+          "key": "ticket",
+          "value": "ticket-login-again"
+        },
+        {
+          "key": "staff",
+          "value": null
+        }
+      ]
+    },
+    {
+      "at": "#10",
+      "command": {
+        "command_type": "ResolveTicket",
+        "consistency_boundary": "#9",
+        "consistency_query": [
+          {
+            "event_types": [],
+            "latest": null,
+            "snapshot": "TicketSnapshot",
+            "tags": [
+              {
+                "key": "ticket",
+                "value": "ticket-login"
+              }
+            ]
+          }
+        ],
+        "consistency_tags": [
+          {
+            "key": "ticket",
+            "value": "ticket-login"
+          }
+        ],
+        "metadata_type": "ResolveTicket",
+        "metadata_version": 1,
+        "payload": {
+          "ticket_id": "ticket-login"
+        },
+        "schema_version": 1
+      },
+      "event_type": "TicketResolved",
+      "metadata_type": "TicketResolved",
+      "metadata_version": 1,
+      "payload": {
+        "assignee_id": "staff-bob",
+        "company_id": "company-acme",
+        "requester_id": "customer-alice",
+        "resolution": 1,
+        "ticket_id": "ticket-login"
+      },
+      "schema_version": 1,
+      "tags": [
+        {
+          "key": "ticket",
+          "value": "ticket-login"
+        },
+        {
+          "key": "staff",
+          "value": "staff-bob"
+        }
+      ]
+    },
+    {
+      "at": "#11",
+      "command": {
+        "command_type": "RateTicket",
+        "consistency_boundary": "#10",
+        "consistency_query": [
+          {
+            "event_types": [],
+            "latest": null,
+            "snapshot": "TicketSnapshot",
+            "tags": [
+              {
+                "key": "ticket",
+                "value": "ticket-login"
+              }
+            ]
+          }
+        ],
+        "consistency_tags": [
+          {
+            "key": "ticket",
+            "value": "ticket-login"
+          }
+        ],
+        "metadata_type": "RateTicket",
+        "metadata_version": 1,
+        "payload": {
+          "comment": "Quick fix, thanks",
+          "rating": 5,
+          "requester_id": "customer-alice",
+          "ticket_id": "ticket-login"
+        },
+        "schema_version": 1
+      },
+      "event_type": "TicketRated",
+      "metadata_type": "TicketRated",
+      "metadata_version": 1,
+      "payload": {
+        "comment": "Quick fix, thanks",
+        "company_id": "company-acme",
+        "rating": 5,
+        "requester_id": "customer-alice",
+        "ticket_id": "ticket-login"
+      },
+      "schema_version": 1,
+      "tags": [
+        {
+          "key": "ticket",
+          "value": "ticket-login"
+        }
+      ]
+    }
+  ],
+  "outcomes": [
+    {
+      "accepted": true,
+      "command": "SignUpCompany",
+      "rejection_kind": null,
+      "rejection_reason": null,
+      "triggered_events": 1
+    },
+    {
+      "accepted": true,
+      "command": "CreateTicket",
+      "rejection_kind": null,
+      "rejection_reason": null,
+      "triggered_events": 1
+    },
+    {
+      "accepted": true,
+      "command": "CreateTicket",
+      "rejection_kind": null,
+      "rejection_reason": null,
+      "triggered_events": 1
+    },
+    {
+      "accepted": true,
+      "command": "AssignTicket",
+      "rejection_kind": null,
+      "rejection_reason": null,
+      "triggered_events": 1
+    },
+    {
+      "accepted": true,
+      "command": "AddInternalNote",
+      "rejection_kind": null,
+      "rejection_reason": null,
+      "triggered_events": 1
+    },
+    {
+      "accepted": true,
+      "command": "RequestInfoFromCustomer",
+      "rejection_kind": null,
+      "rejection_reason": null,
+      "triggered_events": 1
+    },
+    {
+      "accepted": true,
+      "command": "CustomerRespondsToTicket",
+      "rejection_kind": null,
+      "rejection_reason": null,
+      "triggered_events": 1
+    },
+    {
+      "accepted": true,
+      "command": "EscalateTicket",
+      "rejection_kind": null,
+      "rejection_reason": null,
+      "triggered_events": 1
+    },
+    {
+      "accepted": true,
+      "command": "MergeTickets",
+      "rejection_kind": null,
+      "rejection_reason": null,
+      "triggered_events": 1
+    },
+    {
+      "accepted": true,
+      "command": "ResolveTicket",
+      "rejection_kind": null,
+      "rejection_reason": null,
+      "triggered_events": 1
+    },
+    {
+      "accepted": true,
+      "command": "RateTicket",
+      "rejection_kind": null,
+      "rejection_reason": null,
+      "triggered_events": 1
+    },
+    {
+      "accepted": false,
+      "command": "RateTicket",
+      "rejection_kind": "already_rated",
+      "rejection_reason": "ticket ticket-login has already been rated",
+      "triggered_events": 0
+    }
+  ],
+  "projections": [
+    {
+      "as_of": "#11",
+      "key": "company-acme",
+      "owner": "company-acme",
+      "projection": "CompanyActiveTickets",
+      "state": {
+        "tickets": {
+          "ticket-login": {
+            "assigned_staff_id": "staff-bob",
+            "escalated": true,
+            "priority": "high",
+            "rating": 5,
+            "requester_id": "customer-alice",
+            "status": "resolved",
+            "ticket_id": "ticket-login"
+          }
+        }
+      }
+    },
+    {
+      "as_of": "#11",
+      "key": "customer-alice",
+      "owner": "company-acme",
+      "projection": "CustomerTickets",
+      "state": {
+        "tickets": {
+          "ticket-login": {
+            "description": "500 on /login",
+            "messages": [
+              {
+                "author_id": "staff-bob",
+                "from_staff": true,
+                "text": "Which browser?"
+              },
+              {
+                "author_id": "customer-alice",
+                "from_staff": false,
+                "text": "Firefox"
+              }
+            ],
+            "rating_comment": "Quick fix, thanks",
+            "ticket_id": "ticket-login",
+            "title": "Can't log in"
+          },
+          "ticket-login-again": {
+            "description": "same 500",
+            "messages": [],
+            "rating_comment": null,
+            "ticket_id": "ticket-login-again",
+            "title": "Still can't log in"
+          }
+        }
+      }
+    },
+    {
+      "as_of": "#5",
+      "key": "ticket-login",
+      "owner": "company-acme",
+      "projection": "TicketInternalNotes",
+      "state": {
+        "notes": [
+          {
+            "note": "Looks like the SSO outage",
+            "staff_id": "staff-bob"
+          }
+        ]
+      }
+    },
+    {
+      "as_of": "#11",
+      "key": "ticket-login",
+      "owner": "company-acme",
+      "projection": "TicketSummary",
+      "state": {
+        "assigned_staff_id": "staff-bob",
+        "escalated": true,
+        "first_responder_staff_id": "staff-bob",
+        "priority": "high",
+        "rating": 5,
+        "status": "resolved"
+      }
+    },
+    {
+      "as_of": "#9",
+      "key": "ticket-login-again",
+      "owner": "company-acme",
+      "projection": "TicketSummary",
+      "state": {
+        "assigned_staff_id": null,
+        "escalated": false,
+        "first_responder_staff_id": null,
+        "priority": "low",
+        "rating": null,
+        "status": "merged"
+      }
+    }
+  ],
+  "snapshots": [
+    {
+      "as_of": "#10",
+      "owner": null,
+      "snapshot": "StaffWorkload",
+      "snapshot_version": 1099511627777,
+      "state": {
+        "open_ticket_ids": []
+      },
+      "tag": "staff:staff-bob"
+    },
+    {
+      "as_of": "#11",
+      "owner": "company-acme",
+      "snapshot": "TicketSnapshot",
+      "snapshot_version": 1099511627780,
+      "state": {
+        "assignee_id": "staff-bob",
+        "company_id": "company-acme",
+        "created_priority": "medium",
+        "escalated": true,
+        "first_responded": true,
+        "first_response_breached": false,
+        "priority": "high",
+        "rated": true,
+        "requester_id": "customer-alice",
+        "resolution_breached": false,
+        "resolutions": 1,
+        "status": "resolved",
+        "ticket_id": "ticket-login"
+      },
+      "tag": "ticket:ticket-login"
+    },
+    {
+      "as_of": "#9",
+      "owner": "company-acme",
+      "snapshot": "TicketSnapshot",
+      "snapshot_version": 1099511627780,
+      "state": {
+        "assignee_id": null,
+        "company_id": "company-acme",
+        "created_priority": "low",
+        "escalated": false,
+        "first_responded": false,
+        "first_response_breached": false,
+        "priority": null,
+        "rated": false,
+        "requester_id": "customer-alice",
+        "resolution_breached": false,
+        "resolutions": 0,
+        "status": "merged",
+        "ticket_id": "ticket-login-again"
+      },
+      "tag": "ticket:ticket-login-again"
+    }
+  ]
+}

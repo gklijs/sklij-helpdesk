@@ -119,6 +119,9 @@
 //!   SLACK_WEBHOOK_URL             - optional; unset means console-only
 //!                                  (the original behaviour, and still
 //!                                  what every alert does regardless).
+//!   ALERTER_POLL_INTERVAL_MS      - optional; default 5000. Only
+//!                                  tests/failure_recovery.rs lowers it,
+//!                                  to keep a Postgres-restart test fast.
 //!
 //! What actually happens on an alert was deliberately just a `println!`,
 //! the real channel (email, Slack, PagerDuty, ...) being exactly the
@@ -149,6 +152,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::Duration;
 
+/// The default between two ticks; `ALERTER_POLL_INTERVAL_MS` overrides it.
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Every ticket event type this alerter consumes, by wire name. Used both
@@ -242,6 +246,7 @@ struct Config {
     /// multi-tenant discovery and polling. `None` otherwise, and the
     /// alerter reads only the shared context, exactly as before Phase 4.
     multi_tenant: Option<MultiTenantConfig>,
+    poll_interval: Duration,
 }
 
 struct MultiTenantConfig {
@@ -301,6 +306,10 @@ impl Config {
                 .ok()
                 .filter(|s| !s.is_empty()),
             multi_tenant,
+            poll_interval: std::env::var("ALERTER_POLL_INTERVAL_MS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .map_or(POLL_INTERVAL, Duration::from_millis),
         }
     }
 }
@@ -427,8 +436,8 @@ async fn main() {
         None => None,
     };
     println!(
-        "alerter: polling {} every {POLL_INTERVAL:?} (escalating tickets unhandled for {:?})",
-        config.base_url, config.unhandled_alert_after
+        "alerter: polling {} every {:?} (escalating tickets unhandled for {:?})",
+        config.base_url, config.poll_interval, config.unhandled_alert_after
     );
     if config.multi_tenant.is_some() {
         println!(
@@ -445,7 +454,7 @@ async fn main() {
         if let Some(path) = &config.state_file {
             save_state(path, &state);
         }
-        tokio::time::sleep(POLL_INTERVAL).await;
+        tokio::time::sleep(config.poll_interval).await;
     }
 }
 

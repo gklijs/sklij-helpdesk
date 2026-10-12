@@ -129,3 +129,17 @@ sqlx = { version = "0.9", default-features = false, features = ["postgres"] }
 # tests/email_channel.rs only - a real, throwaway NATS server in Docker,
 # the same way skilj-nats's own tests run against one.
 testcontainers-modules = { version = "0.15", features = ["nats"] }
+# tests/spec_state_machine.rs only - random command sequences against the
+# real decide() functions, checked against the transition graphs and
+# invariants of specs/*.allium (issue #36).
+proptest = "1"
+
+# `server` generates an RSA key at every start (its local JWKS shortcut);
+# unoptimised, the prime search alone took 7-20s per start, which
+# tests/failure_recovery.rs pays three times. Optimising just the bignum
+# crates brings that under a second without slowing the rest of the build.
+[profile.dev.package.num-bigint-dig]
+opt-level = 3
+
+[profile.dev.package.rsa]
+opt-level = 3

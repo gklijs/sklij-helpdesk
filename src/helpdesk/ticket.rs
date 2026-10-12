@@ -26,6 +26,11 @@ pub struct TicketCreatedPayload {
     pub requester_name: Option<String>,
     /// Encrypted under the requester's key - see `customer_fields`.
     pub requester_email: Option<String>,
+    /// The SLA this ticket runs under: its company's policy for its
+    /// priority, fixed at creation - see `crate::sla::TicketSla`. What
+    /// `ScheduleFirstResponseSla`/`ScheduleResolutionSla` compute their
+    /// deadlines from. `None` on events stored before the field existed.
+    pub sla: Option<crate::sla::TicketSla>,
 }
 
 pub struct TicketCreated;
@@ -78,8 +83,13 @@ pub struct TicketAssigned;
 impl EventType for TicketAssigned {
     type Payload = TicketAssignedPayload;
     const NAME: &'static str = "TicketAssigned";
+    /// Also tagged with the agent, so `StaffWorkload` (and with it
+    /// `AutoAssignTicket`'s query) sees the assignment - see that
+    /// snapshot's doc comment. Only events appended since the tag was
+    /// added carry it: skilj derives an event's tags once, when it is
+    /// appended, and never re-tags stored events.
     fn tag_mappings() -> Vec<TagMapping> {
-        ticket_tag()
+        [ticket_tag(), staff_tag("staff_id")].concat()
     }
 }
 
@@ -98,6 +108,11 @@ pub struct TicketResolvedPayload {
     /// `CloseTicketPayload::requester_id`). `None` on events stored
     /// before the field existed.
     pub requester_id: Option<String>,
+    /// Who the ticket was assigned to (`TicketFacts::assignee_id`) - the
+    /// agent this resolution takes a ticket off, tagged so their
+    /// `StaffWorkload` sees it. `None` on events stored before the field
+    /// existed.
+    pub assignee_id: Option<String>,
 }
 
 pub struct TicketResolved;
@@ -106,8 +121,9 @@ pub struct TicketResolved;
 impl EventType for TicketResolved {
     type Payload = TicketResolvedPayload;
     const NAME: &'static str = "TicketResolved";
+    /// Also tagged with the assignee - see `assignee_id`.
     fn tag_mappings() -> Vec<TagMapping> {
-        ticket_tag()
+        [ticket_tag(), staff_tag("assignee_id")].concat()
     }
     /// `src/bin/alerter.rs` reads this too - see
     /// `TicketCreated::event_read_allowed`'s own doc comment.
@@ -124,6 +140,10 @@ pub struct TicketReopenedPayload {
     /// `CancelTicketAutoCloseOnReopen` cancels by. `None` on events
     /// stored before the field existed.
     pub resolution: Option<u32>,
+    /// The agent the reopened ticket goes back to - see
+    /// `TicketResolvedPayload::assignee_id`. `None` on events stored
+    /// before the field existed.
+    pub assignee_id: Option<String>,
 }
 
 pub struct TicketReopened;
@@ -132,8 +152,9 @@ pub struct TicketReopened;
 impl EventType for TicketReopened {
     type Payload = TicketReopenedPayload;
     const NAME: &'static str = "TicketReopened";
+    /// Also tagged with the assignee - see `assignee_id`.
     fn tag_mappings() -> Vec<TagMapping> {
-        ticket_tag()
+        [ticket_tag(), staff_tag("assignee_id")].concat()
     }
     /// `src/bin/alerter.rs` reads this too - see
     /// `TicketCreated::event_read_allowed`'s own doc comment.
@@ -267,6 +288,11 @@ pub struct TicketsMergedPayload {
     pub primary_ticket_id: String,
     pub duplicate_ticket_id: String,
     pub company_id: String,
+    /// Who the duplicate was assigned to, if anyone: merging it away
+    /// takes it off that agent's `StaffWorkload`. `None` for an
+    /// unassigned duplicate, and on events stored before the field
+    /// existed.
+    pub duplicate_assignee_id: Option<String>,
 }
 
 pub struct TicketsMerged;
@@ -290,6 +316,11 @@ impl EventType for TicketsMerged {
             TagMapping {
                 key: "ticket".into(),
                 field: "duplicate_ticket_id".into(),
+            },
+            // The duplicate's agent - see `duplicate_assignee_id`.
+            TagMapping {
+                key: STAFF_TAG_KEY.into(),
+                field: "duplicate_assignee_id".into(),
             },
         ]
     }
@@ -450,14 +481,32 @@ pub struct TicketFacts {
     /// here, as ciphertext, and copying them into a new sensitive field
     /// would encrypt them a second time.
     pub requester_id: Option<String>,
-    /// The priority it was created with - what `EscalateTicket` bumps.
+    /// The priority it was created with.
     pub created_priority: Option<TicketPriority>,
+    /// Its priority now, once something has moved it off
+    /// `created_priority` (`TicketEscalated`, `TicketPriorityChanged`) -
+    /// read through `current_priority`. Defaulted so a state stored
+    /// before the field existed still reads; `TicketSnapshot::VERSION`
+    /// was bumped with it, so such a state is refolded anyway.
+    #[serde(default)]
+    pub priority: Option<TicketPriority>,
     /// How many times it has been resolved so far. Counts the events
     /// rather than reading `TicketResolved::resolution`, so a history that
     /// predates that field still numbers its next resolution correctly.
     pub resolutions: u32,
     pub escalated: bool,
     pub rated: bool,
+    /// Whether staff have answered the customer yet - a `TicketInfoRequested`,
+    /// a `TicketStaffReplied` (a macro's reply) or a `TicketResolved`. What meets the first-response SLA (see
+    /// `ScheduleFirstResponseSla`).
+    pub first_responded: bool,
+    /// Whether a `TicketSlaBreached` already recorded each SLA's breach.
+    pub first_response_breached: bool,
+    pub resolution_breached: bool,
+    /// Off its `TicketAssigned` - who works the ticket. Stamped onto the
+    /// events that change that agent's load (`TicketResolved`,
+    /// `TicketReopened`, `TicketsMerged`), so `StaffWorkload` sees them.
+    pub assignee_id: Option<String>,
 }
 
 impl TicketFacts {
@@ -485,16 +534,19 @@ impl TicketFacts {
             }
             HelpdeskEvent::TicketAssigned(p) if p.ticket_id == self.ticket_id => {
                 self.status = Some(TicketStatus::InProgress);
+                self.assignee_id = Some(p.staff_id.clone());
             }
             HelpdeskEvent::TicketResolved(p) if p.ticket_id == self.ticket_id => {
                 self.status = Some(TicketStatus::Resolved);
                 self.resolutions += 1;
+                self.first_responded = true;
             }
             HelpdeskEvent::TicketReopened(p) if p.ticket_id == self.ticket_id => {
                 self.status = Some(TicketStatus::InProgress);
             }
             HelpdeskEvent::TicketInfoRequested(p) if p.ticket_id == self.ticket_id => {
                 self.status = Some(TicketStatus::WaitingOnCustomer);
+                self.first_responded = true;
             }
             HelpdeskEvent::TicketCustomerResponded(p) if p.ticket_id == self.ticket_id => {
                 self.status = Some(TicketStatus::InProgress);
@@ -511,12 +563,31 @@ impl TicketFacts {
             }
             HelpdeskEvent::TicketEscalated(p) if p.ticket_id == self.ticket_id => {
                 self.escalated = true;
+                self.priority = Some(p.new_priority);
+            }
+            HelpdeskEvent::TicketPriorityChanged(p) if p.ticket_id == self.ticket_id => {
+                self.priority = Some(p.new_priority);
+            }
+            // A macro's plain reply answers the customer as much as a
+            // question does.
+            HelpdeskEvent::TicketStaffReplied(p) if p.ticket_id == self.ticket_id => {
+                self.first_responded = true;
             }
             HelpdeskEvent::TicketRated(p) if p.ticket_id == self.ticket_id => {
                 self.rated = true;
             }
+            HelpdeskEvent::TicketSlaBreached(p) if p.ticket_id == self.ticket_id => match p.sla {
+                crate::sla::SlaKind::FirstResponse => self.first_response_breached = true,
+                crate::sla::SlaKind::Resolution => self.resolution_breached = true,
+            },
             _ => {}
         }
+    }
+
+    /// What `EscalateTicket` bumps and `ApplyMacro` compares against:
+    /// the last priority set, else the one it was created with.
+    pub fn current_priority(&self) -> Option<TicketPriority> {
+        self.priority.or(self.created_priority)
     }
 
     /// The company a ticket belongs to. Every ticket-lifecycle command
@@ -574,7 +645,10 @@ impl Snapshot for TicketSnapshot {
     /// Same owner every ticket projection derives - a company-scoped
     /// Role can only `inspectSnapshot` its own company's tickets.
     const OWNER_TAG_KEY: Option<&'static str> = Some("company");
-    const VERSION: u64 = 1;
+    /// 2: `first_responded`/`*_breached` for the SLA deadlines (issue #42).
+    /// 3: `TicketFacts::assignee_id` (issue #44).
+    /// 4: `TicketFacts::priority` (issue #43's `TicketPriorityChanged`).
+    const VERSION: u64 = 4;
     /// Keyed by ticket, so unlike `CompanyActiveTickets` the work spreads
     /// over every partition - see that projection's `PARTITION_COUNT`
     /// and `docs/partitioned-projection-report-2026-10-05.md`.

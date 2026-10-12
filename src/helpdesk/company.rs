@@ -207,7 +207,10 @@ pub enum CompanyStatus {
 /// does) resolves by recency exactly the way a single-source history
 /// would - no special-casing, no "prefer the mirror" branch to get
 /// wrong.
-fn company_status(matching_events: &[HelpdeskEvent], company_id: &str) -> Option<CompanyStatus> {
+pub(super) fn company_status(
+    matching_events: &[HelpdeskEvent],
+    company_id: &str,
+) -> Option<CompanyStatus> {
     let mut status = None;
     for event in matching_events {
         match event {
@@ -235,18 +238,22 @@ fn company_status(matching_events: &[HelpdeskEvent], company_id: &str) -> Option
     status
 }
 
-/// What `CreateTicket` decides from: the company's status and which
-/// of its ticket ids are already used, folded from its consistency
-/// query's events (the company's latest lifecycle event, and this
-/// ticket id's `TicketCreated` if any).
+/// What `CreateTicket` decides from: the company's status, which ticket
+/// ids are already used, and its SLA policy, folded from its consistency
+/// query's events (the company's latest lifecycle event, this ticket id's
+/// `TicketCreated` if any, whichever company filed it, and its latest
+/// `CompanySlaPolicySet`).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct CompanyFacts {
     /// Which company this is - events of any other are skipped.
     pub company_id: String,
     /// `None` means the company doesn't exist - see `company_status`.
     pub status: Option<CompanyStatus>,
-    /// Every ticket id a `TicketCreated` of this company used.
+    /// Every ticket id a `TicketCreated` used - of any company, see `apply`.
     pub ticket_ids: std::collections::BTreeSet<String>,
+    /// Its latest `CompanySlaPolicySet`'s policy - `None` until it sets
+    /// one, which `CreateTicket` reads as `SlaPolicy::default()`.
+    pub sla_policy: Option<crate::sla::SlaPolicy>,
 }
 
 impl CompanyFacts {
@@ -263,19 +270,31 @@ impl CompanyFacts {
     }
 
     fn apply(&mut self, event: &HelpdeskEvent) {
+        // A ticket id is used once across every company, not once per
+        // company: the ticket's tag, its `TicketSnapshot` and every
+        // ticket-keyed read model know it by id alone, so a second
+        // company's `TicketCreated` under a used id would land on the
+        // first company's ticket (and reset it to `open`, even out of
+        // `closed`/`merged`). The frontend's `tk-<millis>` ids make that
+        // an accident waiting to happen, not just an attack - see
+        // docs/allium-spec-drift-2026-10-12.md.
+        if let HelpdeskEvent::TicketCreated(p) = event {
+            self.ticket_ids.insert(p.ticket_id.clone());
+            return;
+        }
         let company_id = match event {
             HelpdeskEvent::CompanySignedUp(p) => &p.company_id,
             HelpdeskEvent::CompanyActivated(p) => &p.company_id,
             HelpdeskEvent::CompanyExpired(p) => &p.company_id,
             HelpdeskEvent::CompanyLifecycleMirrored(p) => &p.company_id,
-            HelpdeskEvent::TicketCreated(p) => &p.company_id,
+            HelpdeskEvent::CompanySlaPolicySet(p) => &p.company_id,
             _ => return,
         };
         if *company_id != self.company_id {
             return;
         }
-        if let HelpdeskEvent::TicketCreated(p) = event {
-            self.ticket_ids.insert(p.ticket_id.clone());
+        if let HelpdeskEvent::CompanySlaPolicySet(p) = event {
+            self.sla_policy = Some(p.policy.clone());
         } else {
             self.status = company_status(std::slice::from_ref(event), company_id).or(self.status);
         }

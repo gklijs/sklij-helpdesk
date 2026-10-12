@@ -12,13 +12,10 @@
 //! temporal one, so nothing about it needs scheduling.
 //!
 //! `rule TicketBecomesOverdue` (an unhandled ticket, 4+ hours old) is
-//! deliberately not built out here beyond `is_overdue` below: the
-//! trigger check itself is a one-line comparison (shown, and tested),
-//! but firing it for real needs the alerter to track each ticket's own
-//! `created_at` and current status as it consumes the event stream, and
-//! sweep that tracked set on a timer - straightforward with the same
-//! technique `TicketSummary`'s own fold already uses, just not wired up
-//! this pass (see `Cargo.toml`'s own doc comment).
+//! only its trigger check here, `is_overdue` below: `src/bin/alerter.rs`
+//! tracks each unhandled ticket's `created_at` off the event stream,
+//! sweeps that set on a timer and submits `EscalateTicket` for each
+//! overdue one.
 
 use crate::helpdesk::{TicketCreatedPayload, TicketPriority};
 use chrono::{DateTime, Duration, Utc};
@@ -35,9 +32,7 @@ pub struct Alert {
 pub enum AlertReason {
     /// `rule UrgentTicketNeedsImmediateAttention`.
     Urgent,
-    /// `rule TicketBecomesOverdue` - see this module's own doc comment
-    /// for what's still needed to actually fire this in a running
-    /// alerter, beyond the check itself.
+    /// `rule TicketBecomesOverdue` - see this module's own doc comment.
     Overdue,
 }
 
@@ -74,6 +69,7 @@ mod tests {
             priority,
             requester_name: None,
             requester_email: None,
+            sla: None,
         }
     }
 

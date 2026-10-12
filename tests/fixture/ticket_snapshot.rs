@@ -19,7 +19,7 @@ use skilj_core::shared::CommandDecision;
 use skilj_helpdesk::helpdesk::*;
 use skilj_test_fixture::command::{CommandOutcome, GivenEvents};
 
-use crate::consistency_query::{derive, Described};
+use crate::consistency_query::{derive, selected_events, Described};
 use crate::events::*;
 
 /// `ticket`'s state, folded as skilj folds it: every event carrying the
@@ -64,8 +64,14 @@ impl<C: CommandType<Event = HelpdeskEvent>> GivenTicket<C> {
 
     pub(crate) fn when(self, payload: C::Payload) -> CommandOutcome {
         let json = serde_json::to_value(&payload).unwrap();
-        let mut given = GivenEvents::<C>::new();
+        // Beside its snapshot states, a command whose query also has
+        // plain items (`ApplyMacro`'s macro) is handed the events those
+        // select.
+        let mut given = GivenEvents::<C>::new().events(selected_events::<C>(&self.events, &json));
         for item in C::consistency_query() {
+            if item.snapshot.is_none() {
+                continue;
+            }
             assert_eq!(
                 item.snapshot.as_deref(),
                 Some(TicketSnapshot::NAME),
@@ -98,6 +104,11 @@ fn histories() -> Vec<Vec<HelpdeskEvent>> {
         TicketPriority::Medium,
         TicketPriority::High,
     ));
+    long.push(sla_breached(
+        "t1",
+        "acme",
+        skilj_helpdesk::sla::SlaKind::Resolution,
+    ));
     long.push(resolved("t1", "acme", 1));
     long.push(reopened("t1", "acme", 1));
     long.push(resolved("t1", "acme", 2));
@@ -116,6 +127,26 @@ fn histories() -> Vec<Vec<HelpdeskEvent>> {
         then(open_ticket("t1", "acme"), merged("t1", "t2", "acme")),
         // ...and as the duplicate becomes merged.
         then(open_ticket("t1", "acme"), merged("t0", "t1", "acme")),
+        // A macro's reply leaves the status, its priority change moves
+        // the priority off the created one, and an escalation after it
+        // bumps from there.
+        {
+            let mut events = in_progress_ticket("t1", "acme");
+            events.push(staff_replied("t1", "acme", "on it"));
+            events.push(priority_changed(
+                "t1",
+                "acme",
+                TicketPriority::Medium,
+                TicketPriority::Low,
+            ));
+            events.push(escalated(
+                "t1",
+                "acme",
+                TicketPriority::Low,
+                TicketPriority::Medium,
+            ));
+            events
+        },
     ]
 }
 
@@ -140,7 +171,15 @@ fn the_snapshot_folds_a_ticket_from_its_tag_value_alone() {
     assert_eq!(long.status, Some(TicketStatus::Closed));
     assert_eq!(long.resolutions, 2);
     assert!(long.escalated && long.rated);
+    assert!(long.first_responded && long.resolution_breached && !long.first_response_breached);
     assert_eq!(long.created_priority, Some(TicketPriority::Medium));
+    assert_eq!(long.current_priority(), Some(TicketPriority::High));
+
+    let changed = ticket_state(&histories()[9], "t1");
+    assert_eq!(changed.status, Some(TicketStatus::InProgress));
+    assert_eq!(changed.created_priority, Some(TicketPriority::Medium));
+    assert_eq!(changed.current_priority(), Some(TicketPriority::Medium));
+    assert!(changed.escalated);
 }
 
 #[test]
@@ -192,10 +231,19 @@ fn every_ticket_command_reads_its_ticket_through_the_snapshot() {
     assert_eq!(snapshot_items::<EscalateTicket>(), single);
     assert_eq!(snapshot_items::<RateTicket>(), single);
     assert_eq!(snapshot_items::<AddInternalNote>(), single);
+    assert_eq!(snapshot_items::<BreachTicketSla>(), single);
     assert_eq!(
         snapshot_items::<MergeTickets>(),
         ["primary_ticket_id", "duplicate_ticket_id"]
     );
+
+    // The ticket through the snapshot, the macro as its latest event.
+    let items = ApplyMacro::consistency_query();
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0].snapshot.as_deref(), Some(TicketSnapshot::NAME));
+    assert_eq!(items[0].tag_mappings[0].field, "ticket_id");
+    assert!(items[1].snapshot.is_none());
+    assert_eq!(items[1].latest, Some(1));
 }
 
 #[test]

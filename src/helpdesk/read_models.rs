@@ -45,7 +45,7 @@ pub struct TicketSummaryState {
     pub first_responder_staff_id: Option<String>,
 }
 
-fn priority_str(priority: TicketPriority) -> &'static str {
+pub(super) fn priority_str(priority: TicketPriority) -> &'static str {
     match priority {
         TicketPriority::Low => "low",
         TicketPriority::Medium => "medium",
@@ -86,6 +86,8 @@ impl Projection for TicketSummary {
             "TicketEscalated",
             "TicketsMerged",
             "TicketRated",
+            "TicketStaffReplied",
+            "TicketPriorityChanged",
         ]
     }
     fn sync() -> bool {
@@ -104,8 +106,15 @@ impl Projection for TicketSummary {
             // every variant even ones this projection never actually
             // gets invoked for.
             | HelpdeskEvent::CompanyLifecycleMirrored(_)
-            | HelpdeskEvent::TicketInternalNoteAdded(_) => vec![],
+            | HelpdeskEvent::CompanySlaPolicySet(_)
+            | HelpdeskEvent::TicketSlaBreached(_)
+            | HelpdeskEvent::TicketInternalNoteAdded(_)
+            | HelpdeskEvent::MacroCreated(_)
+            | HelpdeskEvent::MacroUpdated(_)
+            | HelpdeskEvent::MacroDeleted(_) => vec![],
             HelpdeskEvent::TicketCreated(p) => vec![p.ticket_id.clone()],
+            HelpdeskEvent::TicketStaffReplied(p) => vec![p.ticket_id.clone()],
+            HelpdeskEvent::TicketPriorityChanged(p) => vec![p.ticket_id.clone()],
             HelpdeskEvent::TicketAssigned(p) => vec![p.ticket_id.clone()],
             HelpdeskEvent::TicketResolved(p) => vec![p.ticket_id.clone()],
             HelpdeskEvent::TicketReopened(p) => vec![p.ticket_id.clone()],
@@ -134,7 +143,21 @@ impl Projection for TicketSummary {
             // alongside the other company-lifecycle events above for the
             // same reason they are - exhaustiveness, not intent.
             | HelpdeskEvent::CompanyLifecycleMirrored(_)
-            | HelpdeskEvent::TicketInternalNoteAdded(_) => {}
+            | HelpdeskEvent::CompanySlaPolicySet(_)
+            | HelpdeskEvent::TicketSlaBreached(_)
+            | HelpdeskEvent::TicketInternalNoteAdded(_)
+            | HelpdeskEvent::MacroCreated(_)
+            | HelpdeskEvent::MacroUpdated(_)
+            | HelpdeskEvent::MacroDeleted(_) => {}
+            // A reply answers the customer as much as a question does.
+            HelpdeskEvent::TicketStaffReplied(p) => {
+                state
+                    .first_responder_staff_id
+                    .get_or_insert_with(|| p.staff_id.clone());
+            }
+            HelpdeskEvent::TicketPriorityChanged(p) => {
+                state.priority = Some(priority_str(p.new_priority).to_string());
+            }
             HelpdeskEvent::TicketCreated(p) => {
                 state.status = Some("open".into());
                 state.priority = Some(priority_str(p.priority).to_string());
@@ -282,6 +305,7 @@ impl Projection for CompanyActiveTickets {
             "TicketEscalated",
             "TicketsMerged",
             "TicketRated",
+            "TicketPriorityChanged",
         ]
     }
     /// Lets up to this many `server` instances sharing one database
@@ -313,8 +337,16 @@ impl Projection for CompanyActiveTickets {
             // "an event lacking the tag leaves it untouched" contract
             // this projection otherwise keeps.
             | HelpdeskEvent::CompanyLifecycleMirrored(_)
-            | HelpdeskEvent::TicketInternalNoteAdded(_) => vec![],
+            | HelpdeskEvent::CompanySlaPolicySet(_)
+            | HelpdeskEvent::TicketSlaBreached(_)
+            | HelpdeskEvent::TicketInternalNoteAdded(_)
+            // A reply changes nothing in the queue; macros aren't tickets.
+            | HelpdeskEvent::TicketStaffReplied(_)
+            | HelpdeskEvent::MacroCreated(_)
+            | HelpdeskEvent::MacroUpdated(_)
+            | HelpdeskEvent::MacroDeleted(_) => vec![],
             HelpdeskEvent::TicketCreated(p) => vec![p.company_id.clone()],
+            HelpdeskEvent::TicketPriorityChanged(p) => vec![p.company_id.clone()],
             // Every ticket-lifecycle event past creation now carries its
             // own `company_id` too (stamped by each command's own
             // `decide()` via `TicketFacts::company_id` - see that
@@ -351,7 +383,18 @@ impl Projection for CompanyActiveTickets {
             // A lifecycle mirror carries no ticket - see
             // `CompanyActiveTickets::keys`'s own comment on the same event.
             | HelpdeskEvent::CompanyLifecycleMirrored(_)
-            | HelpdeskEvent::TicketInternalNoteAdded(_) => {}
+            | HelpdeskEvent::CompanySlaPolicySet(_)
+            | HelpdeskEvent::TicketSlaBreached(_)
+            | HelpdeskEvent::TicketInternalNoteAdded(_)
+            | HelpdeskEvent::TicketStaffReplied(_)
+            | HelpdeskEvent::MacroCreated(_)
+            | HelpdeskEvent::MacroUpdated(_)
+            | HelpdeskEvent::MacroDeleted(_) => {}
+            HelpdeskEvent::TicketPriorityChanged(p) => {
+                if let Some(entry) = state.tickets.get_mut(&p.ticket_id) {
+                    entry.priority = priority_str(p.new_priority).to_string();
+                }
+            }
             HelpdeskEvent::TicketCreated(p) => {
                 state.tickets.insert(
                     p.ticket_id.clone(),
@@ -439,7 +482,7 @@ pub struct CustomerTicketsState {
 /// further) but only ever sees ciphertext. And once the customer is
 /// forgotten (`CUSTOMER_SUBJECT`), nobody can decrypt it any more.
 ///
-/// Only the four events that carry customer text are consumed; status and
+/// Only the five events that carry customer text are consumed; status and
 /// the rest come from `CompanyActiveTickets`. Events stored before
 /// `TicketInfoRequested`/`TicketRated` carried a `requester_id` are
 /// skipped - their plaintext isn't erasable either way.
@@ -461,6 +504,7 @@ impl Projection for CustomerTickets {
             "TicketInfoRequested",
             "TicketCustomerResponded",
             "TicketRated",
+            "TicketStaffReplied",
         ]
     }
     fn sync() -> bool {
@@ -472,6 +516,7 @@ impl Projection for CustomerTickets {
             HelpdeskEvent::TicketCustomerResponded(p) => vec![p.requester_id.clone()],
             HelpdeskEvent::TicketInfoRequested(p) => p.requester_id.iter().cloned().collect(),
             HelpdeskEvent::TicketRated(p) => p.requester_id.iter().cloned().collect(),
+            HelpdeskEvent::TicketStaffReplied(p) => vec![p.requester_id.clone()],
             // Not consumed - see `TicketSummary::keys` on why the match
             // still has to name them.
             HelpdeskEvent::CompanySignedUp(_)
@@ -479,13 +524,19 @@ impl Projection for CustomerTickets {
             | HelpdeskEvent::CompanyExpired(_)
             | HelpdeskEvent::CompanyTenantProvisioned(_)
             | HelpdeskEvent::CompanyLifecycleMirrored(_)
+            | HelpdeskEvent::CompanySlaPolicySet(_)
+            | HelpdeskEvent::TicketSlaBreached(_)
             | HelpdeskEvent::TicketAssigned(_)
             | HelpdeskEvent::TicketResolved(_)
             | HelpdeskEvent::TicketReopened(_)
             | HelpdeskEvent::TicketClosed(_)
             | HelpdeskEvent::TicketEscalated(_)
             | HelpdeskEvent::TicketsMerged(_)
-            | HelpdeskEvent::TicketInternalNoteAdded(_) => vec![],
+            | HelpdeskEvent::TicketInternalNoteAdded(_)
+            | HelpdeskEvent::TicketPriorityChanged(_)
+            | HelpdeskEvent::MacroCreated(_)
+            | HelpdeskEvent::MacroUpdated(_)
+            | HelpdeskEvent::MacroDeleted(_) => vec![],
         }
     }
     fn project(state: &mut Self::State, event: &Self::Event, _key: &str) {
@@ -503,6 +554,15 @@ impl Projection for CustomerTickets {
                 );
             }
             HelpdeskEvent::TicketInfoRequested(p) => {
+                if let Some(entry) = state.tickets.get_mut(&p.ticket_id) {
+                    entry.messages.push(TicketMessage {
+                        author_id: p.staff_id.clone(),
+                        from_staff: true,
+                        text: p.message.clone(),
+                    });
+                }
+            }
+            HelpdeskEvent::TicketStaffReplied(p) => {
                 if let Some(entry) = state.tickets.get_mut(&p.ticket_id) {
                     entry.messages.push(TicketMessage {
                         author_id: p.staff_id.clone(),

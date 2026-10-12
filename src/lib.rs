@@ -7,7 +7,8 @@
 //! `helpdesk` - see `specs/activity.allium`/`specs/marketing.allium` for
 //! their own domain specs, and `marketing.rs`'s own doc comment for why
 //! `register()` below needs more than the one `auto_register()` call
-//! `helpdesk` alone used to need.
+//! `helpdesk` alone used to need. `knowledge_base` is a fourth, fed the
+//! same way from `helpdesk.TicketResolved` (see `specs/knowledge_base.allium`).
 
 pub mod activity;
 pub mod activity_scheduling;
@@ -15,12 +16,14 @@ pub mod alerting;
 pub mod demo_seed;
 pub mod email_channel;
 pub mod helpdesk;
+pub mod knowledge_base;
 pub mod marketing;
 pub mod parked_deliveries;
 pub mod projection_lag;
 pub mod routing;
 pub mod routing_guard;
 pub mod scheduling;
+pub mod sla;
 pub mod telemetry;
 pub mod tenant_access;
 
@@ -36,7 +39,7 @@ pub mod tenant_access;
 ///
 /// Must only ever increase: bump it in any change that alters a
 /// registered shape (a new consumed event type, a flag, a new field).
-pub const APPLICATION_VERSION: u64 = 4;
+pub const APPLICATION_VERSION: u64 = 7;
 
 /// Parses `ENCRYPTION_MASTER_KEY`'s value - 64 hex characters, 32 bytes
 /// (`openssl rand -hex 32`) - for `SkiljBuilder::encryption_master_key`.
@@ -71,21 +74,30 @@ pub fn parse_encryption_master_key(hex: &str) -> Result<skilj::EncryptionMasterK
 /// `ScheduleDeadline` has `#[auto_register]` support (see `marketing.rs`'s
 /// own doc comment on why for the former; `helpdesk/`'s own
 /// `ScheduleCompanyTrialConversion` doc comment for the latter), so each
-/// of `specs/marketing.allium`'s three `CrossContextRoute`s and
-/// `helpdesk/`'s three `ScheduleDeadline`s is wired in here, by name,
-/// explicitly, as is the one `CancelDeadline` (`helpdesk/`'s
-/// `CancelTicketAutoCloseOnReopen`). The trial deadlines have no cancel
-/// on purpose - see `ScheduleCompanyTrialConversion`'s own doc comment.
+/// of `specs/marketing.allium`'s three `CrossContextRoute`s,
+/// `specs/knowledge_base.allium`'s one, and
+/// `helpdesk/`'s five `ScheduleDeadline`s is wired in here, by name,
+/// explicitly, as are its five `CancelDeadline`s
+/// (`CancelTicketAutoCloseOnReopen` and the four SLA cancels - see
+/// `helpdesk/sla_policy.rs`). The trial deadlines have no cancel on
+/// purpose - see `ScheduleCompanyTrialConversion`'s own doc comment.
 pub fn register(builder: skilj::SkiljBuilder) -> skilj::SkiljBuilder {
     builder
         .auto_register()
         .cross_context_route::<marketing::HelpdeskExpiryToTrialLapse>()
         .cross_context_route::<marketing::HelpdeskActivationToTrialConversion>()
         .cross_context_route::<marketing::ActivityEngagementDeclineToMarketingFlag>()
+        .cross_context_route::<knowledge_base::HelpdeskResolutionToArticleSuggestion>()
         .schedule_deadline::<helpdesk::ScheduleCompanyTrialConversion>()
         .schedule_deadline::<helpdesk::ScheduleCompanyTrialExpiry>()
         .schedule_deadline::<helpdesk::ScheduleTicketAutoClose>()
         .cancel_deadline::<helpdesk::CancelTicketAutoCloseOnReopen>()
+        .schedule_deadline::<helpdesk::ScheduleFirstResponseSla>()
+        .schedule_deadline::<helpdesk::ScheduleResolutionSla>()
+        .cancel_deadline::<helpdesk::CancelFirstResponseSlaOnStaffReply>()
+        .cancel_deadline::<helpdesk::CancelFirstResponseSlaOnMacroReply>()
+        .cancel_deadline::<helpdesk::CancelFirstResponseSlaOnResolve>()
+        .cancel_deadline::<helpdesk::CancelResolutionSlaOnResolve>()
 }
 
 #[cfg(test)]

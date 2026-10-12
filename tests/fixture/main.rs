@@ -14,9 +14,13 @@
 //! so there's no reason to pay for several links.
 
 mod activity_marketing;
+mod auto_assign;
 mod company;
 mod consistency_query;
 mod events;
+mod knowledge_base;
+mod macros;
 mod projections;
+mod sla;
 mod ticket;
 mod ticket_snapshot;

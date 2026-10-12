@@ -56,6 +56,10 @@
 //! to filter it back out, would reach them with no server-side
 //! enforcement behind it.
 //!
+//! Macros (canned staff replies, `macros.rs`) live here too rather than
+//! in a context of their own, so `ApplyMacro` can read the macro and the
+//! ticket in one consistency query - see that file's doc comment.
+//!
 //! Customer data is GDPR-erasable: everything a customer wrote, and
 //! their contact details, is a skilj `sensitive_field` encrypted under
 //! their own key - see `CUSTOMER_SUBJECT` and `CustomerTickets`.
@@ -75,13 +79,19 @@ use skilj_core::shared::{
 
 use crate::scheduling;
 
+mod auto_assign;
 mod company;
+mod macros;
 mod read_models;
+mod sla_policy;
 mod ticket;
 mod ticket_commands;
 
+pub use auto_assign::*;
 pub use company::*;
+pub use macros::*;
 pub use read_models::*;
+pub use sla_policy::*;
 pub use ticket::*;
 pub use ticket_commands::*;
 
@@ -159,6 +169,16 @@ fn ticket_tag() -> Vec<TagMapping> {
     vec![TagMapping {
         key: "ticket".into(),
         field: "ticket_id".into(),
+    }]
+}
+
+/// The agent a payload's `field` names - what `StaffWorkload` is keyed
+/// by (issue #44). A list-valued `field` (`AutoAssignTicket`'s
+/// candidates) derives one tag per agent.
+fn staff_tag(field: &str) -> Vec<TagMapping> {
+    vec![TagMapping {
+        key: STAFF_TAG_KEY.into(),
+        field: field.into(),
     }]
 }
 
@@ -241,6 +261,13 @@ pub enum HelpdeskEvent {
     TicketsMerged(TicketsMergedPayload),
     TicketRated(TicketRatedPayload),
     TicketInternalNoteAdded(TicketInternalNoteAddedPayload),
+    MacroCreated(MacroDefinitionPayload),
+    MacroUpdated(MacroDefinitionPayload),
+    MacroDeleted(MacroDeletedPayload),
+    TicketStaffReplied(TicketStaffRepliedPayload),
+    TicketPriorityChanged(TicketPriorityChangedPayload),
+    CompanySlaPolicySet(CompanySlaPolicySetPayload),
+    TicketSlaBreached(TicketSlaBreachedPayload),
 }
 
 impl BoundedContextEvent for HelpdeskEvent {
@@ -294,6 +321,27 @@ impl BoundedContextEvent for HelpdeskEvent {
             "TicketInternalNoteAdded" => Some(
                 serde_json::from_str(&event.payload).map(HelpdeskEvent::TicketInternalNoteAdded),
             ),
+            "MacroCreated" => {
+                Some(serde_json::from_str(&event.payload).map(HelpdeskEvent::MacroCreated))
+            }
+            "MacroUpdated" => {
+                Some(serde_json::from_str(&event.payload).map(HelpdeskEvent::MacroUpdated))
+            }
+            "MacroDeleted" => {
+                Some(serde_json::from_str(&event.payload).map(HelpdeskEvent::MacroDeleted))
+            }
+            "TicketStaffReplied" => {
+                Some(serde_json::from_str(&event.payload).map(HelpdeskEvent::TicketStaffReplied))
+            }
+            "TicketPriorityChanged" => {
+                Some(serde_json::from_str(&event.payload).map(HelpdeskEvent::TicketPriorityChanged))
+            }
+            "CompanySlaPolicySet" => {
+                Some(serde_json::from_str(&event.payload).map(HelpdeskEvent::CompanySlaPolicySet))
+            }
+            "TicketSlaBreached" => {
+                Some(serde_json::from_str(&event.payload).map(HelpdeskEvent::TicketSlaBreached))
+            }
             _ => None,
         }
     }
@@ -303,7 +351,7 @@ impl BoundedContextEvent for HelpdeskEvent {
 mod required_role_tests {
     use super::*;
 
-    /// `#[requires_role(...)]` only takes a string literal, so the seven
+    /// `#[requires_role(...)]` only takes a string literal, so the fourteen
     /// staff-only commands spell out `"staff"` rather than `STAFF_TEAM`.
     /// This pins them to the constant, and pins the customer-facing and
     /// background-only commands to no role gate at all.
@@ -317,6 +365,13 @@ mod required_role_tests {
             EscalateTicket::required_role(),
             MergeTickets::required_role(),
             AddInternalNote::required_role(),
+            CreateMacro::required_role(),
+            UpdateMacro::required_role(),
+            DeleteMacro::required_role(),
+            ApplyMacro::required_role(),
+            SetCompanySlaPolicy::required_role(),
+            BreachTicketSla::required_role(),
+            AutoAssignTicket::required_role(),
         ];
         for required in staff_only {
             assert_eq!(required, Some(STAFF_TEAM));

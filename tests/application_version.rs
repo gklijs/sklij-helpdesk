@@ -22,8 +22,8 @@ use skilj_core::event_store::{BoundedContext, BoundedContextStatus};
 use skilj_core::plugin::Projection;
 use skilj_helpdesk::helpdesk::{
     HelpdeskEvent, TicketAssigned, TicketClosed, TicketCreated, TicketCustomerResponded,
-    TicketEscalated, TicketInfoRequested, TicketRated, TicketReopened, TicketResolved,
-    TicketSummary, TicketSummaryState, TicketsMerged,
+    TicketEscalated, TicketInfoRequested, TicketPriorityChanged, TicketRated, TicketReopened,
+    TicketResolved, TicketStaffReplied, TicketSummary, TicketSummaryState, TicketsMerged,
 };
 use skilj_helpdesk::APPLICATION_VERSION;
 use support::{runtime, seed_mapping_for, seed_role, test_db, test_now, unique_name};
@@ -72,6 +72,8 @@ fn builder(database_url: &str, bc: &str, subject: &str, version: u64) -> skilj::
         .event_type::<TicketClosed>()
         .event_type::<TicketEscalated>()
         .event_type::<TicketsMerged>()
+        .event_type::<TicketStaffReplied>()
+        .event_type::<TicketPriorityChanged>()
 }
 
 async fn start_older(
