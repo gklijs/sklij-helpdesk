@@ -1,5 +1,8 @@
 # Cross-context route report — 2026-10-13 (issue #29, skilj 0.0.10, commit `75b0381`)
 
+> Followed by `docs/cross-context-route-report-2026-10-14.md`: repeats on a quiet
+> box, the cut runs, and the fix for the reordering bug found here.
+
 Issue #29 asked how long a helpdesk commit takes to become the routed event
 in another context, at idle and under load, and what happens when the target
 context is slow or unavailable: retries, parking, recovery, and whether any
