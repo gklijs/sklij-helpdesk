@@ -100,21 +100,25 @@ def main():
     for c in range(C):
         must(client, "SignUpCompany", {"company_id": f"ddco-{c}", "name": f"Co {c}",
                                        "contact_email": f"ops{c}@x.example"})
-    run_parallel(server, create_and_assign, "create+assign")
-    wait_for(DB, lambda k: k.get(("ScheduleFirstResponseSla", "pending"), 0) == N
-             and k.get(("ScheduleResolutionSla", "pending"), 0) == N, "SLA schedules")
-    time.sleep(5)  # let async projections finish too
-    server.stop()
+    try:
+        run_parallel(server, create_and_assign, "create+assign")
+        wait_for(DB, lambda k: k.get(("ScheduleFirstResponseSla", "pending"), 0) == N
+                 and k.get(("ScheduleResolutionSla", "pending"), 0) == N, "SLA schedules")
+        time.sleep(5)  # let async projections finish too
+    finally:
+        server.stop()
     createdb("dd_created", DB)
 
     print("phase 2: resolve every ticket", flush=True)
     server = Server(BIN, DB, PORT, f"{WORK}/seed-2.log")
-    run_parallel(server, resolve, "resolve")
-    wait_for(DB, lambda k: k.get(("ScheduleTicketAutoClose", "pending"), 0) == N
-             and k.get(("ScheduleFirstResponseSla", "cancelled"), 0) == N
-             and k.get(("ScheduleResolutionSla", "cancelled"), 0) == N, "auto-close schedules")
-    time.sleep(5)
-    server.stop()
+    try:
+        run_parallel(server, resolve, "resolve")
+        wait_for(DB, lambda k: k.get(("ScheduleTicketAutoClose", "pending"), 0) == N
+                 and k.get(("ScheduleFirstResponseSla", "cancelled"), 0) == N
+                 and k.get(("ScheduleResolutionSla", "cancelled"), 0) == N, "auto-close schedules")
+        time.sleep(5)
+    finally:
+        server.stop()
     createdb("dd_resolved", DB)
     dropdb(DB)
     print(psql("SELECT next_value FROM bc_helpdesk.sequence", "dd_resolved"))

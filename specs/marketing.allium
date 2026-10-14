@@ -135,16 +135,24 @@ surface MarketingOutreachSignals {
 -- Open Questions
 ------------------------------------------------------------
 
--- Resolved: RecordTrialLapse/RecordTrialConversion recur per company -
--- each real lapse/conversion cycle produces its own event, not
--- once-ever like the engagement-decline flag. Unlike engagement
--- decline, these mirror a helpdesk lifecycle transition that can
--- legitimately repeat (a company can ReactivateCompany after expiring,
--- then lapse again later) - `rule TrialLapseIsRecorded`/
--- `TrialConversionIsRecorded` were never given a uniqueness guard for
--- exactly this reason, confirmed correct rather than an oversight; only
--- `rule EngagementDeclineIsFlagged`'s own source
--- (`CompanyEngagementDeclined`) is itself once-ever in `activity`.
+-- Resolved: RecordTrialLapse/RecordTrialConversion carry no uniqueness
+-- guard. Today helpdesk's lifecycle only moves forward (trialing ->
+-- expired -> active, active terminal), so each fires at most once per
+-- company, but nothing here depends on that: a redelivered occurrence is
+-- deduplicated by the route's idempotency key, and the guards were left
+-- off so a future recurring-billing lifecycle needs no change here.
+-- Only `rule EngagementDeclineIsFlagged`'s own source
+-- (`CompanyEngagementDeclined`) is once-ever by its own rule, in
+-- `activity`.
+
+-- Resolved (issue #29): the two lifecycle routes keep separate cursors
+-- and retry state, so marketing can receive a company's TrialConverted
+-- before its TrialLapsed - a lapse parked during an outage and redriven
+-- later always lands last. MarketingOutreachSignals therefore reports
+-- "converted" over "lapsed" whatever their arrival order, the same
+-- never-backwards rank TenantLifecycleIsMirrored uses. If helpdesk ever
+-- gains an active -> expired edge, this needs the source order carried
+-- in the payload instead.
 
 -- Resolved: the activity/marketing naming collision
 -- (`RecordEngagementDecline` as a command name in both contexts,

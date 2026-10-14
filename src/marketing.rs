@@ -250,9 +250,11 @@ impl CommandType for RecordEngagementDecline {
 /// folded into what a staff member deciding on a follow-up needs.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 pub struct MarketingSignalsState {
-    /// `"lapsed"` or `"converted"`, whichever of `TrialLapsed`/
-    /// `TrialConverted` came last - a company can lapse, reactivate and
-    /// lapse again, so neither alone says where it stands now. A plain
+    /// `"lapsed"` or `"converted"`: where the company stands in
+    /// helpdesk's lifecycle, which only ever moves forward (`trialing ->
+    /// expired -> active`, `active` terminal - `specs/
+    /// skilj-helpdesk.allium`). So `"converted"` wins over `"lapsed"`
+    /// whatever order the two arrive in, see `project()` below. A plain
     /// string, for the reason `helpdesk::TicketSummaryState::priority`
     /// gives.
     pub trial_status: Option<String>,
@@ -294,7 +296,20 @@ impl Projection for MarketingSignals {
     fn project(state: &mut Self::State, event: &Self::Event, _key: &str) {
         match event {
             MarketingEvent::TrialLapsed(p) => {
-                state.trial_status = Some("lapsed".into());
+                // The two lifecycle routes have their own cursors and
+                // retry state, so a company's `TrialConverted` can land
+                // before its `TrialLapsed`: a lapse parked during a
+                // marketing outage and redriven later always lands last,
+                // and an expire and reactivate within one route tick are
+                // routed concurrently (docs/cross-context-route-report-
+                // 2026-10-13.md). Helpdesk can't expire an active
+                // company, so a lapse never supersedes a conversion -
+                // the same "never backwards" rank
+                // `helpdesk::RecordTenantLifecycle` uses for the same
+                // problem. The lapse itself is still counted.
+                if state.trial_status.as_deref() != Some("converted") {
+                    state.trial_status = Some("lapsed".into());
+                }
                 state.last_lapsed_at = Some(p.lapsed_at.clone());
                 state.lapse_count += 1;
             }

@@ -204,7 +204,26 @@ fn company_engagement_counts_person_days_per_kind_and_keeps_the_latest_day() {
 }
 
 #[test]
-fn marketing_signals_track_the_latest_trial_outcome_and_count_each() {
+fn marketing_signals_read_lapsed_until_a_conversion_lands() {
+    use marketing::*;
+    skilj_test_fixture::projection::GivenEvents::<MarketingSignals>::new()
+        .event(MarketingEvent::TrialLapsed(TrialLapsedPayload {
+            company_id: "acme".into(),
+            lapsed_at: "2026-10-01".into(),
+        }))
+        .then(|state| {
+            assert_eq!(state.trial_status.as_deref(), Some("lapsed"));
+            assert_eq!(state.lapse_count, 1);
+            assert_eq!(state.conversion_count, 0);
+        });
+}
+
+/// The two lifecycle routes deliver independently, so a lapse can land
+/// after the conversion (a parked lapse redriven later always does - issue
+/// #29). Helpdesk can't expire an active company, so `converted` stands;
+/// the late lapse is still counted.
+#[test]
+fn marketing_signals_never_go_back_from_converted_and_count_each() {
     use marketing::*;
     let lapsed = |at: &str| {
         MarketingEvent::TrialLapsed(TrialLapsedPayload {
@@ -229,7 +248,7 @@ fn marketing_signals_track_the_latest_trial_outcome_and_count_each() {
             },
         ))
         .then(|state| {
-            assert_eq!(state.trial_status.as_deref(), Some("lapsed"));
+            assert_eq!(state.trial_status.as_deref(), Some("converted"));
             assert_eq!(state.lapse_count, 2);
             assert_eq!(state.last_lapsed_at.as_deref(), Some("2026-11-01"));
             assert_eq!(state.conversion_count, 1);
