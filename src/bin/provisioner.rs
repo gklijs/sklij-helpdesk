@@ -268,8 +268,21 @@ async fn consume(
         .query(&[("mode", "auto")])
         .bearer_auth(token)
         .send()
-        .await?
-        .error_for_status()?;
+        .await?;
+    if response.status() == reqwest::StatusCode::FORBIDDEN {
+        // Same stale-token contract as lifecycle-replicator's own
+        // consume: a 403 means the database was recreated under this
+        // binary (the bench harness seeds the template with one server,
+        // then runs the campaign against a copy). Fail loudly so the
+        // operator restarts this binary against the current database
+        // instead of logging `poll failed` every 5s forever.
+        eprintln!(
+            "provisioner: event token no longer valid (403) - the database was \
+             recreated or the token row deleted; restart this binary against the current database"
+        );
+        std::process::exit(1);
+    }
+    let response = response.error_for_status()?;
     let body: ConsumeResponse = response.json().await?;
     Ok(body
         .events

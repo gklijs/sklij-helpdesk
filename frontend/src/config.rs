@@ -25,8 +25,8 @@ pub const GRAPHQL_WS_URL: &str = "ws://localhost:8080/graphql";
 /// ticket call instead. This constant is still the correct answer for
 /// lifecycle traffic, and for the `TenantDirectory` read that resolution
 /// itself depends on. Naming it directly for a ticket call is the
-/// pre-cutover behaviour, and with `TICKET_ROUTING=tenant` the server
-/// refuses it - see `src/routing_guard.rs`.
+/// pre-cutover demo behaviour, and under the default tenant routing the
+/// server refuses it - see `src/routing_guard.rs`.
 pub const BOUNDED_CONTEXT: &str = "helpdesk";
 
 /// `specs/activity.allium`'s own bounded context - `Dashboard`'s own

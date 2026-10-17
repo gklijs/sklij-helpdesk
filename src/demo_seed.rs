@@ -226,7 +226,7 @@ impl SeedState {
 
     /// Phase 4 multi-tenant helper: looks up which company a ticket belongs
     /// to, so `server.rs`'s own seed loop can route commands for that ticket
-    /// to the company's own tenant context when `TICKET_ROUTING=tenant` (REST
+    /// to the company's own tenant context under the default tenant routing (REST
     /// routes by token, so the loop needs to pick the right token per
     /// company - see `DemoSeedTokenCache` in `src/bin/server.rs`).
     pub fn company_for_ticket(&self, ticket_id: &str) -> Option<&str> {
@@ -300,8 +300,8 @@ impl SeedAction {
     /// targets, either from the action itself (`CreateTicket` carries it
     /// directly) or by looking up the ticket in `SeedState` (every other
     /// action only has a `ticket_id`). `server.rs`'s own seed loop uses
-    /// this to pick the right per-company tenant token when
-    /// `TICKET_ROUTING=tenant`. Returns `None` for actions that don't
+    /// this to pick the right per-company tenant token under the default
+    /// tenant routing. Returns `None` for actions that don't
     /// carry or imply a company (currently none - every variant does, but
     /// this keeps the `Option` shape honest against future additions).
     pub fn company_id<'a>(&'a self, state: &'a SeedState) -> Option<&'a str> {

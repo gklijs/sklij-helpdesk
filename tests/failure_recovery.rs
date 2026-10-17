@@ -149,7 +149,7 @@ async fn spawn_server(database_url: &str, label: &str) -> Server {
         .env_remove("OTEL_EXPORTER_OTLP_ENDPOINT")
         .env_remove("OIDC_ISSUER_URL")
         .env_remove("SEED_DEMO_TRAFFIC")
-        .env_remove("TICKET_ROUTING")
+        .env("TICKET_ROUTING", "shared")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(std::fs::File::create(&logs.0[1]).unwrap())
@@ -245,7 +245,7 @@ fn spawn_consumer(
     command
         .envs(exports)
         .env_remove("OTEL_EXPORTER_OTLP_ENDPOINT")
-        .env_remove("TICKET_ROUTING")
+        .env("TICKET_ROUTING", "shared")
         .env_remove("SLACK_WEBHOOK_URL")
         .stdin(Stdio::null())
         .stdout(std::fs::File::create(&logs.0[0]).unwrap())

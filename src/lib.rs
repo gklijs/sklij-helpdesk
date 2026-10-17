@@ -27,6 +27,19 @@ pub mod sla;
 pub mod telemetry;
 pub mod tenant_access;
 
+/// The local-JWKS-shortcut test key the sibling binaries (provisioner,
+/// lifecycle-replicator, alerter) sign their superadmin JWTs with, as a
+/// ready-to-serve JWKS document.
+///
+/// `src/bin/server.rs` generates its own fresh keypair at startup for the
+/// JWTs it prints, but the siblings can't use that key - it never leaves
+/// the server process. So the server's own verified JWKS must trust this
+/// shared test key too; `src/bin/server.rs` prints this document at
+/// startup in local-shortcut mode for exactly that wiring. Same key
+/// material as `tests/support/mod.rs`'s `serve_jwks` (test-only copy of
+/// the same shortcut), never a real secret.
+pub const LOCAL_JWKS_TEST_JWKS: &str = "{\"keys\":[{\"kty\":\"RSA\",\"use\":\"sig\",\"alg\":\"RS256\",\"kid\":\"test-key-1\",\"n\":\"zx1RbFB4ll0mxv0wooNXE0BzU-hZ6GKGbTBI7w4kAK7Di_3RaDPaZhkTPQnxLUBjbpuE7Ipj7YCXnGsH3T51tLiQkZSBfcBpmHYdpmDQSsPI6scKeuuBnebqh-S-gOKTfG3xju_tp4g-qfLdHDXsmDndD7rGwBA3KcwlGZq-ikMjOYvP8JOaDvfIJ7afmaTI1GWmwA-kfA8oTCGZleuOY6OTTyRu87ks_t3ZipDWNPxl8_GML2drMKppjgDUWRx3zdb4D9snCtNlmeMoocehIrkAg7HnXQcPsYrfSkr0quhsJsJ1dalaTFTZUhhjnlV-7-yUN8_wTW0POeaerPxY4Q\",\"e\":\"AQAB\"}]}";
+
 /// This build's `SkiljBuilder::application_version` (docs/architecture.md
 /// §104 in the skilj repo), set by `src/bin/server.rs`. Five binaries and
 /// three bounded contexts share one database, so during a rolling deploy

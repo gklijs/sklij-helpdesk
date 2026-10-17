@@ -4,8 +4,8 @@
 //!
 //! The backend splits helpdesk traffic in two: company *lifecycle* is
 //! authoritative in one shared `helpdesk` context, while *Ticket* traffic
-//! is per-company and moves into that company's own tenant once the
-//! cutover is switched on server-side (`TICKET_ROUTING=tenant`). The
+//! is per-company and moves into that company's own tenant by default
+//! (unless the demo opts into `TICKET_ROUTING=shared`). The
 //! backend's own `routing.rs` owns that policy; this is the client half.
 //!
 //! ## Why the policy is duplicated rather than shared
