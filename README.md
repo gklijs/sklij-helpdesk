@@ -207,9 +207,9 @@ flowchart LR
 ```
 
 The other binaries are clients of `server`. Each one reads an event feed
-(dotted) and submits commands back (solid). Tickets still run in the
-shared `helpdesk` context unless `TICKET_ROUTING=tenant` (see
-`src/routing_guard.rs`). `alerter` finds each tenant through
+(dotted) and submits commands back (solid). Tickets run in each company's
+own tenant by default; `TICKET_ROUTING=shared` selects the single-context
+demo shape (see `src/routing_guard.rs`). `alerter` finds each tenant through
 `CompanyTenantProvisioned` and follows it as well.
 
 ```mermaid
@@ -510,8 +510,8 @@ silently absent:
 
 - **Real payment processing** — mocked on purpose; this is a showcase,
   not a billing product.
-- **Ticket routing into tenants — Phase 4 is complete** — the spec calls for each
-  company to be its own skilj tenant (bounded context), stamped from a template
+- **Ticket routing into tenants — Phase 4 is complete and is the default**
+  — the spec calls for each company to be its own skilj tenant (bounded
   context), stamped from a template via
   `CreateBoundedContextFromTemplate`. That mechanism was first proven in
   isolation by `tests/multi_tenant_provisioning.rs` (stamps a real
@@ -543,10 +543,11 @@ silently absent:
 
   Ticket traffic is now *routed* at tenants, end to end, with reads and
   writes moving together:
-  - **Routing decision** (`src/routing.rs`): pure, unit-tested, opt-in
-    via `TICKET_ROUTING=tenant`. Ticket traffic follows a company into
+  - **Routing decision** (`src/routing.rs`): pure, unit-tested, and
+    per-company by default. Ticket traffic follows a company into
     its tenant; lifecycle commands never do; a company with no tenant
-    falls back to the shared context.
+    falls back to the shared context. `TICKET_ROUTING=shared` is the
+    explicit demo/test opt-out.
   - **Access reconciliation** (`src/tenant_access.rs`, run on an
     interval by `server.rs`): projects each company's *company-scoped*
     `RoleAccessMapping`s from the shared context into its tenant, in both
@@ -565,7 +566,7 @@ silently absent:
     action is gated on it, so a write can't slip out against an unknown
     context.
   - **Server-side enforcement** (`src/routing_guard.rs`, mounted on the
-    GraphQL router only when `TICKET_ROUTING=tenant`): the client half is
+    GraphQL router unless `TICKET_ROUTING=shared`): the client half is
     not trusted, because `skilj-graphql` takes `boundedContext` as a
     caller-supplied argument. The guard *refuses* ticket traffic naming
     the shared context for a company that has a tenant, rather than
@@ -591,12 +592,12 @@ silently absent:
      per-tenant `TicketRated` event read token, and polls each tenant's own
      feed — so a `RateTicket` routed to a tenant still records its rating as
      `skilj_helpdesk_ticket_ratings_total`, not just in the shared context.
-   - **Demo seed traffic** (`run_demo_seed_loop` in `src/bin/server.rs`): when
-     `TICKET_ROUTING=tenant`, resolves each `SeedAction`'s `company_id`
-     (`demo_seed::SeedAction::company_id`, backed by `SeedState::
-     company_for_ticket`) and mints per-tenant REST `CreateTicket`/etc.
-     tokens on demand, so the fake load exercises the same per-tenant path
-     real traffic takes — instead of always hitting the shared context.
+  - **Demo seed traffic** (`run_demo_seed_loop` in `src/bin/server.rs`): resolves
+    each `SeedAction`'s `company_id`
+    (`demo_seed::SeedAction::company_id`, backed by `SeedState::
+    company_for_ticket`) and mints per-tenant REST `CreateTicket`/etc.
+    tokens on demand, so the fake load exercises the same per-tenant path
+    real traffic takes — instead of always hitting the shared context.
 
   Two deliberate properties of the guard, both tested:
   - It **fails open** on a body it cannot parse. A guard that
@@ -622,14 +623,14 @@ silently absent:
   resistant name instead; already-provisioned tenants are untouched
   because nothing re-derives a recorded tenant's name.
 
-   Still open (limitation, not in-progress): `staff-lead`'s unrestricted
-   (`scope: None`) cross-company visibility only works while everything
-   shares one context — after a cutover it needs a mapping per tenant, and
-   no single skilj query can span tenants. The reconciler deliberately
-   leaves `scope: None` grants alone rather than quietly narrowing a
-   cross-company staff grant to one company, so a staff-lead who resolves
-   across all companies only sees tickets in the shared context post-cutover
-   until an explicit per-tenant mapping is granted.
+  Still open (limitation, not in-progress): `staff-lead`'s unrestricted
+  (`scope: None`) cross-company visibility only works while everything
+  shares one context — in tenant-routed mode it needs a mapping per tenant, and
+  no single skilj query can span tenants. The reconciler deliberately
+  leaves `scope: None` grants alone rather than quietly narrowing a
+  cross-company staff grant to one company, so a staff-lead who resolves
+  across all companies only sees tickets in the shared context in the
+  shared-context demo until an explicit per-tenant mapping is granted.
 - **A backend-for-frontend / GraphQL schema beyond what's registered**
   — the frontend talks to skilj-graphql's own auto-generated schema
   directly; there's no hand-written GraphQL layer.

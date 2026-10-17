@@ -94,7 +94,7 @@ impl Guarded {
 /// recognised as ticket traffic. `Unknown` rather than a guess: a
 /// projection this list doesn't know about is not refused, because
 /// refusing an unrecognised name would let a new projection in
-/// `helpdesk/` break reads the moment the cutover is switched on.
+/// `helpdesk/` break reads the moment tenant routing is on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NameClass {
     Ticket,
@@ -628,9 +628,9 @@ const MAX_INSPECTED_BODY: usize = 64 * 1024;
 /// Enforce the ticket routing decision on inbound GraphQL requests.
 ///
 /// Mounted in front of `skilj`'s own GraphQL router (see `server.rs`),
-/// and only when `TICKET_ROUTING=tenant` - with the cutover off this
-/// returns the request untouched without even buffering it, so a
-/// deployment that has not opted in pays nothing.
+/// unless the shared-context demo mode is selected with
+/// `TICKET_ROUTING=shared` - in that mode this returns the request
+/// untouched without even buffering it, so a demo pays nothing.
 ///
 /// The body has to be buffered to be read and then handed on unchanged,
 /// so it is rebuilt from the bytes taken. Only a `POST` to a path
@@ -842,9 +842,11 @@ pub struct GuardState {
 
 /// Read `TICKET_ROUTING` once, at startup.
 ///
-/// Opt-in, exactly as `routing::RoutingMode::from_env_value` defines it:
-/// unset, empty or unrecognised all mean the pre-cutover behaviour, so
-/// a typo cannot accidentally cut a deployment over.
+/// Per-company routing is the default; `TICKET_ROUTING=shared` is the
+/// explicit demo/test opt-out, exactly as
+/// `routing::RoutingMode::from_env_value` defines it. Unset, empty,
+/// `tenant`, or an unrecognised value all mean the production shape, so
+/// a typo cannot silently put every company back into the shared context.
 pub fn mode_from_env() -> RoutingMode {
     RoutingMode::from_env_value(std::env::var("TICKET_ROUTING").ok().as_deref())
 }

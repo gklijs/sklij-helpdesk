@@ -123,6 +123,22 @@ use std::time::Duration;
 
 const POLL_INTERVAL: Duration = Duration::from_secs(5);
 
+/// `CompanySignedUp` -> `COMPANY_SIGNED_UP_TOKEN`: the env-var half of
+/// `Config::from_env`'s `{event}_TOKEN` convention, converting each
+/// CamelCase event type to UPPER_SNAKE_CASE. `to_uppercase` alone would
+/// give `COMPANYSIGNEDUP_TOKEN`, which matches neither what the server
+/// prints nor what the provisioner's own `COMPANY_SIGNED_UP_TOKEN` uses.
+fn to_env_name(event_type: &str) -> String {
+    let mut out = String::new();
+    for (i, ch) in event_type.chars().enumerate() {
+        if ch.is_ascii_uppercase() && i > 0 {
+            out.push('_');
+        }
+        out.push(ch.to_ascii_uppercase());
+    }
+    out
+}
+
 /// One shared-context event type this binary mirrors, and the lifecycle
 /// state it implies. The mapping is the whole content of this binary:
 /// `CompanySignedUp` means trialing, `CompanyActivated` means active,
@@ -217,11 +233,13 @@ impl Config {
                 (
                     event_type.to_string(),
                     // `COMPANY_SIGNED_UP_TOKEN` for `CompanySignedUp`, and
-                    // so on - one env var per mirrored event type, named
-                    // after it, so `MIRRORED_EVENTS` staying the single
-                    // list of what's mirrored also stays the single list
-                    // of what's configured.
-                    required(&format!("{}_TOKEN", event_type.to_uppercase())),
+                    // so on - one env var per mirrored event type, the
+                    // type name converted from CamelCase to
+                    // UPPER_SNAKE_CASE with a `_TOKEN` suffix, so
+                    // `MIRRORED_EVENTS` staying the single list of what's
+                    // mirrored also stays the single list of what's
+                    // configured.
+                    required(&format!("{}_TOKEN", to_env_name(event_type))),
                 )
             })
             .collect();
@@ -322,6 +340,10 @@ async fn main() {
     );
 
     loop {
+        // `consume` exits the process on a 403 (stale token row - the
+        // database was recreated under this binary), so a `tick` error
+        // here is always a transient transport/decoding failure worth
+        // retrying, never a permanent misconfiguration.
         if let Err(e) = tick(&client, &config, &mut tokens).await {
             eprintln!("lifecycle-replicator: poll failed, will retry: {e}");
             tracing::warn!(error = %e, "lifecycle-replicator: poll failed, will retry");
@@ -475,8 +497,24 @@ async fn consume(
         .query(&[("mode", "auto")])
         .bearer_auth(token)
         .send()
-        .await?
-        .error_for_status()?;
+        .await?;
+    if response.status() == reqwest::StatusCode::FORBIDDEN {
+        // The token's own event row was deleted (operator cleared the
+        // consumable events table, or the database was recreated under a
+        // running binary - as the bench harness does between template
+        // seeding and the run). skilj's consume endpoint answers unknown
+        // tokens with 403, not an empty feed; without this the binary
+        // logs `poll failed` every 5s forever instead of recovering.
+        // Re-minting isn't possible here (event tokens are minted by the
+        // server at startup) - the operator must restart this binary
+        // against the fresh database. Fail loudly so that happens.
+        eprintln!(
+            "lifecycle-replicator: event token no longer valid (403) - the database was \
+             recreated or the token row deleted; restart this binary against the current database"
+        );
+        std::process::exit(1);
+    }
+    let response = response.error_for_status()?;
     let body: ConsumeResponse = response.json().await?;
     Ok(body
         .events

@@ -114,22 +114,27 @@ pub fn classify(command_type_name: &str) -> Result<CommandClass, UnclassifiedCom
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RoutingMode {
     /// Every company, tenant or not, is served from the shared context -
-    /// the behaviour before the cutover, and the safe default.
+    /// explicit demo/test mode, selected with `TICKET_ROUTING=shared`.
     Shared,
     /// Ticket traffic follows a company into its tenant when one exists,
-    /// and falls back to the shared context when it doesn't.
+    /// and falls back to the shared context when it doesn't. The default:
+    /// every company owns its bounded context, and only a deployment that
+    /// asks for the demo shape shares one.
     Tenant,
 }
 
 impl RoutingMode {
-    /// `TICKET_ROUTING=tenant` opts in; anything else (including unset)
-    /// stays on `Shared`. Deliberately opt-*in* rather than opt-out: the
-    /// cutover moves where a company's existing history lives, so the
-    /// safe state has to be the one you get by doing nothing.
+    /// Only `TICKET_ROUTING=shared` selects the shared-context demo mode;
+    /// unset, empty, `tenant`, or an unrecognised value all mean
+    /// `Tenant`. Per-company tenants are the production shape, so the
+    /// safe state is the one you get by doing nothing; a demo has to opt
+    /// out explicitly, and an unrecognised value can only leave a
+    /// company in its own tenant (or the shared fallback until that
+    /// tenant is provisioned), never move its history somewhere new.
     pub fn from_env_value(value: Option<&str>) -> Self {
         match value {
-            Some(v) if v.eq_ignore_ascii_case("tenant") => RoutingMode::Tenant,
-            _ => RoutingMode::Shared,
+            Some(v) if v.eq_ignore_ascii_case("shared") => RoutingMode::Shared,
+            _ => RoutingMode::Tenant,
         }
     }
 }
@@ -446,15 +451,19 @@ mod tests {
     }
 
     #[test]
-    fn the_mode_is_opt_in() {
-        assert_eq!(RoutingMode::from_env_value(None), RoutingMode::Shared);
-        assert_eq!(RoutingMode::from_env_value(Some("")), RoutingMode::Shared);
+    fn tenant_routing_is_the_default_and_shared_is_the_demo_opt_out() {
+        assert_eq!(RoutingMode::from_env_value(None), RoutingMode::Tenant);
+        assert_eq!(RoutingMode::from_env_value(Some("")), RoutingMode::Tenant);
         assert_eq!(
             RoutingMode::from_env_value(Some("nonsense")),
-            RoutingMode::Shared
+            RoutingMode::Tenant
         );
         assert_eq!(
             RoutingMode::from_env_value(Some("shared")),
+            RoutingMode::Shared
+        );
+        assert_eq!(
+            RoutingMode::from_env_value(Some("SHARED")),
             RoutingMode::Shared
         );
         assert_eq!(

@@ -105,7 +105,7 @@ fn emails_become_tickets_and_replies_through_the_nats_bridge() {
                 .env("SKILJ_BASE_URL", &base_url)
                 .env("CREATE_TICKET_TOKEN", &create_ticket)
                 .env("CUSTOMER_RESPONDS_TO_TICKET_TOKEN", &customer_responds)
-                .env_remove("TICKET_ROUTING")
+                .env("TICKET_ROUTING", "shared")
                 .stdin(std::process::Stdio::null())
                 // Tracing goes to stdout. Both go to one file, left
                 // behind in the temp dir only if the test fails.

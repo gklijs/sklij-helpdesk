@@ -23,8 +23,10 @@
 //!   CREATE_TICKET_TOKEN               - CommandToken ("id.secret")
 //!   CUSTOMER_RESPONDS_TO_TICKET_TOKEN - CommandToken ("id.secret")
 //!   Both tokens are printed by `src/bin/server.rs` on every run.
-//!   TICKET_ROUTING                    - refuses to start when "tenant";
-//!                                       see email_channel.rs's "Known gaps"
+//!   TICKET_ROUTING                    - must be "shared"; the default
+//!                                       per-company tenant routing is
+//!                                       not supported (see
+//!                                       email_channel.rs's "Known gaps")
 //!
 //! To try it by hand against `cargo run --bin server` and a local
 //! `nats-server -js`:
@@ -74,9 +76,11 @@ async fn main() -> Result<(), async_nats::Error> {
         == RoutingMode::Tenant
     {
         return Err(
-            "TICKET_ROUTING=tenant is not supported: this bridge holds one token per \
-                    command, which names the shared `helpdesk` context, and would split each \
-                    company's tickets across two contexts (src/email_channel.rs, \"Known gaps\")"
+            "per-company tenant routing is on, but this bridge is shared-context only: it \
+                    holds one token per command, which names the shared `helpdesk` context, and \
+                    would split each company's tickets across two contexts \
+                    (src/email_channel.rs, \"Known gaps\"). Set TICKET_ROUTING=shared for the \
+                    demo/email-channel deployment, or leave the bridge out of a tenant-routed one"
                 .into(),
         );
     }
