@@ -605,7 +605,7 @@ fn postgres_restart_under_load_recovers_and_consumers_resume_from_cursors() {
         // Its own cluster, not `support::test_db()`'s, and deliberately
         // not `DATABASE_URL` either: that one is shared with every other
         // test binary, which mustn't see Postgres go away.
-        let mut postgres = postgresql_embedded::PostgreSQL::default();
+        let mut postgres = support::embedded_postgres();
         if let Err(e) = postgres.setup().await {
             eprintln!("skipping: embedded PostgreSQL setup failed: {e}");
             return;

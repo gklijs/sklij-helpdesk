@@ -66,11 +66,24 @@ async fn connect_and_migrate(database_url: &str, label: &str) -> Option<Pool> {
     Some(pool)
 }
 
+/// An embedded cluster on a pinned PostgreSQL release, not the default
+/// "latest": from 18.6.1 on the theseus binaries ship `share/timezone`
+/// with `UTC` as a tar hard link, which postgresql_archive's extractor
+/// silently skips - so sqlx's `TimeZone=UTC` startup parameter is then
+/// refused with "invalid value for parameter \"TimeZone\"".
+pub fn embedded_postgres() -> postgresql_embedded::PostgreSQL {
+    let settings = postgresql_embedded::Settings {
+        version: postgresql_embedded::VersionReq::parse("=18.6.0").unwrap(),
+        ..Default::default()
+    };
+    postgresql_embedded::PostgreSQL::new(settings)
+}
+
 async fn provision() -> Option<TestDb> {
     let database_url = if let Ok(database_url) = std::env::var("DATABASE_URL") {
         database_url
     } else {
-        let mut server = postgresql_embedded::PostgreSQL::default();
+        let mut server = embedded_postgres();
         if let Err(e) = server.setup().await {
             eprintln!(
                 "skipping: DATABASE_URL not set and embedded PostgreSQL setup failed \
