@@ -138,6 +138,13 @@ echo
 
 echo "dev.sh: starting the server..."
 echo
+# The demo keeps every company in the shared `helpdesk` context: this
+# script starts no provisioner/lifecycle-replicator pair, so a
+# tenant-routed company would have nowhere to go until those ran. Export
+# it explicitly because per-company tenant routing is the production
+# default; override with TICKET_ROUTING=tenant if those binaries are
+# running alongside.
+export TICKET_ROUTING="${TICKET_ROUTING:-shared}"
 # Backgrounded, then `wait`ed on - not run directly in the foreground.
 # `wait` (unlike a synchronous foreground command) returns as soon as a
 # trapped signal arrives, which is what makes Ctrl+C/`kill -TERM` on

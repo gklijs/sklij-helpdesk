@@ -24,10 +24,11 @@
 //! lockstep. `SEED_DEMO_COMPANIES` (default `3`) spreads the tickets
 //! over more companies, for a load test of a company-keyed partitioned
 //! projection. Unset (the default), nothing about this file's behaviour
-//! changes. When `TICKET_ROUTING=tenant` is also set, each worker routes
+//! changes. Ticket traffic is per-company by default; each worker routes
 //! ticket commands to the company's own tenant (discovered from
 //! `CompanyTenantProvisioned` and per-tenant tokens minted via GraphQL),
 //! so the demo exercises the same per-tenant path real traffic takes.
+//! `TICKET_ROUTING=shared` is the explicit demo opt-out.
 //!
 //! Needs `DATABASE_URL` pointing at a real Postgres (`PORT` optionally
 //! overrides the default `8080`; `BIND_ADDR` the default `127.0.0.1` -
@@ -261,6 +262,23 @@ async fn serve_local_jwks(jwks: serde_json::Value) -> String {
     format!("http://{addr}/jwks.json")
 }
 
+/// `CompanySignedUp` -> `COMPANY_SIGNED_UP`: the env-var half of the
+/// server-printed `{event}_TOKEN` convention the sibling binaries consume
+/// (see provisioner's own `COMPANY_SIGNED_UP_TOKEN` and
+/// lifecycle-replicator's own `to_env_name`, which must stay in sync with
+/// this one). `to_uppercase` alone would give `COMPANYSIGNEDUP_TOKEN`,
+/// matching nothing.
+fn to_env_name(event_type: &str) -> String {
+    let mut out = String::new();
+    for (i, ch) in event_type.chars().enumerate() {
+        if ch.is_ascii_uppercase() && i > 0 {
+            out.push('_');
+        }
+        out.push(ch.to_ascii_uppercase());
+    }
+    out
+}
+
 /// CORS policy for the demo server. By default, only the frontend's own dev
 /// server origin is allowed (`http://localhost:8081` and `http://127.0.0.1:8081`).
 /// `CORS_ALLOWED_ORIGINS` can be set to a comma-separated list to override.
@@ -338,7 +356,7 @@ const PROVISIONER_EVENT_TYPES: &[&str] = &["CompanySignedUp"];
 /// at all.
 ///
 /// `CompanyTenantProvisioned` is in the same set so the alerter can
-/// discover tenants when `TICKET_ROUTING=tenant` is on - see that
+/// discover tenants under the default tenant routing - see that
 /// config's own doc comment in `src/bin/alerter.rs`. It is *not* one of
 /// the per-tenant event types the alerter mints (the alerter's own
 /// `ALERTER_EVENT_TYPES` constant in that binary lists only the six
@@ -644,7 +662,7 @@ async fn run_csat_metrics_loop(client: &reqwest::Client, base_url: &str, token: 
     }
 }
 
-/// Phase 4 multi-tenant CSAT config: when `TICKET_ROUTING=tenant` is set,
+/// Phase 4 multi-tenant CSAT config: under the default tenant routing,
 /// `TicketRated` events live in per-company tenant contexts, not just the
 /// shared `helpdesk` one. This struct carries the extra wiring the CSAT loop
 /// needs to discover and poll those tenant feeds:
@@ -937,8 +955,8 @@ async fn run_multi_tenant_csat_loop(
 /// Phase 4 multi-tenant demo seed tokens: discovers per-company tenants
 /// (consuming `CompanyTenantProvisioned` from the shared context) and mints
 /// per-tenant REST `createCommandToken` values for each tenant, so the demo
-/// seed loop can route ticket commands into the right tenant when
-/// `TICKET_ROUTING=tenant`. Follows the same lazy-discover-and-cache shape
+/// seed loop can route ticket commands into the right tenant under the
+/// default tenant routing. Follows the same lazy-discover-and-cache shape
 /// `src/bin/alerter.rs`'s own `TenantTokenCache` uses (deliberately
 /// duplicated across binaries, same convention the test key material
 /// follows) - REST routes by token, so each tenant needs its own token set,
@@ -956,7 +974,7 @@ struct DemoSeedTokenCache {
 }
 
 /// The ticket command types the demo seed loop fires - all of which must
-/// route to the tenant, not the shared context, when `TICKET_ROUTING=tenant`.
+/// route to the tenant, not the shared context, under tenant routing.
 /// Used to pre-mint per-tenant tokens for each discovered tenant in one
 /// batch (one GraphQL `createCommandToken` mutation per type per tenant),
 /// rather than minting them one at a time on first use inside the seed loop.
@@ -1283,7 +1301,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(url) => (url.clone(), format!("{url}/keys"), DEX_AUDIENCE, None),
         None => {
             let kp = Arc::new(GeneratedKeyPair::generate());
-            let url = serve_local_jwks(kp.jwks.clone()).await;
+            // Serve BOTH keys from the local JWKS endpoint: the fresh one
+            // (for the JWTs printed below) and the shared test key (for
+            // the sibling binaries' own self-signed JWTs - they can't use
+            // the fresh key, which never leaves this process). skilj's
+            // JwksCache is keyed by kid, so one endpoint serving two keys
+            // is all it takes for both `skilj-helpdesk-rs256-01` and
+            // `test-key-1` JWTs to verify. Without the test key, every
+            // sibling-signed JWT fails `unknown_signing_key` and the whole
+            // provision -> mirror -> route path is dead (found by the
+            // tenant-scaling bench: the provisioner and
+            // lifecycle-replicator could do nothing against a fresh
+            // server).
+            let mut both = kp.jwks.clone();
+            let test_key: serde_json::Value =
+                serde_json::from_str(skilj_helpdesk::LOCAL_JWKS_TEST_JWKS)
+                    .expect("LOCAL_JWKS_TEST_JWKS is a well-formed JWKS document");
+            both["keys"]
+                .as_array_mut()
+                .expect("generated JWKS has a keys array")
+                .extend(test_key["keys"].as_array().unwrap().iter().cloned());
+            let url = serve_local_jwks(both).await;
             (TEST_ISSUER.to_string(), url, TEST_AUDIENCE, Some(kp))
         }
     };
@@ -1654,8 +1692,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     println!("  cargo run --bin alerter");
     println!();
-    println!("  # Phase 4: multi-tenant mode (TICKET_ROUTING=tenant).");
-    println!("  # When the cutover is on, the alerter discovers per-company");
+    println!("  # Phase 4: multi-tenant mode (TICKET_ROUTING is not shared).");
+    println!("  # The alerter discovers per-company");
     println!("  # tenants from CompanyTenantProvisioned, then mints its own");
     println!("  # per-tenant tokens via GraphQL using this superadmin subject.");
     println!(
@@ -1694,7 +1732,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     for event_type in REPLICATOR_EVENT_TYPES {
         println!(
             "  export {}_TOKEN={}",
-            event_type.to_uppercase(),
+            to_env_name(event_type),
             replicator_event_tokens[*event_type]
         );
     }
@@ -1779,16 +1817,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     //
     // A `from_fn_with_state` layer on the GraphQL router rather than on
     // the merged `app`, so it cannot slow down or interfere with the
-    // REST surface or anything else merged in later. With the cutover
-    // off (the default) it short-circuits without buffering the body at
-    // all - see `routing_guard::enforce_graphql_routing`.
+    // REST surface or anything else merged in later. In the shared-context
+    // demo mode (`TICKET_ROUTING=shared`) it short-circuits without
+    // buffering the body at all - see
+    // `routing_guard::enforce_graphql_routing`.
     let routing_mode = routing_guard::mode_from_env();
     let graphql = if routing_mode == RoutingMode::Tenant {
         println!(
-            "\nticket routing is ON (TICKET_ROUTING=tenant): each company's Ticket traffic is \
-             served from that company's own tenant, and GraphQL traffic naming the shared \
-             {BOUNDED_CONTEXT:?} context for a company that has a tenant is refused. Company \
-             lifecycle traffic stays shared."
+            "\nticket routing is ON: each company's Ticket traffic is served from that \
+             company's own tenant, and GraphQL traffic naming the shared {BOUNDED_CONTEXT:?} \
+             context for a company that has a tenant is refused. Company lifecycle traffic \
+             stays shared. Set TICKET_ROUTING=shared for the single-context demo shape."
         );
         let guard_state = Arc::new(GuardState {
             pool: pool.clone(),
@@ -1831,7 +1870,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let client = reqwest::Client::new();
         tokio::spawn(async move { run_csat_metrics_loop(&client, &base_url, &token).await });
 
-        // Phase 4: when TICKET_ROUTING=tenant, TicketRated events also
+        // Phase 4: under the default tenant routing, TicketRated events also
         // land in per-company tenant contexts. This second loop discovers
         // those tenants from CompanyTenantProvisioned and polls each
         // tenant's own TicketRated feed - so a RateTicket command routed
@@ -1926,7 +1965,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         let seed_base_url = format!("http://localhost:{port}");
         let seed_tokens = command_tokens.clone();
-        // Phase 4: when TICKET_ROUTING=tenant, the demo seed also needs a
+        // Phase 4: under tenant routing, the demo seed also needs a
         // per-company tenant token cache so ticket commands route to the
         // right tenant context (REST routes by token, so a shared token
         // would always hit the shared `helpdesk` context).
@@ -2071,7 +2110,7 @@ async fn run_demo_seed_loop(
         tokio::time::sleep(interval).await;
         let action = demo_seed::next_action(&state, &mut rng);
         let (command_type_name, payload) = command_and_payload(&action);
-        // Phase 4: when TICKET_ROUTING=tenant, resolve the per-company
+        // Phase 4: under tenant routing, resolve the per-company
         // tenant token for this action's company instead of the always-
         // shared one. Token resolution is itself async (tenant discovery +
         // mint), so this only happens on the multi-tenant path.

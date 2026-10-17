@@ -52,8 +52,8 @@
 //! everything. `engagement-watcher.rs` has the identical fix, for the
 //! identical reason, over its own "gone quiet" sweep.
 //!
-//! **Phase 4: multi-tenant awareness.** When `TICKET_ROUTING=tenant`
-//! is on, ticket events live in per-company tenant contexts, not in the
+//! **Phase 4: multi-tenant awareness.** Under the default tenant
+//! routing, ticket events live in per-company tenant contexts, not in the
 //! shared `helpdesk` context. The alerter now discovers tenants by
 //! reading `CompanyTenantProvisioned` events off the shared context's
 //! own REST feed (which is why `CompanyTenantProvisioned` carries
@@ -96,18 +96,18 @@
 //!   *shared* `helpdesk` context - they cover companies without a
 //!   tenant. Per-tenant tokens are minted on demand and cached in
 //!   memory.
-//!   TICKET_ROUTING                - optional; set to "tenant" to enable
-//!                                  Phase 4 multi-tenant discovery and
-//!                                  polling. Requires the two tokens
-//!                                  below.
-//!   COMPANY_TENANT_PROVISIONED_TOKEN - optional; required when
-//!                                  TICKET_ROUTING=tenant. EventReadToken
+//!   TICKET_ROUTING                - optional; defaults to per-company
+//!                                  tenant routing. Set to "shared" for
+//!                                  the single-context demo. Tenant mode
+//!                                  requires the two tokens below.
+//!   COMPANY_TENANT_PROVISIONED_TOKEN - optional; required for tenant
+//!                                  routing. EventReadToken
 //!                                  for `CompanyTenantProvisioned` on
 //!                                  the shared context, used to discover
 //!                                  which companies have been provisioned
 //!                                  a tenant.
-//!   ALERTER_SUPERADMIN_SUBJECT    - optional; required when
-//!                                  TICKET_ROUTING=tenant. The bootstrap
+//!   ALERTER_SUPERADMIN_SUBJECT    - optional; required for tenant
+//!                                  routing. The bootstrap
 //!                                  admin Role's own `external_subject`
 //!                                  (same one `server.rs` prints for the
 //!                                  provisioner and lifecycle-replicator),
@@ -241,7 +241,7 @@ struct Config {
     /// `None` when `SLACK_WEBHOOK_URL` is unset - `send_alert` below
     /// then stays console-only, exactly the original behaviour.
     slack_webhook_url: Option<String>,
-    /// `Some` when `TICKET_ROUTING=tenant` *and* `ALERTER_SUPERADMIN_SUBJECT`
+    /// `Some` when tenant routing is on *and* `ALERTER_SUPERADMIN_SUBJECT`
     /// and `COMPANY_TENANT_PROVISIONED_TOKEN` are set - enables Phase 4
     /// multi-tenant discovery and polling. `None` otherwise, and the
     /// alerter reads only the shared context, exactly as before Phase 4.
@@ -441,7 +441,7 @@ async fn main() {
     );
     if config.multi_tenant.is_some() {
         println!(
-            "alerter: multi-tenant mode ON (TICKET_ROUTING=tenant) - discovering and polling per-company \
+            "alerter: multi-tenant mode ON - discovering and polling per-company \
              tenant feeds alongside the shared context"
         );
     }

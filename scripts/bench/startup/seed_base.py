@@ -65,7 +65,11 @@ def settle_deadlines():
     """settle.py watches sequences and projection cursors, not deadline
     cursors - and skilj's schedule/cancel loops fall far behind a burst
     (they catch up at ~130 source events/s), so idle on until every
-    deadline cursor has stopped moving for 30s."""
+    deadline cursor has stopped moving for 30s. Also waits out the
+    server's own 60s shutdown-drain timeout: stopping the traffic server
+    while commands are still in flight makes Server::stop wait the full
+    60s for them (by design - see server.rs), so this runs after that
+    stop has already returned."""
     server = Server(BIN, DB, PORT, f"{LOGS}/seed-deadlines.log")
     q = ("SELECT string_agg(last_dispatched_sequence::text, ',' ORDER BY cursor_owner) "
          "FROM bc_helpdesk.deadline_cursors")
