@@ -537,28 +537,41 @@ impl CommandType for CloseTicket {
         payload: &Self::Payload,
         decision: &Decision<'_, Self::Event>,
     ) -> CommandDecision {
+        let due_at = decision.deadline().map(|d| d.scheduled_at);
         decide_on_ticket(decision, &payload.ticket_id, |facts| {
-            Self::decide_on(payload, facts)
+            Self::decide_on(payload, facts, due_at)
         })
     }
 }
 
 impl CloseTicket {
-    fn decide_on(payload: &CloseTicketPayload, facts: &TicketFacts) -> CommandDecision {
+    /// `due_at` is the auto-close deadline's `scheduled_at`; `None` when
+    /// submitted by hand.
+    fn decide_on(
+        payload: &CloseTicketPayload,
+        facts: &TicketFacts,
+        due_at: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> CommandDecision {
         match facts.status {
             None => CommandDecision::Rejected {
                 reason: format!("ticket {} does not exist", payload.ticket_id),
                 kind: "ticket_not_found".into(),
             },
-            Some(TicketStatus::Resolved) => CommandDecision::Accepted {
-                events: vec![EventSpec {
-                    event_type: "TicketClosed".into(),
-                    payload: serde_json::json!({
-                        "ticket_id": payload.ticket_id,
-                        "company_id": facts.company_id(),
-                    }),
-                }],
-            },
+            Some(TicketStatus::Resolved) => {
+                let mut closed = serde_json::json!({
+                    "ticket_id": payload.ticket_id,
+                    "company_id": facts.company_id(),
+                });
+                if let Some(due_at) = due_at {
+                    closed["due_at"] = due_at.to_rfc3339().into();
+                }
+                CommandDecision::Accepted {
+                    events: vec![EventSpec {
+                        event_type: "TicketClosed".into(),
+                        payload: closed,
+                    }],
+                }
+            }
             Some(other) => CommandDecision::Rejected {
                 reason: format!(
                     "ticket {} is {other:?}, not resolved - only a resolved ticket auto-closes",

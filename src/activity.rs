@@ -14,9 +14,10 @@
 //! `src/helpdesk/mod.rs`'s own module doc comment already establishes -
 //! `company_id` is helpdesk's own caller-supplied `Company.company_id`
 //! (see that file), `person_subject` is whichever of `Customer`/
-//! `StaffMember`'s own `external_subject` the caller is, and `day`/
-//! `flagged_at` are RFC 3339 strings the caller supplies rather than a
-//! typed timestamp this crate reformats - see `specs/activity.allium`'s
+//! `StaffMember`'s own `external_subject` the caller is, and `day` is an
+//! RFC 3339 string the caller supplies rather than a typed timestamp
+//! this crate reformats (`flagged_at` is stamped by `decide_with` from
+//! `Decision::now`) - see `specs/activity.allium`'s
 //! own comment on `DailyActivityRecorded.day` for why (no dedicated Date
 //! primitive, calendar-day granularity, caller-truncated).
 
@@ -24,7 +25,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use skilj::{auto_register, CommandType, EventType, Projection};
 use skilj_core::event_store::Event;
-use skilj_core::plugin::BoundedContextEvent;
+use skilj_core::plugin::{BoundedContextEvent, Decision};
 use skilj_core::shared::{CommandDecision, EventSpec, QueryItemMapping, TagMapping};
 
 use crate::helpdesk::STAFF_CAPABILITY;
@@ -210,7 +211,6 @@ impl CommandType for RecordDailyActivity {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct RecordEngagementDeclinePayload {
     pub company_id: String,
-    pub flagged_at: String,
 }
 
 pub struct RecordEngagementDecline;
@@ -238,8 +238,14 @@ impl CommandType for RecordEngagementDecline {
     fn rest_trigger_allowed() -> bool {
         true
     }
-    fn decide(payload: &Self::Payload, matching_events: &[Self::Event]) -> CommandDecision {
-        let already_flagged = matching_events.iter().any(|e| {
+    /// `flagged_at` is the submission's own instant (`Decision::now`,
+    /// skilj 0.2.0) - the watcher submits this the moment it finds the
+    /// company quiet, so the caller no longer supplies it.
+    fn decide_with(
+        payload: &Self::Payload,
+        decision: &Decision<'_, Self::Event>,
+    ) -> CommandDecision {
+        let already_flagged = decision.events().iter().any(|e| {
             matches!(e, ActivityEvent::CompanyEngagementDeclined(p) if p.company_id == payload.company_id)
         });
         if already_flagged {
@@ -253,7 +259,7 @@ impl CommandType for RecordEngagementDecline {
                 event_type: "CompanyEngagementDeclined".into(),
                 payload: serde_json::json!({
                     "company_id": payload.company_id,
-                    "flagged_at": payload.flagged_at,
+                    "flagged_at": decision.now().to_rfc3339(),
                 }),
             }],
         }

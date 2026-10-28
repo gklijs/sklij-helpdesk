@@ -216,10 +216,10 @@ fn engagement_decline_is_flagged_once_and_rejected_on_repeat() {
             "CompanyEngagementDeclined",
         )
         .await;
-        let flagged_at = Utc::now().trunc_subsecs(6);
-
-        let payload =
-            serde_json::json!({ "company_id": company_id, "flagged_at": flagged_at.to_rfc3339() });
+        // `flagged_at` is stamped by the command's own `decide_with`
+        // (skilj 0.2.0's `Decision::now`), so it falls within the call.
+        let before = Utc::now();
+        let payload = serde_json::json!({ "company_id": company_id });
         let response = trigger(&router, &record_decline, payload.clone()).await;
         assert!(
             accepted(&response),
@@ -235,7 +235,14 @@ fn engagement_decline_is_flagged_once_and_rejected_on_repeat() {
                 panic!("our own CompanyEngagementDeclined should be on the feed: {consumed:?}")
             });
         assert_eq!(our_event["eventType"], "CompanyEngagementDeclined");
-        assert_eq!(our_event["payload"]["flagged_at"], flagged_at.to_rfc3339());
+        let flagged_at = chrono::DateTime::parse_from_rfc3339(
+            our_event["payload"]["flagged_at"].as_str().unwrap(),
+        )
+        .unwrap();
+        assert!(
+            flagged_at >= before && flagged_at <= Utc::now(),
+            "flagged_at {flagged_at} should be the submission's own instant"
+        );
 
         // "fires once, not once per check while the condition holds" -
         // the spec's own confirmed note on the rule.

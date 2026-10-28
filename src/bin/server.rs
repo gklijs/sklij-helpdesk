@@ -2097,16 +2097,44 @@ async fn sign_up_demo_companies(
     companies: &[String],
 ) {
     let client = reqwest::Client::new();
-    for company_id in companies {
-        let payload = serde_json::json!({
-            "company_id": company_id,
-            "name": company_display_name(company_id),
-            "contact_email": format!("hello@{company_id}.example"),
-        });
-        match trigger_command(&client, base_url, &command_tokens["SignUpCompany"], payload).await {
-            Ok(_) => tracing::info!(company_id = %company_id, "demo-seed: signed up fake company"),
+    // One ordered batch call per 100 companies (skilj 0.2.0's
+    // `POST /v1/commands/trigger/batch`, at its default
+    // `max_items_per_batch`) instead of one request each: with
+    // `SEED_DEMO_COMPANIES` turned up for a load test, startup no longer
+    // pays a round trip per company.
+    for chunk in companies.chunks(100) {
+        let payloads = chunk
+            .iter()
+            .map(|company_id| {
+                serde_json::json!({
+                    "company_id": company_id,
+                    "name": company_display_name(company_id),
+                    "contact_email": format!("hello@{company_id}.example"),
+                })
+            })
+            .collect();
+        match trigger_commands_batch(
+            &client,
+            base_url,
+            &command_tokens["SignUpCompany"],
+            payloads,
+        )
+        .await
+        {
+            Ok(outcomes) => {
+                for (company_id, outcome) in chunk.iter().zip(outcomes) {
+                    match outcome {
+                        Ok(_) => {
+                            tracing::info!(company_id = %company_id, "demo-seed: signed up fake company")
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, company_id = %company_id, "demo-seed: failed to sign up fake company")
+                        }
+                    }
+                }
+            }
             Err(e) => {
-                tracing::warn!(error = %e, company_id = %company_id, "demo-seed: failed to sign up fake company")
+                tracing::warn!(error = %e, companies = chunk.len(), "demo-seed: failed to sign up fake companies")
             }
         }
     }
@@ -2278,6 +2306,40 @@ async fn trigger_command(
         .error_for_status()?;
     let body: serde_json::Value = response.json().await?;
     Ok(body["accepted"].as_bool().unwrap_or(false))
+}
+
+/// `payloads` as one `POST /v1/commands/trigger/batch` call, decided in
+/// the order given. One answer per payload: `Ok(accepted)`, or the item's
+/// own error (`{"error": {"code", ...}}`) - one failing doesn't stop the
+/// rest, since nothing here depends on their order.
+async fn trigger_commands_batch(
+    client: &reqwest::Client,
+    base_url: &str,
+    credential: &str,
+    payloads: Vec<serde_json::Value>,
+) -> Result<Vec<Result<bool, String>>, reqwest::Error> {
+    let commands: Vec<serde_json::Value> = payloads
+        .into_iter()
+        .map(|payload| serde_json::json!({ "payload": payload }))
+        .collect();
+    let response = client
+        .post(format!("{base_url}/v1/commands/trigger/batch"))
+        .header("authorization", format!("Bearer {credential}"))
+        .json(&serde_json::json!({ "commands": commands }))
+        .send()
+        .await?
+        .error_for_status()?;
+    let body: serde_json::Value = response.json().await?;
+    Ok(body["outcomes"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+        .iter()
+        .map(|outcome| match outcome.get("error") {
+            Some(error) => Err(error["code"].as_str().unwrap_or("unknown").to_string()),
+            None => Ok(outcome["accepted"].as_bool().unwrap_or(false)),
+        })
+        .collect())
 }
 
 /// `"wonka-industries"` -> `"Wonka Industries"` - purely cosmetic, for

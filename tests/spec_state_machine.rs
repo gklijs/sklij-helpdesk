@@ -35,6 +35,18 @@ use skilj_helpdesk::helpdesk::*;
 use skilj_helpdesk::sla::{SlaKind, SlaPolicy, SlaTarget};
 use skilj_helpdesk::{activity, alerting, knowledge_base as kb, marketing, scheduling};
 
+/// `C::decide_with` at a fixed instant, no snapshots - for the commands
+/// that stamp a time from `Decision::now` (skilj 0.2.0), whose plain
+/// `decide()` is no longer implemented.
+fn decide_at<C: CommandType>(
+    payload: &C::Payload,
+    history: &[C::Event],
+    now: &str,
+) -> CommandDecision {
+    let context = DecisionContext::at(now.parse().expect("an RFC 3339 instant"));
+    C::decide_with(payload, &Decision::new(history, &[], &context))
+}
+
 // --- the spec's transition graphs (skilj-helpdesk.allium) ---
 
 use TicketStatus::{Closed, InProgress, Merged, Open, Resolved, WaitingOnCustomer};
@@ -1638,12 +1650,12 @@ proptest! {
                     if spec {
                         flagged.push(company);
                     }
-                    let decision = <activity::RecordEngagementDecline as CommandType>::decide(
+                    let decision = decide_at::<activity::RecordEngagementDecline>(
                         &activity::RecordEngagementDeclinePayload {
                             company_id: company.into(),
-                            flagged_at: "2026-10-12T00:00:00Z".into(),
                         },
                         &history,
+                        "2026-10-12T00:00:00+00:00",
                     );
                     (decision, spec)
                 }
@@ -1661,20 +1673,19 @@ proptest! {
 #[test]
 fn helpdesk_and_activity_facts_are_routed_into_marketing() {
     // TrialLapseIsRoutedFromHelpdesk / TrialConversionIsRoutedFromHelpdesk:
-    // the company carried over, the time stamped at route time.
+    // the company carried over; the time is stamped by the target
+    // command's decide_with (see marketing_records_every_routed_fact_including_repeats).
     let lapse = marketing::HelpdeskExpiryToTrialLapse::route(&CompanyExpiredPayload {
         company_id: "acme".into(),
     })
     .expect("every expiry is routed");
     assert_eq!(lapse.company_id, "acme");
-    assert!(chrono::DateTime::parse_from_rfc3339(&lapse.lapsed_at).is_ok());
     let conversion =
         marketing::HelpdeskActivationToTrialConversion::route(&CompanyActivatedPayload {
             company_id: "acme".into(),
         })
         .expect("every activation is routed");
     assert_eq!(conversion.company_id, "acme");
-    assert!(chrono::DateTime::parse_from_rfc3339(&conversion.converted_at).is_ok());
     // EngagementDeclineIsRoutedFromActivity: flagged_at carried through.
     let flag = marketing::ActivityEngagementDeclineToMarketingFlag::route(
         &activity::CompanyEngagementDeclinedPayload {
@@ -1695,21 +1706,23 @@ fn marketing_records_every_routed_fact_including_repeats() {
     // no requires - a company can lapse, reactivate and lapse again.
     let mut history = Vec::new();
     for round in 0..3 {
-        let at = format!("2026-10-0{}T00:00:00Z", round + 1);
+        // Lapse and conversion are stamped with the submission's own
+        // instant; the decline carries the routed `flagged_at`.
+        let at = format!("2026-10-0{}T00:00:00+00:00", round + 1);
         let decisions = [
-            <marketing::RecordTrialLapse as CommandType>::decide(
+            decide_at::<marketing::RecordTrialLapse>(
                 &marketing::RecordTrialLapsePayload {
                     company_id: "acme".into(),
-                    lapsed_at: at.clone(),
                 },
                 &history,
+                &at,
             ),
-            <marketing::RecordTrialConversion as CommandType>::decide(
+            decide_at::<marketing::RecordTrialConversion>(
                 &marketing::RecordTrialConversionPayload {
                     company_id: "acme".into(),
-                    converted_at: at.clone(),
                 },
                 &history,
+                &at,
             ),
             <marketing::RecordEngagementDecline as CommandType>::decide(
                 &marketing::RecordEngagementDeclinePayload {
@@ -1767,7 +1780,6 @@ fn every_resolution_is_routed_as_an_article_suggestion() {
         ),
         ("t1", "acme")
     );
-    assert!(chrono::DateTime::parse_from_rfc3339(&suggestion.suggested_at).is_ok());
 }
 
 #[derive(Debug, Clone)]
@@ -1850,9 +1862,9 @@ proptest! {
                 KbOp::Suggest(t) => {
                     let ok = suggestion(&suggestions, t).is_none();
                     if ok { suggestions.push((t, SpecSuggestion::Pending)); }
-                    (<kb::SuggestArticle as CommandType>::decide(&kb::SuggestArticlePayload {
-                        ticket_id: t.into(), company_id: "acme".into(), suggested_at: "2026-10-12T00:00:00Z".into(),
-                    }, &history), ok)
+                    (decide_at::<kb::SuggestArticle>(&kb::SuggestArticlePayload {
+                        ticket_id: t.into(), company_id: "acme".into(),
+                    }, &history, "2026-10-12T00:00:00+00:00"), ok)
                 }
                 // StaffDismissesSuggestion
                 KbOp::Dismiss(t) => {

@@ -76,7 +76,7 @@ tower = { version = "0.5", features = ["limit", "load-shed"] }
 # axum/reqwest).
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 # Telemetry (src/telemetry.rs, used by every binary) - versions
-# pinned to match skilj 0.0.10's own Cargo.toml exactly. skilj-core/skilj-rest/
+# pinned to match skilj 0.2.0's own Cargo.toml exactly. skilj-core/skilj-rest/
 # skilj only ever call opentelemetry::global::meter()/global tracer -
 # they never install a subscriber or MeterProvider themselves (see
 # docs/architecture.md's tracing section) - init_telemetry below is
@@ -100,7 +100,7 @@ opentelemetry-appender-tracing = "0.33"
 # skilj-nats does the NATS JetStream -> `POST /v1/commands/trigger` half
 # with its own retries, Idempotency-Key and parking; async-nats is the
 # same client it uses, for setting up the stream and for the translation
-# hop in front of it. Same versions skilj 0.0.10 depends on, so the
+# hop in front of it. Same versions skilj 0.2.0 depends on, so the
 # `PullConsumer` this crate builds is the type skilj-nats accepts.
 skilj-nats = "0.2.0"
 async-nats = "0.50"
@@ -123,7 +123,7 @@ http-body-util = "0.1"
 skilj-test-fixture = "0.2.0"
 # tests/ticket_auto_close_cancel.rs only - reads the `deadlines` table
 # directly, since no skilj API lists pending deadlines. Same version as
-# skilj 0.0.10's own Cargo.toml, so it resolves to the copy skilj-core already
+# skilj 0.2.0's own Cargo.toml, so it resolves to the copy skilj-core already
 # builds; features are unified with skilj-core's own.
 sqlx = { version = "0.9", default-features = false, features = ["postgres"] }
 # tests/email_channel.rs only - a real, throwaway NATS server in Docker,
