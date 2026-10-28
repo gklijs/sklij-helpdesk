@@ -46,14 +46,8 @@ impl EventType for TicketCreated {
     /// the creating event carries both tags up front.
     fn tag_mappings() -> Vec<TagMapping> {
         vec![
-            TagMapping {
-                key: "ticket".into(),
-                field: "ticket_id".into(),
-            },
-            TagMapping {
-                key: "company".into(),
-                field: "company_id".into(),
-            },
+            TagMapping::new("ticket", "ticket_id"),
+            TagMapping::new("company", "company_id"),
         ]
     }
     /// `src/bin/alerter.rs` reads this via an `EventReadToken` to track
@@ -309,19 +303,10 @@ impl EventType for TicketsMerged {
     const NAME: &'static str = "TicketsMerged";
     fn tag_mappings() -> Vec<TagMapping> {
         vec![
-            TagMapping {
-                key: "ticket".into(),
-                field: "primary_ticket_id".into(),
-            },
-            TagMapping {
-                key: "ticket".into(),
-                field: "duplicate_ticket_id".into(),
-            },
+            TagMapping::new("ticket", "primary_ticket_id"),
+            TagMapping::new("ticket", "duplicate_ticket_id"),
             // The duplicate's agent - see `duplicate_assignee_id`.
-            TagMapping {
-                key: STAFF_TAG_KEY.into(),
-                field: "duplicate_assignee_id".into(),
-            },
+            TagMapping::new(STAFF_TAG_KEY, "duplicate_assignee_id"),
         ]
     }
     /// `src/bin/alerter.rs` reads this to stop tracking the duplicate
@@ -411,28 +396,22 @@ impl EventType for TicketInternalNoteAdded {
     /// doesn't (see this file's own module doc comment on why).
     fn tag_mappings() -> Vec<TagMapping> {
         vec![
-            TagMapping {
-                key: "ticket".into(),
-                field: "ticket_id".into(),
-            },
-            TagMapping {
-                key: "company".into(),
-                field: "company_id".into(),
-            },
+            TagMapping::new("ticket", "ticket_id"),
+            TagMapping::new("company", "company_id"),
         ]
     }
     fn private_fields() -> Vec<PrivateField> {
         vec![
             PrivateField {
                 field: "staff_id".into(),
-                kind: PrivateFieldKind::Team,
-                team: Some(STAFF_TEAM.into()),
+                kind: PrivateFieldKind::Capability,
+                capability: Some(STAFF_CAPABILITY.into()),
                 addressee_field: None,
             },
             PrivateField {
                 field: "note".into(),
-                kind: PrivateFieldKind::Team,
-                team: Some(STAFF_TEAM.into()),
+                kind: PrivateFieldKind::Capability,
+                capability: Some(STAFF_CAPABILITY.into()),
                 addressee_field: None,
             },
         ]

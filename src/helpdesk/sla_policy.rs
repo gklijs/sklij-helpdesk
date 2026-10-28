@@ -257,6 +257,8 @@ fn sla_deadline(
     };
     Some(DeadlineSpec {
         fire_at: add_business_minutes(chrono::Utc::now(), minutes, &sla.business_hours),
+        expires_at: None,
+        recurrence: None,
         tags: vec![ticket_tag_value(&source.ticket_id)],
         payload: BreachTicketSlaPayload {
             ticket_id: source.ticket_id.clone(),

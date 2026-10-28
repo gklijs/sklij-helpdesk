@@ -28,7 +28,7 @@ use std::time::Duration;
 use support::{
     accepted, consume_auto, fresh_database, graphql_request, mint_command_token,
     mint_event_read_token, runtime, seed_mapping_for, seed_role, serve_jwks, sign_jwt,
-    test_idp_config, test_master_key, test_now, trigger, unique_name, wait_until,
+    test_idp_config, test_key_provider, test_now, trigger, unique_name, wait_until,
 };
 
 const MARKETING: &str = "marketing";
@@ -116,7 +116,7 @@ fn a_route_that_keeps_failing_parks_is_counted_and_redrives() {
         let jwt = sign_jwt(&role.external_subject);
 
         let (skilj, _) = skilj_helpdesk::register(Skilj::builder(database_url))
-            .encryption_master_key(test_master_key())
+            .key_provider(test_key_provider())
             .reconciliation_role(role.external_subject.clone())
             .identity_provider(test_idp_config(&jwks_url))
             .cross_context_route_retry_policy(QUICK_PARK)

@@ -606,6 +606,8 @@ impl ScheduleDeadline for ScheduleTicketAutoClose {
         }
         Some(DeadlineSpec {
             fire_at: chrono::Utc::now() + scheduling::auto_close_after(),
+            expires_at: None,
+            recurrence: None,
             tags,
             payload: CloseTicketPayload {
                 ticket_id: source_payload.ticket_id.clone(),
@@ -759,17 +761,11 @@ pub struct MergeTickets;
 /// for the event side of the same trick.
 impl MergeTickets {
     fn primary() -> Vec<TagMapping> {
-        vec![TagMapping {
-            key: "ticket".into(),
-            field: "primary_ticket_id".into(),
-        }]
+        vec![TagMapping::new("ticket", "primary_ticket_id")]
     }
 
     fn duplicate() -> Vec<TagMapping> {
-        vec![TagMapping {
-            key: "ticket".into(),
-            field: "duplicate_ticket_id".into(),
-        }]
+        vec![TagMapping::new("ticket", "duplicate_ticket_id")]
     }
 }
 
@@ -975,31 +971,26 @@ pub struct AddInternalNote;
 /// including after close - a real audit trail doesn't stop just because
 /// the ticket did.
 ///
-/// `private_fields()` below is one of two places `TEAM_ONLY =
-/// Some(STAFF_TEAM)` on `TicketInternalNotes` (see that projection's
-/// own doc comment) doesn't reach - the other is `TicketInternalNoteAdded`'s
-/// own identical `private_fields()`, the event this command's own
-/// `decide()` emits. Both exist because skilj's generic
+/// `private_fields()` below is one of two places
+/// `REQUIRES_CAPABILITY = Some(STAFF_CAPABILITY)` on `TicketInternalNotes`
+/// (see that projection's own doc comment) doesn't reach - the other is
+/// `TicketInternalNoteAdded`'s own identical `private_fields()`, the event
+/// this command's own `decide()` emits. Both exist because skilj's generic
 /// `CommandQuery`/`EventQuery` (`fetchCommands`/`queryEvents`/
 /// `countEvents`/`inspectEvent` - GraphQL, `AdminAccess`-gated,
 /// skilj-inspector/skilj-tui's own read path, not anything this crate
-/// builds itself) can show any command or event's raw payload to a
-/// superadmin-mapped Role regardless of `TEAM_ONLY`, which only gates
-/// `ProjectionQuery` - confirmed by tracing `query_events`/
-/// `count_events`/`inspect_event` in the sibling `skilj` repo: none of
-/// them check `event_read_allowed` (only the REST feed's
-/// `fetch_events`/`consume_events` do), so `TicketInternalNoteAdded`
-/// having no `event_read_allowed() = true` override blocks the REST
-/// path but not this one - missed in the first pass, caught in review.
-/// `staff_id`/`note` as `PrivateFieldKind::Team(STAFF_TEAM)` on both
-/// closes it, on the same terms - no superadmin bypass, `Role.name`
-/// must literally be `STAFF_TEAM` (`docs/architecture.md`'s own
-/// private-field writeup in the sibling `skilj` repo). A deliberate
-/// choice, not a mechanical default: it means even this project's own
-/// platform operators can't read a ticket's internal notes through
-/// generic admin tooling without also holding a staff Role - accepted
-/// here since "staff-only" is this feature's entire point, not a
-/// boundary meant to stop only customers.
+/// builds itself) can show any command or event's raw payload to an
+/// admin-mapped Role regardless of a projection's gate, which only
+/// gates `ProjectionQuery`. `staff_id`/`note` as
+/// `PrivateFieldKind::Capability` naming `STAFF_CAPABILITY` on both
+/// closes it, on the same terms as the projection: a grant reads them
+/// only by holding the capability - no superadmin bypass, and since
+/// skilj 0.2.0 no longer by its Role's name either (docs/architecture.md
+/// §228 in the sibling `skilj` repo). A deliberate choice: even this
+/// project's own platform operators can't read a ticket's internal notes
+/// through generic admin tooling without also holding the capability -
+/// accepted here since "staff-only" is this feature's entire point, not
+/// a boundary meant to stop only customers.
 #[auto_register(BOUNDED_CONTEXT)]
 #[requires_role("staff")]
 impl CommandType for AddInternalNote {
@@ -1016,14 +1007,14 @@ impl CommandType for AddInternalNote {
         vec![
             PrivateField {
                 field: "staff_id".into(),
-                kind: PrivateFieldKind::Team,
-                team: Some(STAFF_TEAM.into()),
+                kind: PrivateFieldKind::Capability,
+                capability: Some(STAFF_CAPABILITY.into()),
                 addressee_field: None,
             },
             PrivateField {
                 field: "note".into(),
-                kind: PrivateFieldKind::Team,
-                team: Some(STAFF_TEAM.into()),
+                kind: PrivateFieldKind::Capability,
+                capability: Some(STAFF_CAPABILITY.into()),
                 addressee_field: None,
             },
         ]

@@ -34,23 +34,17 @@ use skilj_core::event_store::Event;
 use skilj_core::plugin::BoundedContextEvent;
 use skilj_core::shared::{CommandDecision, EventSpec, QueryItemMapping, TagMapping};
 
-use crate::helpdesk::{self, STAFF_TEAM};
+use crate::helpdesk::{self, STAFF_CAPABILITY};
 
 pub const BOUNDED_CONTEXT: &str = "knowledge_base";
 
 /// A suggestion is identified by the ticket it came from.
 fn suggestion_tag(field: &str) -> Vec<TagMapping> {
-    vec![TagMapping {
-        key: "suggestion".into(),
-        field: field.into(),
-    }]
+    vec![TagMapping::new("suggestion", field)]
 }
 
 fn article_tag() -> Vec<TagMapping> {
-    vec![TagMapping {
-        key: "article".into(),
-        field: "article_id".into(),
-    }]
+    vec![TagMapping::new("article", "article_id")]
 }
 
 // --- events ---
@@ -626,7 +620,7 @@ pub struct KnowledgeBaseReviewState {
 
 /// `surface ArticleReview`: one shared instance (no `keys()` override),
 /// the queue of pending suggestions plus every article in any state.
-/// Staff-only (`TEAM_ONLY`) - this is where drafts are visible, so a
+/// Staff-only (`REQUIRES_CAPABILITY`) - this is where drafts are visible, so a
 /// customer is refused it outright. No `OWNER_TAG_KEY`: articles aren't
 /// any one company's, and staff review suggestions from every company.
 pub struct KnowledgeBaseReview;
@@ -636,7 +630,7 @@ impl Projection for KnowledgeBaseReview {
     type State = KnowledgeBaseReviewState;
     type Event = KnowledgeBaseEvent;
     const NAME: &'static str = "KnowledgeBaseReview";
-    const TEAM_ONLY: Option<&'static str> = Some(STAFF_TEAM);
+    const REQUIRES_CAPABILITY: Option<&'static str> = Some(STAFF_CAPABILITY);
     fn consumed_event_types() -> Vec<&'static str> {
         vec![
             "ArticleSuggested",
@@ -716,7 +710,7 @@ pub struct PublishedArticlesState {
 }
 
 /// `surface KnowledgeBase`: every published article, one shared instance.
-/// No team gate - customers read this - and it folds `ArticlePublished`
+/// No capability gate - customers read this - and it folds `ArticlePublished`
 /// alone, so a draft or an unpublished edit cannot appear here by
 /// construction rather than by a filter.
 pub struct PublishedArticles;
@@ -790,7 +784,7 @@ mod required_role_tests {
             EditArticle::required_role(),
             PublishArticle::required_role(),
         ] {
-            assert_eq!(required, Some(STAFF_TEAM));
+            assert_eq!(required, Some(helpdesk::STAFF_ROLE));
         }
         assert_eq!(SuggestArticle::required_role(), None);
     }

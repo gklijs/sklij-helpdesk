@@ -447,6 +447,10 @@ async fn ensure_bounded_context_and_grant(
         // Unrestricted - same reasoning as the helpdesk bootstrap
         // mapping's own `None` scope in `main()`.
         scope: None,
+        // No capabilities: the bootstrap identity registers types and
+        // reconciles, it never reads staff-only projections.
+        capabilities: Default::default(),
+        delegable: Default::default(),
         status: RoleStatus::Active,
         created_at: Utc::now(),
         revoked_at: None,
@@ -1135,19 +1139,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let database_url = std::env::var("DATABASE_URL")
         .map_err(|_| "DATABASE_URL must be set (a real Postgres, not embedded)")?;
-    // Required, not defaulted: a key generated at startup would make
-    // every customer's contact details unreadable after the next
-    // restart. See `parse_encryption_master_key`.
-    let encryption_master_key = std::env::var("ENCRYPTION_MASTER_KEY")
-        .map_err(|_| {
-            "ENCRYPTION_MASTER_KEY must be set (64 hex characters - `openssl rand -hex 32`), \
-             and kept the same across restarts"
-                .to_string()
-        })
-        .and_then(|hex| {
-            skilj_helpdesk::parse_encryption_master_key(&hex)
-                .map_err(|e| format!("ENCRYPTION_MASTER_KEY: {e}"))
-        })?;
+    // The master key lives in a key file skilj manages (skilj 0.2.0's key
+    // providers); see `EncryptionConfig` for why its path is required.
+    if std::env::var_os("ENCRYPTION_MASTER_KEY").is_some() {
+        return Err(
+            "ENCRYPTION_MASTER_KEY is no longer read: since skilj 0.2.0 the master \
+                    key lives in a key file - set ENCRYPTION_KEY_FILE instead, and unset \
+                    ENCRYPTION_MASTER_KEY so a stale secret isn't left in the environment"
+                .into(),
+        );
+    }
+    let encryption = skilj_helpdesk::EncryptionConfig::from_vars(|name| std::env::var(name).ok())?;
+    let key_provider = skilj::KeyFileProvider::open(&encryption.key_file)
+        .map_err(|e| format!("ENCRYPTION_KEY_FILE {}: {e}", encryption.key_file.display()))?;
     let port: u16 = std::env::var("PORT")
         .ok()
         .and_then(|p| p.parse().ok())
@@ -1254,6 +1258,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // reconciliation bootstrap Role (see `.reconciliation_role`
         // below), not a caller acting on behalf of any one company.
         scope: None,
+        // Superadmin, but since skilj 0.2.0 that opens no capability gate:
+        // without `STAFF_CAPABILITY` this identity doesn't read internal
+        // notes or the other staff-only projections, by design.
+        capabilities: Default::default(),
+        delegable: Default::default(),
         status: RoleStatus::Active,
         created_at: Utc::now(),
         revoked_at: None,
@@ -1354,17 +1363,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // support staff serve every company sharing this one bounded
         // context, not just one.
         //
-        // `name` is `"staff"`/`"customer"` (`helpdesk::STAFF_TEAM` for
+        // `name` is `"staff"`/`"customer"` (`helpdesk::STAFF_ROLE` for
         // the former) rather than the older `"skilj-helpdesk demo
-        // {label}"` prose because `Role` has no separate "team" field -
-        // `TicketInternalNotes`'s own `Projection::TEAM_ONLY` and
-        // `AddInternalNote`/`TicketInternalNoteAdded`'s own
-        // `private_fields()` (see `src/helpdesk/`, skilj 0.0.4)
-        // compare against `name` directly, so the staff-lead Role's
-        // `name` must literally be `"staff"` for it to still read
-        // those. staff-lead stays unrestricted (`scope: None`) on
-        // purpose: real support staff serve every company sharing this
-        // one bounded context, not just one.
+        // {label}"` prose because the staff-only commands'
+        // `#[requires_role("staff")]` still compares against `Role.name`.
+        // The read-side gates (`TicketInternalNotes`' and the other
+        // staff-only projections' `REQUIRES_CAPABILITY`, the internal
+        // notes' capability-kind `private_fields()`) moved to
+        // capabilities in skilj 0.2.0, which staff-lead's grant holds via
+        // `capabilities_for_role`.
         //
         // The operator is for `skilj-tui` (README.md, "Operator
         // consoles"), which needs Admin on the context it opens. Admin,
@@ -1382,7 +1389,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "staff-lead",
                 DEMO_STAFF_LEAD_SUB,
                 None,
-                skilj_helpdesk::helpdesk::STAFF_TEAM,
+                skilj_helpdesk::helpdesk::STAFF_ROLE,
                 AccessLevel::Write,
             ),
             (
@@ -1397,13 +1404,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // encrypted per customer (`helpdesk::CustomerTickets`). A
             // customer needs no grant for their own: skilj decrypts a row
             // keyed by the caller's own subject.
-            let can_read_sensitive = name == skilj_helpdesk::helpdesk::STAFF_TEAM;
+            let can_read_sensitive = name == skilj_helpdesk::helpdesk::STAFF_ROLE;
+            // `STAFF_CAPABILITY` for staff-lead, nothing for the customer or
+            // the operator - see `capabilities_for_role`.
+            let capabilities = skilj_helpdesk::helpdesk::capabilities_for_role(name);
             let demo_mapping = |role: Role| RoleAccessMapping {
                 role,
                 bounded_context: mapping.bounded_context.clone(),
                 level,
                 can_read_sensitive,
                 scope: scope.clone(),
+                capabilities: capabilities.clone(),
+                delegable: Default::default(),
                 status: RoleStatus::Active,
                 created_at: Utc::now(),
                 revoked_at: None,
@@ -1413,7 +1425,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .find(|r| r.external_subject == sub && r.status == RoleStatus::Active)
             {
                 // A Role seeded by a server binary built before the
-                // `TEAM_ONLY`/`private_fields` gates above existed
+                // staff gates above existed
                 // still carries the old `"skilj-helpdesk demo {label}"`
                 // prose - found in review: without this, `name` (and
                 // every gate comparing against it) would stay wrong
@@ -1426,7 +1438,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     renamed.name = name.to_string();
                     db::update_role(&pool, &renamed).await?;
                     println!(
-                        "server: renamed demo Role for {label} (sub {sub:?}) from {:?} to {name:?} - pre-existing Role from before TEAM_ONLY/private_fields",
+                        "server: renamed demo Role for {label} (sub {sub:?}) from {:?} to {name:?} - pre-existing Role from before the staff gates",
                         existing.name
                     );
                 } else {
@@ -1443,9 +1455,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 )
                 .await?;
                 match current {
+                    // A grant seeded before skilj 0.2.0 holds no
+                    // capabilities, so staff-lead's is replaced here and
+                    // reads the staff-only projections again.
                     Some(current)
                         if current.can_read_sensitive == can_read_sensitive
-                            && current.level == level => {}
+                            && current.level == level
+                            && current.capabilities == capabilities => {}
                     current => {
                         if current.is_some() {
                             db::revoke_active_role_access_mapping(
@@ -1483,8 +1499,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // The dashboard reaches past `helpdesk` too: both demo users ping
         // `RecordDailyActivity` on every load, and staff read
         // `activity::CompanyEngagement` and `marketing::MarketingSignals`
-        // in the company panel. Each projection is `TEAM_ONLY` staff, so
-        // the customer's activity grant (scoped to its own company, like
+        // in the company panel. Each projection requires the staff
+        // capability, so the customer's activity grant (scoped to its own company, like
         // its helpdesk one) only lets it record its own pings.
         let demo_roles = db::list_roles(&pool).await?;
         for (sub, context, level, scope) in [
@@ -1508,7 +1524,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             ),
             // Staff review and write articles; the customer reads
             // `PublishedArticles` only - `KnowledgeBaseReview`, where the
-            // drafts are, is `TEAM_ONLY` staff.
+            // drafts are, requires the staff capability.
             (
                 DEMO_STAFF_LEAD_SUB,
                 skilj_helpdesk::knowledge_base::BOUNDED_CONTEXT,
@@ -1528,11 +1544,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             else {
                 continue;
             };
-            if db::get_active_role_access_mapping(&pool, &role.id, context)
-                .await?
-                .is_some()
-            {
-                continue;
+            // staff-lead holds `STAFF_CAPABILITY` here too: these
+            // contexts' staff-only projections need it as much as
+            // `helpdesk`'s. A grant from before skilj 0.2.0 has none and is
+            // replaced; one that already matches is left alone.
+            let capabilities = skilj_helpdesk::helpdesk::capabilities_for_role(&role.name);
+            match db::get_active_role_access_mapping(&pool, &role.id, context).await? {
+                Some(current) if current.capabilities == capabilities => continue,
+                Some(_) => {
+                    db::revoke_active_role_access_mapping(&pool, &role.id, context, Utc::now())
+                        .await?;
+                }
+                None => {}
             }
             let bounded_context = db::get_bounded_context(&pool, context)
                 .await?
@@ -1545,6 +1568,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     level,
                     can_read_sensitive: false,
                     scope,
+                    capabilities,
+                    delegable: Default::default(),
                     status: RoleStatus::Active,
                     created_at: Utc::now(),
                     revoked_at: None,
@@ -1559,7 +1584,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .pool_options(skilj_pool_options)
         .reconciliation_role(external_subject.clone())
         .application_version(skilj_helpdesk::APPLICATION_VERSION)
-        .encryption_master_key(encryption_master_key)
+        .key_provider(key_provider)
+        .master_key_rotation(encryption.rotation())
         .identity_provider(IdpConfig::new(
             jwks_url
                 .parse()

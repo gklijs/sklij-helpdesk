@@ -29,10 +29,7 @@ use crate::helpdesk;
 pub const BOUNDED_CONTEXT: &str = "marketing";
 
 fn company_tag() -> Vec<TagMapping> {
-    vec![TagMapping {
-        key: "company".into(),
-        field: "company_id".into(),
-    }]
+    vec![TagMapping::new("company", "company_id")]
 }
 
 // --- events ---
@@ -271,7 +268,7 @@ pub struct MarketingSignalsState {
 /// MarketingOutreachSignals`, as a read model: what the staff dashboard's
 /// company panel shows. Staff-only, the same two gates
 /// `helpdesk::TicketInternalNotes` uses: `OWNER_TAG_KEY` scopes a
-/// company-restricted grant to its own company, and `TEAM_ONLY` keeps a
+/// company-restricted grant to its own company, and `REQUIRES_CAPABILITY` keeps a
 /// customer out of their own company's row.
 pub struct MarketingSignals;
 
@@ -281,7 +278,7 @@ impl Projection for MarketingSignals {
     type Event = MarketingEvent;
     const NAME: &'static str = "MarketingSignals";
     const OWNER_TAG_KEY: Option<&'static str> = Some("company");
-    const TEAM_ONLY: Option<&'static str> = Some(helpdesk::STAFF_TEAM);
+    const REQUIRES_CAPABILITY: Option<&'static str> = Some(helpdesk::STAFF_CAPABILITY);
     fn consumed_event_types() -> Vec<&'static str> {
         vec!["TrialLapsed", "TrialConverted", "EngagementDeclineFlagged"]
     }

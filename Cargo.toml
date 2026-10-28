@@ -31,8 +31,8 @@ name = "email-bridge"
 path = "src/bin/email-bridge.rs"
 
 [dependencies]
-skilj = "0.0.10"
-skilj-core = "0.0.10"
+skilj = "0.2.0"
+skilj-core = "0.2.0"
 tokio = { version = "1", features = ["full"] }
 axum = "0.8"
 chrono = { version = "0.4", features = ["serde"] }
@@ -102,11 +102,11 @@ opentelemetry-appender-tracing = "0.33"
 # same client it uses, for setting up the stream and for the translation
 # hop in front of it. Same versions skilj 0.0.10 depends on, so the
 # `PullConsumer` this crate builds is the type skilj-nats accepts.
-skilj-nats = "0.0.10"
+skilj-nats = "0.2.0"
 async-nats = "0.50"
 # The RetryPolicy skilj_nats::run_inbound_until takes - not re-exported
 # by skilj-nats.
-skilj-retry = "0.0.10"
+skilj-retry = "0.2.0"
 # Ticket ids and idempotency keys are derived from a hash of the email's
 # Message-ID, so a redelivered email maps to the same ticket.
 sha2 = "0.11"
@@ -120,7 +120,7 @@ http-body-util = "0.1"
 # in the skilj repo). Complements, doesn't replace, the Postgres-backed
 # tests/*.rs suites, which still own persistence, DCB conflicts and
 # access control.
-skilj-test-fixture = "0.0.10"
+skilj-test-fixture = "0.2.0"
 # tests/ticket_auto_close_cancel.rs only - reads the `deadlines` table
 # directly, since no skilj API lists pending deadlines. Same version as
 # skilj 0.0.10's own Cargo.toml, so it resolves to the copy skilj-core already

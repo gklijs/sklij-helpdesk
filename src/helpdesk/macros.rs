@@ -29,10 +29,7 @@
 use super::*;
 
 fn macro_tag() -> Vec<TagMapping> {
-    vec![TagMapping {
-        key: "macro".into(),
-        field: "macro_id".into(),
-    }]
+    vec![TagMapping::new("macro", "macro_id")]
 }
 
 /// The three events that make up a macro's history.
@@ -555,7 +552,7 @@ pub struct CompanyMacrosState {
 }
 
 /// Keyed by `company_id`: every macro a company currently has, for staff
-/// to pick from. Staff-only (`TEAM_ONLY`), like `TicketInternalNotes`:
+/// to pick from. Staff-only (`REQUIRES_CAPABILITY`), like `TicketInternalNotes`:
 /// a macro is internal tooling, and nothing a customer needs.
 pub struct CompanyMacros;
 
@@ -565,7 +562,7 @@ impl Projection for CompanyMacros {
     type Event = HelpdeskEvent;
     const NAME: &'static str = "CompanyMacros";
     const OWNER_TAG_KEY: Option<&'static str> = Some("company");
-    const TEAM_ONLY: Option<&'static str> = Some(STAFF_TEAM);
+    const REQUIRES_CAPABILITY: Option<&'static str> = Some(STAFF_CAPABILITY);
     fn consumed_event_types() -> Vec<&'static str> {
         MACRO_EVENTS.to_vec()
     }
