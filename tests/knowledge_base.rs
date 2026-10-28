@@ -499,14 +499,17 @@ fn customers_read_published_articles_but_never_drafts() {
         })
         .await;
 
-        // The review queue: staff yes, customer refused by the team gate.
+        // The review queue: staff yes, customer refused by the capability gate.
         let review_query = projection_query("KnowledgeBaseReview", "articles");
         let response = graphql_request(&graphql, &staff, &review_query).await;
         assert!(response.get("errors").is_none(), "{response:?}");
         assert!(response.to_string().contains(&draft_title), "staff see drafts: {response:?}");
         let response = graphql_request(&graphql, &customer, &review_query).await;
-        assert_eq!(
-            response["errors"][0]["extensions"]["code"], "not_on_required_team",
+        // Without the staff capability the projection isn't in the
+        // customer's GraphQL schema at all (skilj 0.2.0).
+        assert!(response["data"].is_null(), "a customer must not read the review queue: {response:?}");
+        assert!(
+            response.to_string().contains("Unknown type") && !response.to_string().contains(&draft_title),
             "a customer must not read the review queue: {response:?}"
         );
 

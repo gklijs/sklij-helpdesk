@@ -35,7 +35,6 @@
 
 mod support;
 
-use chrono::Utc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use support::{
@@ -257,11 +256,10 @@ fn activity_engagement_decline_routes_a_flagged_record_to_marketing() {
         .await;
         let record_decline =
             mint_command_token(&pool, &watcher_mapping, ACTIVITY, "RecordEngagementDecline").await;
-        let flagged_at = Utc::now();
         let response = trigger(
             &router,
             &record_decline,
-            serde_json::json!({ "company_id": company_id, "flagged_at": flagged_at.to_rfc3339() }),
+            serde_json::json!({ "company_id": company_id }),
         )
         .await;
         assert!(
@@ -285,7 +283,25 @@ fn activity_engagement_decline_routes_a_flagged_record_to_marketing() {
         .await;
         assert_eq!(our_event["eventType"], "EngagementDeclineFlagged");
         // `EngagementDeclineIsRoutedFromActivity` carries the source
-        // event's own `flagged_at` through unchanged, not a fresh `now`.
-        assert_eq!(our_event["payload"]["flagged_at"], flagged_at.to_rfc3339());
+        // event's own `flagged_at` (stamped by activity's decide_with)
+        // through unchanged, not a fresh `now` at route time.
+        let read_source = mint_event_read_token(
+            &pool,
+            &mappings.activity,
+            ACTIVITY,
+            "CompanyEngagementDeclined",
+        )
+        .await;
+        let source = wait_for_routed_event(
+            &router,
+            &read_source,
+            &company_id,
+            "activity's own CompanyEngagementDeclined",
+        )
+        .await;
+        assert_eq!(
+            our_event["payload"]["flagged_at"],
+            source["payload"]["flagged_at"]
+        );
     });
 }
