@@ -14,6 +14,10 @@ import time
 PGBIN = os.environ.get("PGBIN", os.path.expanduser("~/.theseus/postgresql/18.6.0/bin"))
 PGHOST = os.environ.get("PGHOST", "127.0.0.1")
 PGPORT = os.environ.get("PGPORT", "5440")
+# The master key file the bench servers share (skilj 0.2.0 keeps the key
+# in a key provider). Created by the first server; one per bench process.
+KEY_FILE = os.environ.get(
+    "ENCRYPTION_KEY_FILE", f"/tmp/skilj-helpdesk-bench-{os.getpid()}.keys.json")
 PGUSER = os.environ.get("PGUSER", "postgres")
 SCHEMA = "bc_helpdesk"
 
@@ -51,7 +55,9 @@ class Server:
         env = dict(os.environ)
         env.update({
             "DATABASE_URL": f"postgres://{PGUSER}@{PGHOST}:{PGPORT}/{db}",
-            "ENCRYPTION_MASTER_KEY": "0" * 64,
+            # One key file per bench run: skilj creates it on the first
+            # start, and every server on the run's databases reads it.
+            "ENCRYPTION_KEY_FILE": KEY_FILE,
             "PORT": str(port),
             "RUST_LOG": env.get("RUST_LOG", "warn"),
         })

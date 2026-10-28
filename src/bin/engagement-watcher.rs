@@ -244,7 +244,7 @@ async fn tick(
             client,
             &config.base_url,
             &config.record_engagement_decline_token,
-            serde_json::json!({ "company_id": company_id, "flagged_at": now.to_rfc3339() }),
+            serde_json::json!({ "company_id": company_id }),
         )
         .await
         {

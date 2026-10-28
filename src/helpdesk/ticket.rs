@@ -216,6 +216,12 @@ impl EventType for TicketCustomerResponded {
 pub struct TicketClosedPayload {
     pub ticket_id: String,
     pub company_id: String,
+    /// When the auto-close was due, RFC 3339: the firing deadline's own
+    /// `scheduled_at` (skilj 0.2.0's `Decision::deadline`). `None` for a
+    /// close submitted by hand, and for one recorded before this field
+    /// existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub due_at: Option<String>,
 }
 
 pub struct TicketClosed;

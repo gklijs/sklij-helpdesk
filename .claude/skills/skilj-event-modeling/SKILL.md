@@ -93,6 +93,12 @@ Don't ask this before an event and its triggering command are both
 named - tags describe a relationship between a command's own decision
 and prior events, so there has to be a decision to talk about first.
 
+When a rule is "this value is unique" and the value is personal data (an
+email address, a phone number, a national id), mark that tag **blind**
+in the summary and note whether forgetting the person should free the
+value or keep it taken - see "Uniqueness on personal data" in the
+reference; the `skilj-uniqueness` skill implements it.
+
 ## Producing the summary
 
 Once a handful of events/commands are named with real accept/reject
@@ -137,5 +143,5 @@ same underlying discipline):
 - **The "single aggregate" trap** - specific to this skill, not
   borrowed: resist the urge to force every event onto one "owning"
   entity the way classic aggregate-based modeling would. Ask the DCB
-  question (§3 above) honestly for each event, even when an aggregate-ID
+  question ([§3](../../../docs/architecture.md#crate-module-structure) above) honestly for each event, even when an aggregate-ID
   habit suggests there's only one obvious tag.

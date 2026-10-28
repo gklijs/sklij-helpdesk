@@ -74,17 +74,19 @@ rule ArticleSuggestionIsRoutedFromHelpdesk {
     -- Every resolution, including a re-resolution after a reopen; the
     -- rule below drops all but the ticket's first.
     when: ticket: helpdesk/Ticket.status transitions_to resolved
-    ensures: SuggestArticle(ticket: ticket, company: ticket.company, suggested_at: now)
+    ensures: SuggestArticle(ticket: ticket, company: ticket.company)
 }
 
 rule ArticleIsSuggested {
-    when: SuggestArticle(ticket, company, suggested_at)
+    -- `suggested_at` is the instant the command is decided (skilj's
+    -- Decision::now).
+    when: SuggestArticle(ticket, company)
     -- Rejected as `already_suggested` when this ticket was suggested
     -- before, whatever became of it - staff already judged it once. This
     -- is also what makes a replayed route harmless.
     requires: not exists ArticleSuggestion{ticket}
     ensures: ArticleSuggestion.created(
-        ticket: ticket, company: company, suggested_at: suggested_at,
+        ticket: ticket, company: company, suggested_at: now,
         status: pending
     )
 }

@@ -15,7 +15,7 @@
 
 use serde_json::Value;
 use skilj::{CommandType, EventType};
-use skilj_core::plugin::DecisionContext;
+use skilj_core::plugin::{Decision, DecisionContext};
 use skilj_core::shared::{CommandDecision, QueryItemMapping, TagMapping};
 use skilj_helpdesk::activity::{self, *};
 use skilj_helpdesk::helpdesk::*;
@@ -238,7 +238,15 @@ where
         let (queried, count) = queried::<C>(prefix, &json);
         most_queried = most_queried.max(count);
         most_tagged = most_tagged.max(tagged.len());
-        let (by_tags, by_query) = (C::decide(payload, &tagged), C::decide(payload, &queried));
+        // `decide_with`, not `decide`: the commands that stamp a time
+        // from `Decision::now` (skilj 0.2.0) implement only that, and
+        // `decide` would reject both sides alike. One fixed context, so
+        // the two differ only in the events they were handed.
+        let context = DecisionContext::at(chrono::DateTime::UNIX_EPOCH);
+        let (by_tags, by_query) = (
+            C::decide_with(payload, &Decision::new(&tagged, &[], &context)),
+            C::decide_with(payload, &Decision::new(&queried, &[], &context)),
+        );
         assert!(
             same(&by_tags, &by_query),
             "{} after {end} of {} events, {json}:\n  tags:  {by_tags:?}\n  query: {by_query:?}",
@@ -561,7 +569,6 @@ fn every_activity_command_decides_the_same_from_its_query() {
         assert_query_agrees::<activity::RecordEngagementDecline>(
             &activity::RecordEngagementDeclinePayload {
                 company_id: company.into(),
-                flagged_at: "2026-10-05T00:00:00Z".into(),
             },
             &history,
         );
@@ -642,7 +649,6 @@ fn every_knowledge_base_command_decides_the_same_from_its_query() {
             &SuggestArticlePayload {
                 ticket_id: ticket.into(),
                 company_id: "c1".into(),
-                suggested_at: "2026-10-13T00:00:00Z".into(),
             },
             &history,
         );

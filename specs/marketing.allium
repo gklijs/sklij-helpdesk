@@ -64,14 +64,16 @@ entity EngagementDeclineFlagged {
 
 rule TrialLapseIsRoutedFromHelpdesk {
     when: company: helpdesk/Company.status transitions_to expired
-    ensures: RecordTrialLapse(company: company, lapsed_at: now)
+    ensures: RecordTrialLapse(company: company)
 }
 
 rule TrialLapseIsRecorded {
-    when: RecordTrialLapse(company, lapsed_at)
+    when: RecordTrialLapse(company)
     -- Accepted always; rejected when: none identified yet - see the open
-    -- question on repeat lapses below.
-    ensures: TrialLapsed.created(company: company, lapsed_at: lapsed_at)
+    -- question on repeat lapses below. `lapsed_at` is the instant the
+    -- command is decided (skilj's Decision::now): the route submits it
+    -- as it reads the expiry.
+    ensures: TrialLapsed.created(company: company, lapsed_at: now)
 }
 
 rule TrialConversionIsRoutedFromHelpdesk {
@@ -80,14 +82,14 @@ rule TrialConversionIsRoutedFromHelpdesk {
     -- `transitions_to` doesn't distinguish the source state, matching
     -- helpdesk's own single CompanyActivated event covering both.
     when: company: helpdesk/Company.status transitions_to active
-    ensures: RecordTrialConversion(company: company, converted_at: now)
+    ensures: RecordTrialConversion(company: company)
 }
 
 rule TrialConversionIsRecorded {
-    when: RecordTrialConversion(company, converted_at)
+    when: RecordTrialConversion(company)
     -- Accepted always; rejected when: none identified yet - same open
-    -- question as TrialLapseIsRecorded.
-    ensures: TrialConverted.created(company: company, converted_at: converted_at)
+    -- question as TrialLapseIsRecorded. `converted_at` as `lapsed_at`.
+    ensures: TrialConverted.created(company: company, converted_at: now)
 }
 
 rule EngagementDeclineIsRoutedFromActivity {
@@ -167,6 +169,7 @@ surface MarketingOutreachSignals {
 -- `src/marketing.rs`'s own `HelpdeskExpiryToTrialLapse`/
 -- `HelpdeskActivationToTrialConversion`/
 -- `ActivityEngagementDeclineToMarketingFlag` `route()` implementations.
--- `lapsed_at`/`converted_at` are freshly stamped at route time (neither
--- source event carries its own timestamp); `flagged_at` is carried
--- through from the source event unchanged.
+-- `lapsed_at`/`converted_at` are stamped by the target command when it
+-- is decided (neither source event carries its own timestamp, and the
+-- route submits the command as it reads the event); `flagged_at` is
+-- carried through from the source event unchanged.

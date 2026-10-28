@@ -55,6 +55,14 @@ without the other. A rejection is ordinary typed data, not thrown or
 turned into a GraphQL/HTTP error - the caller sees `accepted: false` and
 these two fields on the mutation's own result.
 
+To see what `decide()` would say without committing anything, an
+Admin-level caller can run the `dryRunCommand` GraphQL query: the
+decision, the events it would append (rendered under the usual
+sensitive/private-field rules), and the matching events it decided
+from. A `CommandToken` holder gets only the outcome, from `POST
+/v1/commands/dry-run`. Neither writes a command, an event or an
+idempotency record.
+
 Real example - `skilj-demo/src/banking.rs`'s `WithdrawMoney`:
 
 ```rust
@@ -106,6 +114,137 @@ retry either.
 A command with no `tag_mappings` at all always sees `matching_events: []`
 - there's no shared tag to scope by, so nothing before it is considered
 "matching."
+
+### Narrowing it: `consistency_query()`
+
+By default `matching_events` is *every* event carrying any of the
+command's tags. When `decide()` only needs some of them, declare a
+consistency query (DCB's query items; docs/architecture.md §198):
+
+```rust
+fn tag_mappings() -> Vec<TagMapping> { vec![company(), ticket()] }
+fn consistency_query() -> Vec<QueryItemMapping> {
+    vec![
+        // The company's latest lifecycle event, whichever kind it is.
+        QueryItemMapping::types(&["CompanySignedUp", "CompanyActivated", "CompanyExpired"])
+            .tagged(vec![company()])
+            .latest(),
+        // Whether this ticket id was used.
+        QueryItemMapping::types(&["TicketCreated"]).tagged(vec![ticket()]),
+    ]
+}
+```
+
+- An item matches events of its types (any type if it names none) that
+  carry **all** of its tags; items are OR'd. `.latest()` keeps only the
+  item's newest match - only right when `decide()` really only needs the
+  last one (a status where the last event wins). `.last(n)` keeps the n
+  newest, for a decision over the last few (at most 3 open tickets, the
+  last 5 failed logins).
+- The query is also the conflict check: an event matching no item no
+  longer makes the command decide again. So every fact `decide()`
+  depends on must be in the query, or a concurrent command can change it
+  unnoticed.
+- `build()` refuses an item's event type that isn't registered in the
+  same bounded context, an item tag that isn't one of `tag_mappings()`,
+  an item with neither types nor tags (other than a lone `nothing()`,
+  below), `last(0)`, and a query together with `snapshot()`. Reach for a
+  query before a `Snapshot`: it reads a few index entries instead of a
+  growing history, and needs no catch-up. When the decision is a fold
+  over a long history, put the `Snapshot` in the query (below).
+
+### When `decide()` needs no history: `QueryItemMapping::nothing()`
+
+Some commands decide from the payload alone - a deposit with no cap,
+logging a contact, adding a note. Declare that, and the command reads no
+events and nothing ever conflicts with it (docs/architecture.md §201):
+
+```rust
+fn tag_mappings() -> Vec<TagMapping> { vec![account()] } // still tagged
+fn consistency_query() -> Vec<QueryItemMapping> {
+    vec![QueryItemMapping::nothing()]
+}
+```
+
+Its `tag_mappings()` still tag the command, so owner scoping works as
+before - which is what dropping the tag mappings to get an empty
+`matching_events` would lose. `nothing()` must be the only item and
+can't take `.latest()`/`.last(n)`. In a `.skilj.toml`, it's
+`reads_nothing = true` on the `[[command_type]]`. Only use it when
+`decide()` truly checks nothing outside the payload: any rule over
+earlier events (a balance, a uniqueness check, a status) needs those
+events in the query. A uniqueness check on personal data has its own
+skill, `skilj-uniqueness`: the value is a blind tag.
+
+### When `decide()` needs a fold over a long history: snapshot items
+
+A balance, a count of open tickets - a value folded over every event of
+an account or requester - grows with history. Put a `Snapshot` in the
+query instead of the events, and implement `decide_with` to read its
+state (docs/architecture.md §202):
+
+```rust
+fn tag_mappings() -> Vec<TagMapping> {
+    vec![account("from"), account("to"), transfer()]
+}
+fn consistency_query() -> Vec<QueryItemMapping> {
+    vec![
+        // Balance's state for the account in payload.from, and for payload.to
+        QueryItemMapping::snapshot::<Balance>("from"),
+        QueryItemMapping::snapshot::<Balance>("to"),
+        // plain items still work next to them
+        QueryItemMapping::types(&["Transferred"]).tagged(vec![transfer()]).latest(),
+    ]
+}
+fn decide_with(payload: &Self::Payload, decision: &Decision<'_, Self::Event>) -> CommandDecision {
+    let Some(from) = decision.snapshot::<Balance>(&payload.from) else { /* misconfigured */ };
+    if !decision.events().is_empty() { /* transfer id used */ }
+    // ...
+}
+```
+
+- `decision.snapshot::<S>(value)` is the stored state with every later
+  event carrying that value already folded in, by the framework, with
+  `S`'s own fold - don't fold anything yourself. `decision.events()` is
+  what the other items selected.
+- Every event carrying a snapshot item's value conflicts with the
+  command, and is folded in before it decides again.
+- A snapshot folds an event into every value of its key the event
+  carries. When the fold depends on which one (a transfer debits `from`
+  and credits `to`), implement `Snapshot::fold_for(state, value, event)`
+  instead of `fold`.
+- The item's field must map under the snapshot's `TAG_KEY` and be one of
+  `tag_mappings()`; it takes no event types and no `latest`. `build()`
+  checks that, and that the snapshot is registered.
+- `decide_with` is optional: its default calls `decide()`, so a command
+  without snapshot items keeps implementing `decide()` only.
+- The older `snapshot()` + `decide_from_snapshot` pair still works for a
+  single-tag command, but new code should use snapshot items.
+
+### Reasoning about time: `Decision::now()` and `Decision::deadline()`
+
+`decide()` never reads a clock - it stays the pure, synchronous function
+above. The framework hands it the decision's own instant, and `decide_with`
+reads it with `decision.now()` (docs/architecture.md §213). A command the
+library submits for a deadline also gets that deadline's context through
+`decision.deadline()`: `scheduled_at` (when the deadline was meant to
+fire), `deadline_at` (its optional `expires_at`) and `expired`. So a
+reminder can refuse an action it fired too late for, and a redrive or
+retry is told apart from a genuine firing by a later `now` with the same
+`scheduled_at`. `GivenEvents::now(instant)`/`.deadline(scheduled_at,
+expires_at)` inject them in a test.
+
+### Knowing when to narrow: the slow read and decide warnings
+
+skilj logs a `warn` when a command's read before the lock takes longer
+than `SkiljBuilder::slow_command_read_warning(d)` (default 250 ms), and
+when one `decide()` takes longer than `slow_command_decide_warning(d)`
+(default 10 ms), before the lock or again under it after a conflict
+(`under_lock`). Each warns at most once a minute per command type. Many
+`events_read`/`events_decided_on` means narrow the read with one of the
+three tools above. A slow read with few events means the time went to
+waiting for the pool or Postgres; a slow decide with few events means the
+work is in `decide()` itself, which should stay pure computation.
 
 ## The `Event` associated type
 
