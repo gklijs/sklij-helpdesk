@@ -155,7 +155,7 @@ async fn main() -> Result<(), async_nats::Error> {
             &config.base_url,
             &create_ticket_mapping,
             &retry_policy,
-            config.batching.clone(),
+            config.batching,
             stopped(stop_rx.clone()),
         ),
         skilj_nats::run_inbound_until_with(
@@ -164,7 +164,7 @@ async fn main() -> Result<(), async_nats::Error> {
             &config.base_url,
             &customer_reply_mapping,
             &retry_policy,
-            config.batching.clone(),
+            config.batching,
             stopped(stop_rx),
         ),
     );
