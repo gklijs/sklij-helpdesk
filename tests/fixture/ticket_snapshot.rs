@@ -14,7 +14,7 @@
 use std::marker::PhantomData;
 
 use skilj::{CommandType, Snapshot};
-use skilj_core::plugin::{Decision, SnapshotState};
+use skilj_core::plugin::{Decision, DecisionContext, SnapshotState};
 use skilj_core::shared::CommandDecision;
 use skilj_helpdesk::helpdesk::*;
 use skilj_test_fixture::command::{CommandOutcome, GivenEvents};
@@ -272,7 +272,10 @@ fn a_missing_or_unreadable_state_is_rejected_rather_than_trusted() {
         folded_through: -1,
     }];
     for states in [&unreadable[..], &[]] {
-        let decision = AssignTicket::decide_with(&assign(), &Decision::new(&[], states));
+        let decision = AssignTicket::decide_with(
+            &assign(),
+            &Decision::new(&[], states, &DecisionContext::at(chrono::Utc::now())),
+        );
         assert!(
             matches!(&decision, CommandDecision::Rejected { kind, .. } if kind == "snapshot_unreadable"),
             "{decision:?}"

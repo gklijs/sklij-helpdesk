@@ -40,24 +40,30 @@ use crate::helpdesk::{CompanyTenantProvisioned, BOUNDED_CONTEXT};
 use skilj_core::access_control::{self, AccessLevel, Role, RoleAccessMapping};
 use skilj_core::db;
 use skilj_core::plugin::EventType;
+use std::collections::BTreeSet;
 
 /// One grant/revoke the reconciler intends to make.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SyncAction {
     /// This Role has a company-scoped grant on the shared context but none
-    /// on the tenant. Carries the shared grant's level and sensitive-read
-    /// flag so the tenant copy is never weaker than the authority.
+    /// on the tenant. Carries the shared grant's level, sensitive-read
+    /// flag and capabilities so the tenant copy is never weaker than the
+    /// authority - nor, since capabilities gate reads by themselves
+    /// (skilj 0.2.0), stronger.
     Grant {
         role_id: String,
         level: AccessLevel,
         can_read_sensitive: bool,
+        capabilities: BTreeSet<String>,
+        delegable: BTreeSet<String>,
     },
     /// The tenant still holds a company-scoped grant whose shared-context
     /// counterpart is gone. Only ever proposed for a mapping scoped to
     /// *this* company - see `sync_plan`.
     Revoke { role_id: String },
     /// Both sides hold a company-scoped grant for this Role, but the
-    /// tenant's level or sensitive-read flag differs from the authority's.
+    /// tenant's level, sensitive-read flag, capabilities or delegable
+    /// capabilities differ from the authority's.
     /// Carried out as a revoke followed by a grant at the shared level, so
     /// a downgrade on the shared context is never left stronger in the
     /// tenant.
@@ -65,6 +71,8 @@ pub enum SyncAction {
         role_id: String,
         level: AccessLevel,
         can_read_sensitive: bool,
+        capabilities: BTreeSet<String>,
+        delegable: BTreeSet<String>,
     },
 }
 
@@ -138,19 +146,27 @@ pub fn sync_plan(
                 role_id: shared.role.id.clone(),
                 level: shared.level,
                 can_read_sensitive: shared.can_read_sensitive,
+                capabilities: shared.capabilities.clone(),
+                delegable: shared.delegable.clone(),
             }),
             // Presence alone is not enough: a shared grant that was
             // narrowed (lower level, sensitive reads switched off) must
             // narrow the tenant copy too, or the projection keeps access
-            // the authority already took away.
+            // the authority already took away. Capabilities likewise: one
+            // revoked on the shared context must not stay held in the
+            // tenant.
             Some(tenant)
                 if tenant.level != shared.level
-                    || tenant.can_read_sensitive != shared.can_read_sensitive =>
+                    || tenant.can_read_sensitive != shared.can_read_sensitive
+                    || tenant.capabilities != shared.capabilities
+                    || tenant.delegable != shared.delegable =>
             {
                 plan.regrants.push(SyncAction::Regrant {
                     role_id: shared.role.id.clone(),
                     level: shared.level,
                     can_read_sensitive: shared.can_read_sensitive,
+                    capabilities: shared.capabilities.clone(),
+                    delegable: shared.delegable.clone(),
                 })
             }
             Some(_) => {}
@@ -262,6 +278,8 @@ pub async fn reconcile_company_access(
             role_id,
             level,
             can_read_sensitive,
+            capabilities,
+            delegable,
         } = action
         else {
             unreachable!("sync_plan only ever puts Grant in `grants`")
@@ -271,8 +289,12 @@ pub async fn reconcile_company_access(
             ops_role,
             &role_id,
             &tenant_bc,
-            level,
-            can_read_sensitive,
+            Grant {
+                level,
+                can_read_sensitive,
+                capabilities,
+                delegable,
+            },
             company_id,
         )
         .await
@@ -289,7 +311,7 @@ pub async fn reconcile_company_access(
         let SyncAction::Revoke { role_id } = action else {
             unreachable!("sync_plan only ever puts Revoke in `revokes`")
         };
-        match revoke_one(pool, &role_id, tenant_name, company_id).await {
+        match revoke_one(pool, ops_role, &role_id, tenant_name, company_id).await {
             Ok(()) => outcome.revoked.push(role_id),
             Err(e) => skip(
                 &mut outcome,
@@ -303,6 +325,8 @@ pub async fn reconcile_company_access(
             role_id,
             level,
             can_read_sensitive,
+            capabilities,
+            delegable,
         } = action
         else {
             unreachable!("sync_plan only ever puts Regrant in `regrants`")
@@ -310,7 +334,7 @@ pub async fn reconcile_company_access(
         // Revoke first: if the grant then fails the Role is left with no
         // tenant access (retried next pass) rather than the stale,
         // possibly stronger one.
-        if let Err(e) = revoke_one(pool, &role_id, tenant_name, company_id).await {
+        if let Err(e) = revoke_one(pool, ops_role, &role_id, tenant_name, company_id).await {
             skip(
                 &mut outcome,
                 format!("regrant of {role_id} on {tenant_name:?} failed to revoke: {e}"),
@@ -322,8 +346,12 @@ pub async fn reconcile_company_access(
             ops_role,
             &role_id,
             &tenant_bc,
-            level,
-            can_read_sensitive,
+            Grant {
+                level,
+                can_read_sensitive,
+                capabilities,
+                delegable,
+            },
             company_id,
         )
         .await
@@ -339,14 +367,24 @@ pub async fn reconcile_company_access(
     outcome
 }
 
-#[allow(clippy::too_many_arguments)]
+/// What a tenant grant should hold - the shared grant's terms.
+struct Grant {
+    level: AccessLevel,
+    can_read_sensitive: bool,
+    capabilities: BTreeSet<String>,
+    delegable: BTreeSet<String>,
+}
+
+/// Grants `role_id` on the tenant, recording `AccessGranted` in skilj's
+/// access trail (the `admin` bounded context) in the same transaction,
+/// with `ops_role` as the actor - so `capabilityHistory` can answer what a
+/// customer held in their tenant at any instant since skilj 0.2.0.
 async fn grant_one(
     pool: &db::Pool,
     ops_role: &Role,
     role_id: &str,
     tenant_bc: &skilj_core::event_store::BoundedContext,
-    level: AccessLevel,
-    can_read_sensitive: bool,
+    grant: Grant,
     scope: &str,
 ) -> Result<(), String> {
     let Some(role) = db::get_role(pool, role_id)
@@ -363,24 +401,31 @@ async fn grant_one(
     let existing = db::list_active_role_access_mappings_for_bounded_context(pool, tenant_bc)
         .await
         .map_err(|e| e.to_string())?;
-    let granted = access_control::grant_role_access_mapping(
+    let mut granted = access_control::grant_role_access_mapping(
         ops_role,
         &role,
         tenant_bc,
-        level,
-        can_read_sensitive,
+        grant.level,
+        grant.can_read_sensitive,
         Some(scope.to_string()),
         &existing,
         chrono::Utc::now(),
     )
     .map_err(|e| e.to_string())?;
-    db::insert_role_access_mapping(pool, &granted)
+    // `grant_role_access_mapping` starts every grant with no capabilities;
+    // the tenant copy carries the shared grant's in the same row, so it is
+    // never briefly weaker (or, after a regrant, briefly stronger) than
+    // the authority. The trail's `AccessGranted` records them with it.
+    granted.capabilities = grant.capabilities;
+    granted.delegable = grant.delegable;
+    db::grant_role_access_mapping_with_trail(pool, &granted, Some(&ops_role.id))
         .await
         .map_err(|e| e.to_string())
 }
 
 async fn revoke_one(
     pool: &db::Pool,
+    ops_role: &Role,
     role_id: &str,
     tenant_name: &str,
     scope: &str,
@@ -405,9 +450,18 @@ async fn revoke_one(
             existing.scope
         ));
     }
-    db::revoke_active_role_access_mapping(pool, role_id, tenant_name, chrono::Utc::now())
-        .await
-        .map_err(|e| e.to_string())
+    // `false` means a concurrent pass revoked it first: as harmless as the
+    // "already gone" case above, and the trail records it once.
+    db::revoke_role_access_mapping_with_trail(
+        pool,
+        role_id,
+        tenant_name,
+        chrono::Utc::now(),
+        &ops_role.id,
+    )
+    .await
+    .map(|_| ())
+    .map_err(|e| e.to_string())
 }
 
 /// Every `(company_id, tenant_name)` pair the shared context has recorded,
@@ -532,6 +586,8 @@ mod tests {
             level: AccessLevel::Write,
             can_read_sensitive: false,
             scope: scope.map(str::to_string),
+            capabilities: Default::default(),
+            delegable: Default::default(),
             status: RoleStatus::Active,
             created_at: chrono::Utc::now(),
             revoked_at: None,
@@ -543,6 +599,8 @@ mod tests {
             role_id: role_id.into(),
             level: AccessLevel::Write,
             can_read_sensitive: false,
+            capabilities: Default::default(),
+            delegable: Default::default(),
         }
     }
 
@@ -577,6 +635,8 @@ mod tests {
                 role_id: "cust".into(),
                 level: AccessLevel::Admin,
                 can_read_sensitive: true,
+                capabilities: Default::default(),
+                delegable: Default::default(),
             }]
         );
     }
@@ -702,9 +762,42 @@ mod tests {
                 role_id: "cust".into(),
                 level: AccessLevel::Write,
                 can_read_sensitive: false,
+                capabilities: Default::default(),
+                delegable: Default::default(),
             }]
         );
         assert!(plan.grants.is_empty() && plan.revokes.is_empty());
+    }
+
+    #[test]
+    fn a_capability_revoked_on_the_shared_context_is_revoked_in_the_tenant() {
+        // Since skilj 0.2.0 a capability opens a gate on its own, so one
+        // the authority took away must not stay held in the tenant.
+        let shared = mapping("cust", BOUNDED_CONTEXT, Some("acme"));
+        let mut tenant = mapping("cust", "company-acme", Some("acme"));
+        tenant.capabilities.insert("staff".into());
+        let plan = sync_plan("acme", &[shared], &[tenant]);
+        assert_eq!(
+            plan.regrants,
+            vec![SyncAction::Regrant {
+                role_id: "cust".into(),
+                level: AccessLevel::Write,
+                can_read_sensitive: false,
+                capabilities: Default::default(),
+                delegable: Default::default(),
+            }]
+        );
+    }
+
+    #[test]
+    fn a_capability_granted_on_the_shared_context_is_copied_into_the_tenant() {
+        let mut shared = mapping("cust", BOUNDED_CONTEXT, Some("acme"));
+        shared.capabilities.insert("billing".into());
+        let plan = sync_plan("acme", &[shared], &[]);
+        let [SyncAction::Grant { capabilities, .. }] = plan.grants.as_slice() else {
+            panic!("expected one grant: {plan:?}");
+        };
+        assert_eq!(capabilities, &BTreeSet::from(["billing".to_string()]));
     }
 
     #[test]

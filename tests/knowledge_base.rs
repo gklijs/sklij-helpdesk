@@ -18,7 +18,7 @@ mod support;
 
 use skilj_core::access_control::AccessLevel;
 use skilj_core::db::Pool;
-use skilj_helpdesk::helpdesk::STAFF_TEAM;
+use skilj_helpdesk::helpdesk::STAFF_ROLE;
 use skilj_helpdesk::knowledge_base::{KnowledgeBaseReviewState, PublishedArticlesState};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -456,7 +456,7 @@ fn customers_read_published_articles_but_never_drafts() {
         let graphql = skilj.graphql_router().await.unwrap();
         let company_id = unique_name("company");
 
-        let staff = seed_role(&pool, STAFF_TEAM).await;
+        let staff = seed_role(&pool, STAFF_ROLE).await;
         seed_mapping_for(&pool, &staff, KB, AccessLevel::Write, None).await;
         let staff = sign_jwt(&staff.external_subject);
         let customer = seed_role(&pool, "customer").await;

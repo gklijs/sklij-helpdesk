@@ -775,6 +775,8 @@ impl ScheduleDeadline for ScheduleCompanyTrialConversion {
         }
         Some(DeadlineSpec {
             fire_at: chrono::Utc::now() + scheduling::trial_duration(),
+            expires_at: None,
+            recurrence: None,
             tags: vec![company_tag_value(&source_payload.company_id)],
             payload: ConvertCompanyTrialPayload {
                 company_id: source_payload.company_id.clone(),
@@ -807,6 +809,8 @@ impl ScheduleDeadline for ScheduleCompanyTrialExpiry {
         }
         Some(DeadlineSpec {
             fire_at: chrono::Utc::now() + scheduling::trial_duration(),
+            expires_at: None,
+            recurrence: None,
             tags: vec![company_tag_value(&source_payload.company_id)],
             payload: ExpireCompanyTrialPayload {
                 company_id: source_payload.company_id.clone(),

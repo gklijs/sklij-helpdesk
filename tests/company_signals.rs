@@ -12,7 +12,7 @@ mod support;
 
 use skilj_core::access_control::AccessLevel;
 use skilj_helpdesk::activity::CompanyEngagementState;
-use skilj_helpdesk::helpdesk::STAFF_TEAM;
+use skilj_helpdesk::helpdesk::STAFF_ROLE;
 use skilj_helpdesk::marketing::MarketingSignalsState;
 use std::time::Duration;
 use support::{
@@ -81,9 +81,9 @@ fn error_code(response: &serde_json::Value) -> &str {
 /// `company_id`, and a staff Role scoped to some other company - the
 /// three cases each projection's gates have to tell apart.
 async fn readers(pool: &skilj_core::db::Pool, company_id: &str) -> (String, String, String) {
-    let staff = seed_role(pool, STAFF_TEAM).await;
+    let staff = seed_role(pool, STAFF_ROLE).await;
     let customer = seed_role(pool, "customer").await;
-    let other_staff = seed_role(pool, STAFF_TEAM).await;
+    let other_staff = seed_role(pool, STAFF_ROLE).await;
     for context in [ACTIVITY, MARKETING] {
         seed_mapping_for(pool, &staff, context, AccessLevel::Read, None).await;
         seed_mapping_for(

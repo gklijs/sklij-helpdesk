@@ -29,7 +29,7 @@
 
 use proptest::prelude::*;
 use skilj::{CommandType, CrossContextRoute, Snapshot};
-use skilj_core::plugin::{Decision, SnapshotState};
+use skilj_core::plugin::{Decision, DecisionContext, SnapshotState};
 use skilj_core::shared::{CommandDecision, EventSpec};
 use skilj_helpdesk::helpdesk::*;
 use skilj_helpdesk::sla::{SlaKind, SlaPolicy, SlaTarget};
@@ -148,7 +148,14 @@ impl World {
             let json = serde_json::to_string(&self.workload(s)).unwrap();
             state(StaffWorkload::NAME, s, json)
         }));
-        let decision = C::decide_with(&payload, &Decision::new(&self.history, &states));
+        let decision = C::decide_with(
+            &payload,
+            &Decision::new(
+                &self.history,
+                &states,
+                &DecisionContext::at(chrono::Utc::now()),
+            ),
+        );
         self.apply(&decision);
         decision
     }

@@ -27,22 +27,16 @@ use skilj_core::event_store::Event;
 use skilj_core::plugin::BoundedContextEvent;
 use skilj_core::shared::{CommandDecision, EventSpec, QueryItemMapping, TagMapping};
 
-use crate::helpdesk::STAFF_TEAM;
+use crate::helpdesk::STAFF_CAPABILITY;
 
 pub const BOUNDED_CONTEXT: &str = "activity";
 
 fn company_tag() -> Vec<TagMapping> {
-    vec![TagMapping {
-        key: "company".into(),
-        field: "company_id".into(),
-    }]
+    vec![TagMapping::new("company", "company_id")]
 }
 
 fn person_tag() -> Vec<TagMapping> {
-    vec![TagMapping {
-        key: "person".into(),
-        field: "person_subject".into(),
-    }]
+    vec![TagMapping::new("person", "person_subject")]
 }
 
 /// `specs/activity.allium`'s `enum PersonKind`.
@@ -77,14 +71,8 @@ impl EventType for DailyActivityRecorded {
     const NAME: &'static str = "DailyActivityRecorded";
     fn tag_mappings() -> Vec<TagMapping> {
         vec![
-            TagMapping {
-                key: "company".into(),
-                field: "company_id".into(),
-            },
-            TagMapping {
-                key: "person".into(),
-                field: "person_subject".into(),
-            },
+            TagMapping::new("company", "company_id"),
+            TagMapping::new("person", "person_subject"),
         ]
     }
     /// `tests/activity.rs`'s own event-feed assertions read this the
@@ -302,7 +290,7 @@ impl Projection for CompanyEngagement {
     type Event = ActivityEvent;
     const NAME: &'static str = "CompanyEngagement";
     const OWNER_TAG_KEY: Option<&'static str> = Some("company");
-    const TEAM_ONLY: Option<&'static str> = Some(STAFF_TEAM);
+    const REQUIRES_CAPABILITY: Option<&'static str> = Some(STAFF_CAPABILITY);
     fn consumed_event_types() -> Vec<&'static str> {
         vec!["DailyActivityRecorded", "CompanyEngagementDeclined"]
     }
