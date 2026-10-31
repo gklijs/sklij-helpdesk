@@ -225,7 +225,11 @@ fn parse_sections(stdout: &str) -> HashMap<String, HashMap<String, String>> {
             continue;
         }
         let Some(entry) = line.strip_prefix("  ") else {
-            heading = line.trim_end_matches(':').to_string();
+            // Tracing also writes to stdout and can interleave with token
+            // minting. Only section headings may change the active section.
+            if let Some(section) = line.strip_suffix(':') {
+                heading = section.to_string();
+            }
             continue;
         };
         let pair = match entry.strip_prefix("export ") {
@@ -242,6 +246,30 @@ fn parse_sections(stdout: &str) -> HashMap<String, HashMap<String, String>> {
         }
     }
     sections
+}
+
+#[test]
+fn startup_sections_preserve_tokens_across_interleaved_logs() {
+    let sections = parse_sections(concat!(
+        "command tokens (send as bearer):\n",
+        "  SignUpCompany: id.secret\n",
+        "2026-10-31T08:00:00Z INFO database connection opened\n",
+        "  CreateTicket: ticket.secret\n",
+        "\nactivity's own command tokens:\n",
+        "  RecordDailyActivity: activity.secret\n",
+    ));
+    assert_eq!(
+        sections["command tokens (send as bearer)"]["SignUpCompany"],
+        "id.secret"
+    );
+    assert_eq!(
+        sections["command tokens (send as bearer)"]["CreateTicket"],
+        "ticket.secret"
+    );
+    assert_eq!(
+        sections["activity's own command tokens"]["RecordDailyActivity"],
+        "activity.secret"
+    );
 }
 
 /// Starts one of the consumer binaries with the env block `server`
