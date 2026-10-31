@@ -20,7 +20,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use skilj::{auto_register, CommandType, CrossContextRoute, EventType, Projection};
 use skilj_core::event_store::Event;
-use skilj_core::plugin::BoundedContextEvent;
+use skilj_core::plugin::{BoundedContextEvent, Decision};
 use skilj_core::shared::{CommandDecision, EventSpec, QueryItemMapping, TagMapping};
 
 use crate::activity;
@@ -29,10 +29,7 @@ use crate::helpdesk;
 pub const BOUNDED_CONTEXT: &str = "marketing";
 
 fn company_tag() -> Vec<TagMapping> {
-    vec![TagMapping {
-        key: "company".into(),
-        field: "company_id".into(),
-    }]
+    vec![TagMapping::new("company", "company_id")]
 }
 
 // --- events ---
@@ -144,7 +141,6 @@ fn marketing_query() -> Vec<QueryItemMapping> {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct RecordTrialLapsePayload {
     pub company_id: String,
-    pub lapsed_at: String,
 }
 
 pub struct RecordTrialLapse;
@@ -161,13 +157,19 @@ impl CommandType for RecordTrialLapse {
     fn consistency_query() -> Vec<QueryItemMapping> {
         marketing_query()
     }
-    fn decide(payload: &Self::Payload, _matching_events: &[Self::Event]) -> CommandDecision {
+    /// `lapsed_at` is the submission's own instant (`Decision::now`, skilj
+    /// 0.2.0): the route submits this the moment it reads
+    /// `CompanyExpired`, which carries no timestamp of its own.
+    fn decide_with(
+        payload: &Self::Payload,
+        decision: &Decision<'_, Self::Event>,
+    ) -> CommandDecision {
         CommandDecision::Accepted {
             events: vec![EventSpec {
                 event_type: "TrialLapsed".into(),
                 payload: serde_json::json!({
                     "company_id": payload.company_id,
-                    "lapsed_at": payload.lapsed_at,
+                    "lapsed_at": decision.now().to_rfc3339(),
                 }),
             }],
         }
@@ -177,7 +179,6 @@ impl CommandType for RecordTrialLapse {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct RecordTrialConversionPayload {
     pub company_id: String,
-    pub converted_at: String,
 }
 
 pub struct RecordTrialConversion;
@@ -194,13 +195,18 @@ impl CommandType for RecordTrialConversion {
     fn consistency_query() -> Vec<QueryItemMapping> {
         marketing_query()
     }
-    fn decide(payload: &Self::Payload, _matching_events: &[Self::Event]) -> CommandDecision {
+    /// `converted_at` is the submission's own instant - see
+    /// `RecordTrialLapse::decide_with`.
+    fn decide_with(
+        payload: &Self::Payload,
+        decision: &Decision<'_, Self::Event>,
+    ) -> CommandDecision {
         CommandDecision::Accepted {
             events: vec![EventSpec {
                 event_type: "TrialConverted".into(),
                 payload: serde_json::json!({
                     "company_id": payload.company_id,
-                    "converted_at": payload.converted_at,
+                    "converted_at": decision.now().to_rfc3339(),
                 }),
             }],
         }
@@ -271,7 +277,7 @@ pub struct MarketingSignalsState {
 /// MarketingOutreachSignals`, as a read model: what the staff dashboard's
 /// company panel shows. Staff-only, the same two gates
 /// `helpdesk::TicketInternalNotes` uses: `OWNER_TAG_KEY` scopes a
-/// company-restricted grant to its own company, and `TEAM_ONLY` keeps a
+/// company-restricted grant to its own company, and `REQUIRES_CAPABILITY` keeps a
 /// customer out of their own company's row.
 pub struct MarketingSignals;
 
@@ -281,7 +287,7 @@ impl Projection for MarketingSignals {
     type Event = MarketingEvent;
     const NAME: &'static str = "MarketingSignals";
     const OWNER_TAG_KEY: Option<&'static str> = Some("company");
-    const TEAM_ONLY: Option<&'static str> = Some(helpdesk::STAFF_TEAM);
+    const REQUIRES_CAPABILITY: Option<&'static str> = Some(helpdesk::STAFF_CAPABILITY);
     fn consumed_event_types() -> Vec<&'static str> {
         vec!["TrialLapsed", "TrialConverted", "EngagementDeclineFlagged"]
     }
@@ -329,13 +335,14 @@ impl Projection for MarketingSignals {
 //
 // `specs/marketing.allium`'s own "Cross-context wiring" note, made real:
 // each `route()` below is a pure function of the source payload alone
-// (no I/O, per `CrossContextRoute::route`'s own contract) - `lapsed_at`/
-// `converted_at` are freshly stamped here since neither
+// (no I/O, per `CrossContextRoute::route`'s own contract). `lapsed_at`/
+// `converted_at` aren't in these payloads at all: neither
 // `CompanyExpiredPayload` nor `CompanyActivatedPayload` carries its own
-// timestamp (see `src/helpdesk/`), matching the spec's own
-// `ensures: ... lapsed_at: now` / `converted_at: now`. The engagement-
-// decline route instead carries the source event's own `flagged_at`
-// through unchanged, matching `specs/marketing.allium`'s own
+// timestamp (see `src/helpdesk/`), so the target command's `decide_with`
+// stamps the submission's own instant (`Decision::now`), matching the
+// spec's `ensures: ... lapsed_at: now` / `converted_at: now`. The
+// engagement-decline route instead carries the source event's own
+// `flagged_at` through unchanged, matching `specs/marketing.allium`'s own
 // `rule EngagementDeclineIsRoutedFromActivity`.
 
 /// `helpdesk.CompanyExpired -> marketing.RecordTrialLapse`.
@@ -348,7 +355,6 @@ impl CrossContextRoute for HelpdeskExpiryToTrialLapse {
     fn route(source_payload: &helpdesk::CompanyExpiredPayload) -> Option<RecordTrialLapsePayload> {
         Some(RecordTrialLapsePayload {
             company_id: source_payload.company_id.clone(),
-            lapsed_at: chrono::Utc::now().to_rfc3339(),
         })
     }
 }
@@ -369,7 +375,6 @@ impl CrossContextRoute for HelpdeskActivationToTrialConversion {
     ) -> Option<RecordTrialConversionPayload> {
         Some(RecordTrialConversionPayload {
             company_id: source_payload.company_id.clone(),
-            converted_at: chrono::Utc::now().to_rfc3339(),
         })
     }
 }

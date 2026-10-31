@@ -272,6 +272,40 @@ pub async fn ensure_stream(
         .await?)
 }
 
+/// How the two command loops batch (skilj 0.2.0, docs/architecture.md
+/// §227 in the skilj repo): emails already pulled go to skilj's
+/// `POST /v1/commands/trigger/batch` together, in stream order, with
+/// `stopAtFirstFailure` - so a reply never overtakes the email that
+/// opened its ticket, and one that fails is retried and parked on its own
+/// as before.
+///
+/// `EMAIL_BRIDGE_BATCH_MAX_ITEMS` (default 100, skilj's own
+/// `max_items_per_batch`; `1` turns batching off) and
+/// `EMAIL_BRIDGE_BATCH_LINGER_MS` (default 0: send what has arrived,
+/// adding no latency) tune it, read through `var`.
+pub fn inbound_batching(
+    var: impl Fn(&str) -> Option<String>,
+) -> Result<skilj_nats::InboundBatching, String> {
+    let mut batching = skilj_nats::InboundBatching::default();
+    if let Some(v) = var("EMAIL_BRIDGE_BATCH_MAX_ITEMS").filter(|v| !v.trim().is_empty()) {
+        batching.max_items = match v.trim().parse::<usize>() {
+            Ok(n) if n >= 1 => n,
+            _ => {
+                return Err(format!(
+                    "EMAIL_BRIDGE_BATCH_MAX_ITEMS: expected a whole number of at least 1, got {v:?}"
+                ))
+            }
+        };
+    }
+    if let Some(v) = var("EMAIL_BRIDGE_BATCH_LINGER_MS").filter(|v| !v.trim().is_empty()) {
+        let ms = v.trim().parse::<u64>().map_err(|_| {
+            format!("EMAIL_BRIDGE_BATCH_LINGER_MS: expected milliseconds, got {v:?}")
+        })?;
+        batching.linger = std::time::Duration::from_millis(ms);
+    }
+    Ok(batching)
+}
+
 /// A durable pull consumer on [`STREAM`], reading only `subject`. Created
 /// if missing, so every reader resumes where it left off after a restart.
 pub async fn pull_consumer(
@@ -499,6 +533,30 @@ mod tests {
                 "{to}"
             );
         }
+    }
+
+    #[test]
+    fn batching_defaults_to_skiljs_and_is_tunable() {
+        let vars = |pairs: &'static [(&'static str, &'static str)]| {
+            move |name: &str| {
+                pairs
+                    .iter()
+                    .find(|(k, _)| *k == name)
+                    .map(|(_, v)| v.to_string())
+            }
+        };
+        let default = inbound_batching(vars(&[])).unwrap();
+        assert_eq!(default.max_items, 100);
+        assert_eq!(default.linger, std::time::Duration::ZERO);
+        let tuned = inbound_batching(vars(&[
+            ("EMAIL_BRIDGE_BATCH_MAX_ITEMS", "1"),
+            ("EMAIL_BRIDGE_BATCH_LINGER_MS", "25"),
+        ]))
+        .unwrap();
+        assert_eq!(tuned.max_items, 1);
+        assert_eq!(tuned.linger, std::time::Duration::from_millis(25));
+        assert!(inbound_batching(vars(&[("EMAIL_BRIDGE_BATCH_MAX_ITEMS", "0")])).is_err());
+        assert!(inbound_batching(vars(&[("EMAIL_BRIDGE_BATCH_LINGER_MS", "soon")])).is_err());
     }
 
     #[test]

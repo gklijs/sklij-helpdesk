@@ -12,6 +12,7 @@ use skilj_test_fixture::command::GivenEvents;
 
 use crate::events::*;
 use crate::ticket_snapshot::GivenTicket;
+use skilj_core::shared::CommandDecision;
 
 fn round_the_clock() -> SlaPolicy {
     SlaPolicy {
@@ -151,6 +152,23 @@ fn a_breach_is_recorded_and_escalates_the_ticket() {
                 ),
             ]);
     }
+}
+
+#[test]
+fn a_breach_fired_by_its_deadline_records_when_it_was_due() {
+    // The deadline's `scheduled_at`, not when the loop got to it.
+    let due: chrono::DateTime<chrono::Utc> = "2026-10-28T09:30:00Z".parse().unwrap();
+    GivenTicket::<BreachTicketSla>::new()
+        .events(open_ticket("t1", "acme"))
+        .deadline(due)
+        .when(breach(SlaKind::FirstResponse))
+        .then(|decision| {
+            let CommandDecision::Accepted { events } = decision else {
+                panic!("rejected: {decision:?}")
+            };
+            assert_eq!(events[0].event_type, "TicketSlaBreached");
+            assert_eq!(events[0].payload["due_at"], "2026-10-28T09:30:00+00:00");
+        });
 }
 
 #[test]

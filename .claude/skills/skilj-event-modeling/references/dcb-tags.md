@@ -59,6 +59,21 @@ module doc comment explains it in exactly these terms, and
 a course's last seat to prove the atomicity holds under real
 concurrency, not just in a single-threaded reading of the code.)
 
+## Where DCB's answer stops applying
+
+DCB replaces the saga/process-manager need only for facts that can be
+checked in one synchronous, same-database transaction. If part of the
+process genuinely can't happen there - calling an external payment
+gateway, waiting hours or days for a webhook or a human approval - that
+is not a DCB tagging problem to solve by finding one more tag, and DCB
+has nothing to say about it. Don't reach for a bigger tag set or a
+second `decide()` call to paper over that; it's a different kind of
+problem. skilj's own answer there is pairing with an external durable-
+execution system (Temporal) rather than building process-manager
+machinery of its own - see [`docs/architecture.md` §34](../../../../docs/architecture.md#skilj-temporal-plan) and
+`docs/temporal-integration.md` if the domain conversation surfaces a
+step like this.
+
 ## What this means for the modeling conversation
 
 - **An event or command can have more than one tag.** Don't stop at the
@@ -74,7 +89,41 @@ concurrency, not just in a single-threaded reading of the code.)
   sketching the event/command's own data in step 1/2 of the main
   workflow - if it doesn't exist yet, that's a gap in the payload sketch
   to fix first, not a tag to note anyway.
+- **A decision may need only some events with a tag, or only the
+  last.** "Is this company still active?" needs the company's latest
+  lifecycle event, not every ticket it ever filed, even though both carry
+  the company's tag. Note that per command: which event types it needs
+  under each tag, and whether only the latest counts. It becomes a
+  consistency query (DCB query items) in the `skilj` skill, and it also
+  narrows what conflicts with the command. A command that decides from
+  its payload alone (no rule over earlier events) needs no history at
+  all - note that too; it becomes `QueryItemMapping::nothing()`.
 - **Not every field is a tag.** Tagging is deliberately opt-in and
   narrow - only fields another command's own decision genuinely needs to
   match on. A field nothing else ever needs to see by isn't a tag
   candidate, it's just payload data.
+
+## Uniqueness on personal data
+
+"No two customers with the same email address" is a tag question like
+any other: the command claiming an address must see the earlier claims
+of *that address*, so the address is a tag, on the claim/release events
+and on the command. When the value is personal data, that tag is
+**blind**: skilj stores a keyed hash of the normalized value instead of
+the value (a plain tag on an encrypted field is refused, because tags
+are stored and served in the clear). Two things to settle in the
+conversation, both of which end up in the summary:
+
+- **What counts as the same value?** Case, surrounding spaces, spacing
+  inside an IBAN. That becomes the tag's normalizer, and it is hard to
+  change later.
+- **What happens when the person is forgotten?** Either the value is
+  free again and no trace remains (the usual answer under a right to
+  erasure), or it stays taken (a trial used once, a banned address).
+
+Model the claim as events - `EmailClaimed`/`EmailReleased`, or a
+registration and an email change carrying the old address - since an
+append-only log has no "delete the claim". The rule is then "the latest
+claim-or-release of this value is a claim". Uniqueness only holds within
+one bounded context; if it must span several, that rule is its own
+bounded context. The `skilj-uniqueness` skill turns this into code.

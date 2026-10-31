@@ -14,7 +14,7 @@
 use std::marker::PhantomData;
 
 use skilj::{CommandType, Snapshot};
-use skilj_core::plugin::{Decision, SnapshotState};
+use skilj_core::plugin::{Decision, DecisionContext, SnapshotState};
 use skilj_core::shared::CommandDecision;
 use skilj_helpdesk::helpdesk::*;
 use skilj_test_fixture::command::{CommandOutcome, GivenEvents};
@@ -41,6 +41,8 @@ pub(crate) fn ticket_state(history: &[HelpdeskEvent], ticket: &str) -> TicketFac
 /// payload names, which is what `decide_with()` is handed.
 pub(crate) struct GivenTicket<C> {
     events: Vec<HelpdeskEvent>,
+    /// `Some(scheduled_at)` makes the decision a deadline firing.
+    deadline: Option<chrono::DateTime<chrono::Utc>>,
     command: PhantomData<C>,
 }
 
@@ -48,8 +50,16 @@ impl<C: CommandType<Event = HelpdeskEvent>> GivenTicket<C> {
     pub(crate) fn new() -> Self {
         Self {
             events: Vec::new(),
+            deadline: None,
             command: PhantomData,
         }
+    }
+
+    /// Decides as skilj's deadline loop firing a deadline due at
+    /// `scheduled_at` (`Decision::deadline`, skilj 0.2.0).
+    pub(crate) fn deadline(mut self, scheduled_at: chrono::DateTime<chrono::Utc>) -> Self {
+        self.deadline = Some(scheduled_at);
+        self
     }
 
     pub(crate) fn event(mut self, event: HelpdeskEvent) -> Self {
@@ -68,6 +78,9 @@ impl<C: CommandType<Event = HelpdeskEvent>> GivenTicket<C> {
         // plain items (`ApplyMacro`'s macro) is handed the events those
         // select.
         let mut given = GivenEvents::<C>::new().events(selected_events::<C>(&self.events, &json));
+        if let Some(scheduled_at) = self.deadline {
+            given = given.now(scheduled_at).deadline(scheduled_at, None);
+        }
         for item in C::consistency_query() {
             if item.snapshot.is_none() {
                 continue;
@@ -272,7 +285,10 @@ fn a_missing_or_unreadable_state_is_rejected_rather_than_trusted() {
         folded_through: -1,
     }];
     for states in [&unreadable[..], &[]] {
-        let decision = AssignTicket::decide_with(&assign(), &Decision::new(&[], states));
+        let decision = AssignTicket::decide_with(
+            &assign(),
+            &Decision::new(&[], states, &DecisionContext::at(chrono::Utc::now())),
+        );
         assert!(
             matches!(&decision, CommandDecision::Rejected { kind, .. } if kind == "snapshot_unreadable"),
             "{decision:?}"

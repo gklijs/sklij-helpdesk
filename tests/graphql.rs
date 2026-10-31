@@ -14,7 +14,7 @@
 mod support;
 
 use skilj_core::access_control::AccessLevel;
-use skilj_helpdesk::helpdesk::{BOUNDED_CONTEXT, STAFF_TEAM};
+use skilj_helpdesk::helpdesk::{BOUNDED_CONTEXT, STAFF_ROLE};
 use support::{
     graphql_accepted, graphql_request, runtime, seed_role, seed_scoped_mapping, setup_graphql,
     sign_jwt, submit_command_mutation, test_db, unique_name,
@@ -104,7 +104,7 @@ fn graphql_surfaces_a_business_rejection_as_typed_data_not_a_graphql_error() {
 
 /// `#[requires_role("staff")]` on `AssignTicket` (and the other
 /// staff-only command types in `helpdesk/`): over GraphQL, a Role
-/// whose `name` isn't `STAFF_TEAM` is refused before `decide()` runs,
+/// whose `name` isn't `STAFF_ROLE` is refused before `decide()` runs,
 /// however much access its mapping grants. REST triggering is not
 /// covered by this gate - a `CommandToken` is its own per-command grant.
 #[test]
@@ -140,7 +140,7 @@ fn graphql_refuses_a_staff_only_command_from_a_non_staff_role() {
         seed_scoped_mapping(&pool, &customer, AccessLevel::Write, Some(company_id.clone())).await;
         let customer_jwt = sign_jwt(&customer.external_subject);
 
-        let staff = seed_role(&pool, STAFF_TEAM).await;
+        let staff = seed_role(&pool, STAFF_ROLE).await;
         seed_scoped_mapping(&pool, &staff, AccessLevel::Write, None).await;
         let staff_jwt = sign_jwt(&staff.external_subject);
 
@@ -151,7 +151,7 @@ fn graphql_refuses_a_staff_only_command_from_a_non_staff_role() {
         );
 
         // The company's own customer, and the unscoped "Test Admin" Role
-        // `setup_graphql` seeds: neither is named `STAFF_TEAM`.
+        // `setup_graphql` seeds: neither is named `STAFF_ROLE`.
         for (who, jwt) in [("customer", &customer_jwt), ("admin", &admin_jwt)] {
             let response = graphql_request(&router, jwt, &assign).await;
             assert_eq!(

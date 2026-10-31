@@ -214,7 +214,7 @@ struct Config {
     /// set is the `MIRRORED_EVENTS` table above and duplicating that list
     /// a third time as struct fields would be exactly the kind of
     /// independent-literal drift this crate keeps avoiding (see
-    /// `helpdesk/`'s own `STAFF_TEAM` note).
+    /// `helpdesk/`'s own `STAFF_CAPABILITY` note).
     event_tokens: HashMap<String, String>,
     superadmin_subject: String,
 }

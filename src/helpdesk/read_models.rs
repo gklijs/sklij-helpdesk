@@ -591,7 +591,7 @@ impl Projection for CustomerTickets {
     }
 }
 
-// --- internal notes, staff-only by access control (TEAM_ONLY below) ---
+// --- internal notes, staff-only by access control (REQUIRES_CAPABILITY below) ---
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct TicketInternalNote {
@@ -633,26 +633,22 @@ pub struct TicketInternalNotesState {
 /// projection for their own tickets, seeing staff-only notes the
 /// feature was built to keep from them regardless of company - a role
 /// dimension (staff or not), not a tenancy one, which `scope` was never
-/// built to express. skilj 0.0.4 closes exactly that with
-/// `Projection::TEAM_ONLY` (`docs/architecture.md` §31-32 in the
-/// sibling `skilj` repo, Codeberg issue #17): a whole-projection gate,
-/// independent of and composed with `OWNER_TAG_KEY` rather than a
-/// refinement of it - a query must satisfy both, each failing on its
-/// own terms (`GrantScopeMismatch` vs. `NotOnRequiredTeam`). Adopted
-/// here as `TEAM_ONLY = Some(STAFF_TEAM)` below, matched against
-/// `server.rs`'s staff Role(s), whose `Role.name` is literally
-/// `STAFF_TEAM` for exactly this reason (no separate "team" field
-/// exists on `Role` - `name` doubles as the team identifier `TEAM_ONLY`
-/// compares against). `STAFF_TEAM` (this file's own top-level const) is
-/// the one place that string lives - `AddInternalNote`/
-/// `TicketInternalNoteAdded`'s own `private_fields()` and `server.rs`'s
-/// seeding both reference it rather than repeating the literal, found
-/// worth doing in review after the two independent gates almost drifted
-/// apart under separate literals.
-/// No superadmin bypass, deliberately - see `Projection::TEAM_ONLY`'s
-/// own doc comment. `tests/cross_company_projection_scoping.rs` now
-/// proves this half live too: a company-A customer reading company A's
-/// *own* internal notes is rejected, not just company B's.
+/// built to express. A whole-projection gate closes it, independent of
+/// and composed with `OWNER_TAG_KEY` - a query must satisfy both, each
+/// failing on its own terms. Since skilj 0.2.0 that gate is
+/// `Projection::REQUIRES_CAPABILITY` (docs/architecture.md §228 in the
+/// sibling `skilj` repo, issue #17), replacing 0.0.4's `TEAM_ONLY`, which
+/// matched `Role.name`: a grant opens it only by holding
+/// `STAFF_CAPABILITY` in its `capabilities`, which `server.rs`'s seed and
+/// the test helpers grant through `capabilities_for_role`. A caller
+/// without it gets `Projection_not_found` and doesn't see the projection
+/// in its GraphQL schema at all. `AddInternalNote`/
+/// `TicketInternalNoteAdded`'s capability-kind `private_fields()` name the
+/// same constant, so the two gates can't drift apart.
+/// No superadmin bypass, deliberately: a superadmin needs the capability
+/// like anyone else. `tests/cross_company_projection_scoping.rs` proves
+/// this half live too: a company-A customer reading company A's *own*
+/// internal notes is rejected, not just company B's.
 pub struct TicketInternalNotes;
 
 #[auto_register(BOUNDED_CONTEXT)]
@@ -661,7 +657,7 @@ impl Projection for TicketInternalNotes {
     type Event = HelpdeskEvent;
     const NAME: &'static str = "TicketInternalNotes";
     const OWNER_TAG_KEY: Option<&'static str> = Some("company");
-    const TEAM_ONLY: Option<&'static str> = Some(STAFF_TEAM);
+    const REQUIRES_CAPABILITY: Option<&'static str> = Some(STAFF_CAPABILITY);
     fn consumed_event_types() -> Vec<&'static str> {
         vec!["TicketInternalNoteAdded"]
     }

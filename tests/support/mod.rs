@@ -326,6 +326,11 @@ pub async fn seed_admin(pool: &Pool) -> RoleAccessMapping {
         // `tests/cross_company_projection_scoping.rs` for the ones that
         // deliberately want a scoped one instead.
         scope: None,
+        // No capabilities: an admin is not staff (skilj 0.2.0), so it
+        // doesn't read the staff-only projections - a test that needs
+        // that seeds a `STAFF_ROLE` Role.
+        capabilities: Default::default(),
+        delegable: Default::default(),
         status: RoleStatus::Active,
         created_at: test_now(),
         revoked_at: None,
@@ -384,10 +389,11 @@ pub async fn seed_superadmin(pool: &Pool) -> Role {
 /// "Test Admin" Role; this is the parameterised counterpart
 /// `tests/cross_company_projection_scoping.rs` (`Write`, scoped, a
 /// customer belonging to one specific company) and
-/// `tests/private_field_team_gating.rs` (`Admin`, unscoped, a caller
-/// that clears `require_admin_mapping` on its own, independent of
-/// `role.name` - `PrivateFieldKind::Team`'s own check runs separately,
-/// after this mapping already got the caller past that door) both need.
+/// `tests/private_field_capability_gating.rs` (`Admin`, unscoped, a caller
+/// that clears `require_admin_mapping` on its own - the capability-kind
+/// private field's own check runs separately, after this mapping already
+/// got the caller past that door) both need. The grant holds whatever
+/// `capabilities_for_role` gives the Role's name.
 pub async fn seed_scoped_mapping(
     pool: &Pool,
     role: &Role,
@@ -406,6 +412,10 @@ pub async fn seed_scoped_mapping(
         level,
         can_read_sensitive: false,
         scope,
+        // What the server's own seed grants a Role of this name:
+        // `STAFF_CAPABILITY` for a `STAFF_ROLE` Role, nothing otherwise.
+        capabilities: skilj_helpdesk::helpdesk::capabilities_for_role(&role.name),
+        delegable: Default::default(),
         status: RoleStatus::Active,
         created_at: test_now(),
         revoked_at: None,
@@ -427,6 +437,28 @@ pub async fn seed_mapping_for(
     level: AccessLevel,
     scope: Option<String>,
 ) -> RoleAccessMapping {
+    seed_mapping_with_capabilities(
+        pool,
+        role,
+        bounded_context_name,
+        level,
+        scope,
+        skilj_helpdesk::helpdesk::capabilities_for_role(&role.name),
+    )
+    .await
+}
+
+/// Like `seed_mapping_for`, with the grant's capabilities given rather
+/// than derived from the Role's name - for a test proving the name alone
+/// no longer opens a capability gate (skilj 0.2.0).
+pub async fn seed_mapping_with_capabilities(
+    pool: &Pool,
+    role: &Role,
+    bounded_context_name: &str,
+    level: AccessLevel,
+    scope: Option<String>,
+    capabilities: std::collections::BTreeSet<String>,
+) -> RoleAccessMapping {
     let bounded_context = db::get_bounded_context(pool, bounded_context_name)
         .await
         .unwrap()
@@ -437,6 +469,8 @@ pub async fn seed_mapping_for(
         level,
         can_read_sensitive: false,
         scope,
+        capabilities,
+        delegable: Default::default(),
         status: RoleStatus::Active,
         created_at: test_now(),
         revoked_at: None,
@@ -447,11 +481,19 @@ pub async fn seed_mapping_for(
     mapping
 }
 
-/// What every test `Skilj` encrypts customer contact details under - see
-/// `skilj_helpdesk::parse_encryption_master_key`. Fixed, so a test that
-/// builds a second `Skilj` against the same database can still read them.
-pub fn test_master_key() -> skilj::EncryptionMasterKey {
-    skilj::EncryptionMasterKey::from_bytes([7u8; 32])
+/// The key provider every test `Skilj` wraps customer data keys with.
+/// skilj 0.2.0 replaced the raw master key with key providers; an
+/// in-memory one made from fixed bytes means a test that builds a second
+/// `Skilj` against the same database (or reads the data keys itself, as
+/// `tests/rest_graphql_conformance.rs` does) can still unwrap them.
+pub fn test_key_provider() -> skilj::InMemoryKeyProvider {
+    skilj::InMemoryKeyProvider::from_bytes([7u8; 32])
+}
+
+/// `test_key_provider()` as the `KeyService` skilj's own lower-level
+/// read APIs take.
+pub fn test_key_service() -> skilj::KeyService {
+    skilj::KeyService::new(test_key_provider())
 }
 
 /// A fully-built `Skilj` with the helpdesk bounded context reconciled -
@@ -464,7 +506,7 @@ pub async fn setup() -> (Skilj, Pool, RoleAccessMapping) {
     let external_subject = mapping.role.external_subject.clone();
 
     let (skilj, report) = skilj_helpdesk::register(Skilj::builder(database_url))
-        .encryption_master_key(test_master_key())
+        .key_provider(test_key_provider())
         .reconciliation_role(external_subject)
         .build()
         .await
@@ -520,7 +562,7 @@ pub async fn setup_all_contexts() -> (Skilj, Pool, AllContextMappings) {
     // GraphQL with `sign_jwt` tokens; REST-only tests never notice it.
     let jwks_url = serve_jwks().await;
     let (skilj, report) = skilj_helpdesk::register(Skilj::builder(database_url))
-        .encryption_master_key(test_master_key())
+        .key_provider(test_key_provider())
         .reconciliation_role(external_subject)
         .identity_provider(test_idp_config(&jwks_url))
         .build()
@@ -788,7 +830,7 @@ pub async fn setup_graphql() -> (Skilj, Pool, RoleAccessMapping, String) {
     let jwks_url = serve_jwks().await;
 
     let (skilj, report) = skilj_helpdesk::register(Skilj::builder(database_url))
-        .encryption_master_key(test_master_key())
+        .key_provider(test_key_provider())
         .reconciliation_role(external_subject.clone())
         .identity_provider(test_idp_config(&jwks_url))
         .build()

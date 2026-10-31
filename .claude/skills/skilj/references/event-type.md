@@ -41,7 +41,7 @@ impl EventType for MoneyDeposited {
     type Payload = MoneyDepositedPayload;
     const NAME: &'static str = "MoneyDeposited";
     fn tag_mappings() -> Vec<TagMapping> {
-        vec![TagMapping { key: "account".into(), field: "account_id".into() }]
+        vec![TagMapping::new("account", "account_id")]
     }
 }
 ```
@@ -89,7 +89,7 @@ error, not something to handle gracefully.
 
 ```rust
 fn tag_mappings() -> Vec<TagMapping> {
-    vec![TagMapping { key: "account".into(), field: "account_id".into() }]
+    vec![TagMapping::new("account", "account_id")]
 }
 ```
 
@@ -129,6 +129,13 @@ intent. Tagging the *subject* field instead (e.g. mapping `"account"` to
 `subject_field`) is fine and normal - only overlap with the sensitive
 `field` itself is forbidden.
 
+The one exception is a **blind** mapping,
+`TagMapping::blind::<CustomerEmail>("email")`: its tag value is a keyed
+hash of the normalized field, never the value, so it may name a
+sensitive field. That's how a command checks an email address is unique
+without the address being stored in the clear - see the
+`skilj-uniqueness` skill and docs/architecture.md §205.
+
 ## `field`/`subject_field` shape rule (applies to `TagMapping` too)
 
 Both are a `FieldPath` (a plain `String`) naming either:
@@ -154,3 +161,12 @@ changed since the last registration, and re-registering with an
 incompatible change (removing a field, tightening optional to required)
 is rejected outright rather than silently accepted
 (`SchemaIncompatible`). A newly added field must be `Option<T>`.
+
+Additive-only is a deliberate, permanent limitation, not a bug to work
+around by force - a genuine reshape (rename, retype, split/merge a
+field) is never a legal revision of an existing type. See
+`references/common-mistakes.md`'s own `SchemaIncompatible` entry and
+[`docs/architecture.md` §33](../../../../docs/architecture.md#payload-upcasting) for the real options, including
+`skilj_core::plugin::upcast_payload` for interpreting an old payload
+differently based on `event.metadata.version` without minting a new
+type at all.

@@ -91,6 +91,13 @@ pub struct TicketSlaBreachedPayload {
     pub ticket_id: String,
     pub company_id: String,
     pub sla: SlaKind,
+    /// When the SLA was due, RFC 3339: the firing deadline's own
+    /// `scheduled_at` (skilj 0.2.0's `Decision::deadline`), not when the
+    /// deadline loop got to it - after an outage the two can be far
+    /// apart. `None` for a breach submitted by hand, and for one recorded
+    /// before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub due_at: Option<String>,
 }
 
 pub struct TicketSlaBreached;
@@ -149,14 +156,21 @@ impl CommandType for BreachTicketSla {
         payload: &Self::Payload,
         decision: &Decision<'_, Self::Event>,
     ) -> CommandDecision {
+        let due_at = decision.deadline().map(|d| d.scheduled_at);
         decide_on_ticket(decision, &payload.ticket_id, |facts| {
-            Self::decide_on(payload, facts)
+            Self::decide_on(payload, facts, due_at)
         })
     }
 }
 
 impl BreachTicketSla {
-    fn decide_on(payload: &BreachTicketSlaPayload, facts: &TicketFacts) -> CommandDecision {
+    /// `due_at` is the firing deadline's `scheduled_at`; `None` when
+    /// submitted by hand.
+    fn decide_on(
+        payload: &BreachTicketSlaPayload,
+        facts: &TicketFacts,
+        due_at: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> CommandDecision {
         match facts.status {
             None => {
                 return CommandDecision::Rejected {
@@ -207,13 +221,17 @@ impl BreachTicketSla {
                 kind: "sla_already_breached".into(),
             };
         }
+        let mut breach = serde_json::json!({
+            "ticket_id": payload.ticket_id,
+            "company_id": facts.company_id(),
+            "sla": payload.sla,
+        });
+        if let Some(due_at) = due_at {
+            breach["due_at"] = due_at.to_rfc3339().into();
+        }
         let mut events = vec![EventSpec {
             event_type: "TicketSlaBreached".into(),
-            payload: serde_json::json!({
-                "ticket_id": payload.ticket_id,
-                "company_id": facts.company_id(),
-                "sla": payload.sla,
-            }),
+            payload: breach,
         }];
         if !facts.escalated {
             // Its current priority - a macro may have moved it.
@@ -257,6 +275,8 @@ fn sla_deadline(
     };
     Some(DeadlineSpec {
         fire_at: add_business_minutes(chrono::Utc::now(), minutes, &sla.business_hours),
+        expires_at: None,
+        recurrence: None,
         tags: vec![ticket_tag_value(&source.ticket_id)],
         payload: BreachTicketSlaPayload {
             ticket_id: source.ticket_id.clone(),

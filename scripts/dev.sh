@@ -84,21 +84,23 @@ if [ -z "${DATABASE_URL:-}" ]; then
     pg_ctl -D "$PG_DATA_DIR" -o "-p $PG_PORT -k /tmp" -l "$PG_DATA_DIR/log.txt" start >/dev/null
     createdb -h /tmp -p "$PG_PORT" -U postgres skilj_helpdesk_dev
     export DATABASE_URL="postgres:///skilj_helpdesk_dev?host=/tmp&port=${PG_PORT}&user=postgres"
-    # A fresh key is fine for a database that dies with this run.
-    if [ -z "${ENCRYPTION_MASTER_KEY:-}" ]; then
-        ENCRYPTION_MASTER_KEY="$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')"
-        export ENCRYPTION_MASTER_KEY
+    # A fresh key file is fine for a database that dies with this run:
+    # skilj creates it on the server's first start.
+    if [ -z "${ENCRYPTION_KEY_FILE:-}" ]; then
+        export ENCRYPTION_KEY_FILE="$(dirname "$PG_DATA_DIR")/keys.json"
     fi
 fi
 
-# --- Encryption master key: your own DATABASE_URL needs the key its
+# --- Encryption key file: your own DATABASE_URL needs the key file its
 #     customer data was written under, so this never invents one for it ---
-if [ -z "${ENCRYPTION_MASTER_KEY:-}" ]; then
-    echo "dev.sh: DATABASE_URL is set but ENCRYPTION_MASTER_KEY isn't." >&2
-    echo "        Set the key this database was used with, or a new one for a fresh database:" >&2
-    echo "        export ENCRYPTION_MASTER_KEY=\$(openssl rand -hex 32)" >&2
+if [ -z "${ENCRYPTION_KEY_FILE:-}" ]; then
+    echo "dev.sh: DATABASE_URL is set but ENCRYPTION_KEY_FILE isn't." >&2
+    echo "        Set the key file this database was used with, or a new path for a fresh" >&2
+    echo "        database (skilj creates it on first start):" >&2
+    echo "        export ENCRYPTION_KEY_FILE=\$HOME/.local/share/skilj-helpdesk/keys.json" >&2
     exit 1
 fi
+unset ENCRYPTION_MASTER_KEY
 
 # --- Dex: only if a built binary is actually found - never built here,
 #     see README.md's own "Build Dex once" step ---

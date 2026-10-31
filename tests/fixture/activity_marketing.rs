@@ -9,6 +9,12 @@ use skilj_test_fixture::command::GivenEvents;
 
 use crate::events::spec;
 
+/// The instant the fixture hands `decide_with` as `Decision::now()` - the
+/// time the stamping commands record (skilj 0.2.0).
+fn at(rfc3339: &str) -> chrono::DateTime<chrono::Utc> {
+    rfc3339.parse().expect("an RFC 3339 instant")
+}
+
 fn activity_on(person: &str, day: &str) -> ActivityEvent {
     ActivityEvent::DailyActivityRecorded(DailyActivityRecordedPayload {
         company_id: "acme".into(),
@@ -63,14 +69,15 @@ fn another_day_or_another_person_is_a_new_record() {
 
 #[test]
 fn engagement_decline_is_flagged_once_per_company() {
+    // `flagged_at` is the submission's own instant, not caller-supplied.
     GivenEvents::<RecordEngagementDecline>::new()
+        .now(at("2026-10-04T00:00:00Z"))
         .when(RecordEngagementDeclinePayload {
             company_id: "acme".into(),
-            flagged_at: "2026-10-04T00:00:00Z".into(),
         })
         .then_accepted(vec![spec(
             "CompanyEngagementDeclined",
-            json!({ "company_id": "acme", "flagged_at": "2026-10-04T00:00:00Z" }),
+            json!({ "company_id": "acme", "flagged_at": "2026-10-04T00:00:00+00:00" }),
         )]);
     GivenEvents::<RecordEngagementDecline>::new()
         .event(ActivityEvent::CompanyEngagementDeclined(
@@ -81,7 +88,6 @@ fn engagement_decline_is_flagged_once_per_company() {
         ))
         .when(RecordEngagementDeclinePayload {
             company_id: "acme".into(),
-            flagged_at: "2026-10-04T00:00:00Z".into(),
         })
         .then_rejected("already_flagged");
 }
@@ -90,23 +96,25 @@ fn engagement_decline_is_flagged_once_per_company() {
 
 #[test]
 fn marketing_records_every_routed_signal_as_is() {
+    // Lapse and conversion are stamped with the submission's instant; the
+    // decline keeps the `flagged_at` activity recorded.
     GivenEvents::<marketing::RecordTrialLapse>::new()
+        .now(at("2026-10-04T00:00:00Z"))
         .when(marketing::RecordTrialLapsePayload {
             company_id: "acme".into(),
-            lapsed_at: "2026-10-04T00:00:00Z".into(),
         })
         .then_accepted(vec![spec(
             "TrialLapsed",
-            json!({ "company_id": "acme", "lapsed_at": "2026-10-04T00:00:00Z" }),
+            json!({ "company_id": "acme", "lapsed_at": "2026-10-04T00:00:00+00:00" }),
         )]);
     GivenEvents::<marketing::RecordTrialConversion>::new()
+        .now(at("2026-10-04T00:00:00Z"))
         .when(marketing::RecordTrialConversionPayload {
             company_id: "acme".into(),
-            converted_at: "2026-10-04T00:00:00Z".into(),
         })
         .then_accepted(vec![spec(
             "TrialConverted",
-            json!({ "company_id": "acme", "converted_at": "2026-10-04T00:00:00Z" }),
+            json!({ "company_id": "acme", "converted_at": "2026-10-04T00:00:00+00:00" }),
         )]);
     GivenEvents::<marketing::RecordEngagementDecline>::new()
         .when(marketing::RecordEngagementDeclinePayload {
@@ -133,7 +141,6 @@ fn marketing_commands_do_not_deduplicate() {
         ))
         .when(marketing::RecordTrialLapsePayload {
             company_id: "acme".into(),
-            lapsed_at: "2026-10-04T00:00:00Z".into(),
         })
         .then(crate::events::assert_accepted);
 }
@@ -147,7 +154,6 @@ fn helpdesk_lifecycle_routes_carry_the_company_over() {
     })
     .expect("every expiry is routed");
     assert_eq!(lapse.company_id, "acme");
-    assert!(chrono::DateTime::parse_from_rfc3339(&lapse.lapsed_at).is_ok());
 
     let conversion =
         marketing::HelpdeskActivationToTrialConversion::route(&helpdesk::CompanyActivatedPayload {
@@ -155,7 +161,6 @@ fn helpdesk_lifecycle_routes_carry_the_company_over() {
         })
         .expect("every activation is routed");
     assert_eq!(conversion.company_id, "acme");
-    assert!(chrono::DateTime::parse_from_rfc3339(&conversion.converted_at).is_ok());
 }
 
 #[test]
