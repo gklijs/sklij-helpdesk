@@ -97,17 +97,35 @@ pub use ticket_commands::*;
 
 pub const BOUNDED_CONTEXT: &str = "helpdesk";
 
-/// The one team name `TicketInternalNotes`'s own `TEAM_ONLY` and
-/// `AddInternalNote`/`TicketInternalNoteAdded`'s own `private_fields()`
-/// all compare `Role.name` against (see `TicketInternalNotes`'s own doc
-/// comment), as does `#[requires_role("staff")]` on the staff-only
-/// command types (that attribute only accepts a literal, so
+/// The `Role.name` `#[requires_role("staff")]` on the staff-only command
+/// types compares against. That attribute only accepts a literal, so
 /// `staff_only_commands_require_the_staff_role` below pins it to this
-/// constant instead) - a shared constant rather than five independent string
-/// literals (this file, `server.rs`, both test files) so a future edit
-/// to one can't silently desync from the others and reopen exactly one
-/// of the two gates while the other still looks closed.
-pub const STAFF_TEAM: &str = "staff";
+/// constant instead. skilj 0.2.0 kept this gate on `Role.name`; only the
+/// read-side gates moved to capabilities (`STAFF_CAPABILITY`).
+pub const STAFF_ROLE: &str = "staff";
+
+/// The capability every staff-only read gate names: `Projection::
+/// REQUIRES_CAPABILITY` on `TicketInternalNotes`, `MacroCatalog`,
+/// `ArticleDrafts`, `PersonActivity` and `CampaignOverview`, and the
+/// capability-kind private fields of `AddInternalNote`/
+/// `TicketInternalNoteAdded`. Since skilj 0.2.0 a grant opens these only
+/// by holding the capability - not by its Role's name, its level, or
+/// being a superadmin - so the operator and the bootstrap admin, which
+/// don't hold it, no longer read them. One constant so the gates can't
+/// drift apart and reopen one while another still looks closed.
+pub const STAFF_CAPABILITY: &str = "staff";
+
+/// The capabilities a grant for a Role named `role_name` holds in this
+/// deployment: `STAFF_CAPABILITY` for `STAFF_ROLE`, none otherwise. The
+/// server's demo seed and the test helpers both grant through this, so
+/// "a staff Role reads staff-only data" is decided in one place.
+pub fn capabilities_for_role(role_name: &str) -> std::collections::BTreeSet<String> {
+    if role_name == STAFF_ROLE {
+        [STAFF_CAPABILITY.to_string()].into()
+    } else {
+        Default::default()
+    }
+}
 
 /// `RecordTenantLifecycle::NAME`, as a plain `const` rather than reached
 /// for through the trait.
@@ -119,7 +137,7 @@ pub const STAFF_TEAM: &str = "staff";
 /// without importing the trait there. One place the literal lives, so
 /// the mint can't drift from the registration the way a second inline
 /// `"RecordTenantLifecycle"` in that binary could - the same reasoning
-/// `STAFF_TEAM` above exists for.
+/// `STAFF_ROLE` above exists for.
 pub const RECORD_TENANT_LIFECYCLE_COMMAND: &str = "RecordTenantLifecycle";
 
 /// The `subject_key` a customer's personal data is encrypted under, with
@@ -159,27 +177,18 @@ fn ticket_created_customer_fields() -> Vec<SensitiveField> {
 }
 
 fn company_tag() -> Vec<TagMapping> {
-    vec![TagMapping {
-        key: "company".into(),
-        field: "company_id".into(),
-    }]
+    vec![TagMapping::new("company", "company_id")]
 }
 
 fn ticket_tag() -> Vec<TagMapping> {
-    vec![TagMapping {
-        key: "ticket".into(),
-        field: "ticket_id".into(),
-    }]
+    vec![TagMapping::new("ticket", "ticket_id")]
 }
 
 /// The agent a payload's `field` names - what `StaffWorkload` is keyed
 /// by (issue #44). A list-valued `field` (`AutoAssignTicket`'s
 /// candidates) derives one tag per agent.
 fn staff_tag(field: &str) -> Vec<TagMapping> {
-    vec![TagMapping {
-        key: STAFF_TAG_KEY.into(),
-        field: field.into(),
-    }]
+    vec![TagMapping::new(STAFF_TAG_KEY, field)]
 }
 
 /// The four events `company_status` folds.
@@ -352,7 +361,7 @@ mod required_role_tests {
     use super::*;
 
     /// `#[requires_role(...)]` only takes a string literal, so the fourteen
-    /// staff-only commands spell out `"staff"` rather than `STAFF_TEAM`.
+    /// staff-only commands spell out `"staff"` rather than `STAFF_ROLE`.
     /// This pins them to the constant, and pins the customer-facing and
     /// background-only commands to no role gate at all.
     #[test]
@@ -374,7 +383,7 @@ mod required_role_tests {
             AutoAssignTicket::required_role(),
         ];
         for required in staff_only {
-            assert_eq!(required, Some(STAFF_TEAM));
+            assert_eq!(required, Some(STAFF_ROLE));
         }
 
         let ungated = [

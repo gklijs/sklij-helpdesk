@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/gklijs/sklij-helpdesk/actions/workflows/ci.yml/badge.svg)](https://github.com/gklijs/sklij-helpdesk/actions/workflows/ci.yml)
 
-A showcase SaaS helpdesk built on [skilj](https://crates.io/crates/skilj) (the released 0.0.10 from crates.io) — a Rust library for
+A showcase SaaS helpdesk built on [skilj](https://crates.io/crates/skilj) (the released 0.2.0 from crates.io) — a Rust library for
 event-sourced, DDD-style applications. This project exists to exercise
 skilj for real: every piece below was built, run, and verified against
 a live stack, not just written and assumed to work.
@@ -106,7 +106,7 @@ Not covered: ticket text stored before this was introduced stays
 plaintext (skilj has no backfill), and so does the retired
 `CompanyTicketList` projection's last stored state. The also-retired
 `CompanyTicketQueue` holds no text. Internal notes are
-staff-written and gated separately (`TEAM_ONLY`), not encrypted. The
+staff-written and gated separately (the `staff` capability), not encrypted. The
 frontend can't tell ciphertext from text, so an erased customer's
 tickets show base64 rather than "erased".
 
@@ -296,14 +296,26 @@ Run it against this project's config: `./dex serve dex/config.yaml`
 
 ```sh
 DATABASE_URL=postgres://... OIDC_ISSUER_URL=http://127.0.0.1:5556/dex \
-  ENCRYPTION_MASTER_KEY=$(openssl rand -hex 32) cargo run --bin server
+  ENCRYPTION_KEY_FILE=$HOME/.local/share/skilj-helpdesk/keys.json cargo run --bin server
 ```
 
-`ENCRYPTION_MASTER_KEY` wraps the per-customer keys that everything a
-customer wrote is encrypted under (see "GDPR erasure" above). Keep it
-the same for as long as you keep the database; a new key makes every
-stored ticket's content unreadable. `scripts/dev.sh` generates one only
-for its throwaway Postgres.
+`ENCRYPTION_KEY_FILE` is where skilj keeps the master key that wraps the
+per-customer keys everything a customer wrote is encrypted under (see
+"GDPR erasure" above). skilj creates it on the first start, owner-only,
+and every instance must read the same file. Keep it, and back it up,
+for as long as you keep the database: without it every stored ticket's
+content is unreadable. `scripts/dev.sh` puts one next to its throwaway
+Postgres.
+
+The key rotates on request (the superadmin `rotateMasterKey` mutation)
+or on a schedule with `ENCRYPTION_KEY_ROTATE_EVERY_DAYS`; a rotated-away
+version is retired `ENCRYPTION_KEY_RETIRE_AFTER_DAYS` (default 30) after
+every data key was rewrapped, after which a database backup from before
+the rotation no longer opens. Set that to cover your backup retention.
+A key file holds the key on disk and in the process; skilj also has a
+Vault/OpenBao Transit provider for production, which this project
+doesn't wire up yet. `ENCRYPTION_MASTER_KEY` from skilj 0.1 and earlier
+is refused at startup.
 
 It prints every credential the rest of this needs, and the exact
 command to run `alerter` against it (trial conversion and ticket
@@ -370,7 +382,7 @@ running it (see below).
 
 skilj ships two terminal consoles for running a deployment. Neither is
 part of this repo; install them with
-`cargo install skilj-tui skilj-inspector --version 0.0.10`.
+`cargo install skilj-tui skilj-inspector --version 0.2.0`.
 `scripts/dev.sh` prints both commands, filled in, when it starts.
 
 **`skilj-tui`** is a GraphQL client, so it goes through the same login
@@ -400,9 +412,7 @@ skilj reports a grant below Admin.
 **`skilj-inspector`** reads Postgres directly, read-only, for when the
 server itself is down. It lists every bounded context (tenants
 included), registered types and projections, and the most recent 200
-events per context. It never decrypts sensitive fields. Through 0.0.10 the
-Events tab's title says "newest first" but it lists those 200 oldest
-first.
+events per context. It never decrypts sensitive fields.
 
 ```sh
 skilj-inspector --database-url "$DATABASE_URL"
@@ -676,14 +686,56 @@ surfaced five real bugs, each confirmed failing first, then fixed:
    customer Role — `tests/cross_company_projection_scoping.rs` proves the
    cross-company half live. The remaining role-type axis — a customer
    reading *their own* company's internal notes — stayed open until
-   skilj 0.0.4's `Projection::TEAM_ONLY` (`docs/architecture.md` §31–32
-   in the `skilj` repo, Codeberg issue #17) gave it a real gate instead
-   of encryption infrastructure this project would otherwise have had to
-   provision; adopted here as `TicketInternalNotes`'s own
-   `TEAM_ONLY = Some("staff")` and the demo staff Role's `name` (see
+   skilj 0.0.4's `Projection::TEAM_ONLY` (issue #17) gave it a real gate,
+   matched on the Role's name. skilj 0.2.0 replaced that with
+   capabilities (`docs/architecture.md` §228 in the `skilj` repo):
+   `TicketInternalNotes` declares `REQUIRES_CAPABILITY = Some("staff")`
+   and only a grant holding that capability reads it (see
    `TicketInternalNotes`'s own doc comment in `src/helpdesk/`) —
-   `tests/cross_company_projection_scoping.rs` now proves this half live
+   `tests/cross_company_projection_scoping.rs` proves this half live
    too.
+
+## Running on skilj 0.2.0
+
+- **Capabilities, not team names.** The staff-only projections
+  (`TicketInternalNotes`, `CompanyMacros`, `KnowledgeBaseReview`,
+  `CompanyEngagement`, `MarketingSignals`) declare
+  `REQUIRES_CAPABILITY = Some("staff")`, and the internal notes' private
+  fields are capability-kind. A grant opens them only by holding the
+  `staff` capability: not by its level, not by being a superadmin, and
+  no longer by its Role being named `staff`. The server's demo seed gives
+  staff-lead the capability on every context it reads (and upgrades a
+  grant seeded by an older build); the operator and the bootstrap admin
+  don't hold it, so they no longer see internal notes, through
+  `skilj-tui` either. A caller without it doesn't find the projection in
+  its GraphQL schema at all. The staff-only *commands* still check the
+  Role's name (`#[requires_role("staff")]`), which skilj 0.2.0 left as is.
+  Grant it to a real staff member with `grantCapability(roleId,
+  boundedContext, "staff")`; `capabilityOverview` lists what is required
+  against what is held.
+- **The access trail.** Every grant, revoke and capability change is an
+  event in skilj's `admin` context, so `capabilityHistory` answers what a
+  grant held at any instant since the upgrade. The tenant-access
+  reconciler writes through it, copies capabilities into a company's
+  tenant, and regrants when they drift from the shared context.
+- **A key file for the master key**, with rotation - see "Start the
+  server" above.
+- **Ordered batches.** The email bridge sends the emails it has already
+  pulled to skilj's `POST /v1/commands/trigger/batch` together, in
+  stream order (`EMAIL_BRIDGE_BATCH_MAX_ITEMS`, default 100, `1` turns
+  it off; `EMAIL_BRIDGE_BATCH_LINGER_MS`, default 0). The demo seed signs
+  its fake companies up in one call.
+- **Time from skilj, not the caller.** `RecordTrialLapse`,
+  `RecordTrialConversion`, `SuggestArticle` and activity's
+  `RecordEngagementDecline` stamp `lapsed_at`/`converted_at`/
+  `suggested_at`/`flagged_at` from the submission's own instant
+  (`Decision::now`); their command payloads no longer carry the field.
+  `TicketSlaBreached` and `TicketClosed` record `due_at` - when the SLA
+  or auto-close deadline was due, not when skilj's loop got to it - when
+  a deadline fired them.
+- **Not a rolling upgrade from 0.1 or 0.0.x.** Stop every older server
+  before the first 0.2.0 one starts, and don't roll back afterwards
+  (skilj's CHANGELOG, "Upgrading from 0.1").
 
 ## Running on skilj 0.0.10
 

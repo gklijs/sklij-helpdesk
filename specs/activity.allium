@@ -103,12 +103,14 @@ rule DailyActivityIsRecorded {
 }
 
 rule EngagementDeclineIsRecorded {
-    when: RecordEngagementDecline(company, flagged_at)
+    -- `flagged_at` is the instant the command is decided (skilj's
+    -- Decision::now), not supplied by the watcher.
+    when: RecordEngagementDecline(company)
     -- Rejected as `already_flagged` when this company was already flagged
     -- once before - confirmed: fires once, not once per check while the
     -- condition holds.
     requires: not exists CompanyEngagementDeclined{company}
-    ensures: CompanyEngagementDeclined.created(company: company, flagged_at: flagged_at)
+    ensures: CompanyEngagementDeclined.created(company: company, flagged_at: now)
 }
 
 ------------------------------------------------------------
@@ -171,7 +173,7 @@ surface EngagementDeclineDetection {
     -- code, not a person; no field of the caller's own identity feeds
     -- the payload.
     provides:
-        RecordEngagementDecline(company, flagged_at)
+        RecordEngagementDecline(company)
 
     @guidance
         -- What counts as "gone quiet" is config.quiet_after's own

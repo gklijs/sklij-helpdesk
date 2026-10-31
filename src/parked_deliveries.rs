@@ -39,6 +39,9 @@ pub fn kind_label(kind: ParkedDeliveryKind) -> &'static str {
         ParkedDeliveryKind::ExternalEvent => "external_event",
         ParkedDeliveryKind::CommandTrigger => "command_trigger",
         ParkedDeliveryKind::Deadline => "deadline",
+        // A kind a newer skilj added (the enum is #[non_exhaustive]
+        // since 0.1.0): counted under its own label rather than dropped.
+        _ => "other",
     }
 }
 

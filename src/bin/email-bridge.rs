@@ -7,8 +7,10 @@
 //!
 //! - the translator: `helpdesk.email.received` to a command subject (or
 //!   `helpdesk.email.unroutable`);
-//! - `skilj_nats::run_inbound_until` for `CreateTicket`;
-//! - `skilj_nats::run_inbound_until` for `CustomerRespondsToTicket`.
+//! - `skilj_nats::run_inbound_until_with` for `CreateTicket`;
+//! - `skilj_nats::run_inbound_until_with` for `CustomerRespondsToTicket`,
+//!   both batching what they have pulled into skilj's ordered batch route
+//!   (`email_channel::inbound_batching`).
 //!
 //! A message skilj keeps failing on (not rejecting: an error) is
 //! retried with `skilj_retry`'s default backoff, 5 attempts, then parked
@@ -23,6 +25,8 @@
 //!   CREATE_TICKET_TOKEN               - CommandToken ("id.secret")
 //!   CUSTOMER_RESPONDS_TO_TICKET_TOKEN - CommandToken ("id.secret")
 //!   Both tokens are printed by `src/bin/server.rs` on every run.
+//!   EMAIL_BRIDGE_BATCH_MAX_ITEMS      - default 100; 1 turns batching off
+//!   EMAIL_BRIDGE_BATCH_LINGER_MS      - default 0
 //!   TICKET_ROUTING                    - must be "shared"; the default
 //!                                       per-company tenant routing is
 //!                                       not supported (see
@@ -49,6 +53,7 @@ struct Config {
     base_url: String,
     create_ticket_token: String,
     customer_responds_to_ticket_token: String,
+    batching: skilj_nats::InboundBatching,
 }
 
 impl Config {
@@ -64,6 +69,7 @@ impl Config {
                 .unwrap_or_else(|_| "http://localhost:8080".to_string()),
             create_ticket_token: required("CREATE_TICKET_TOKEN")?,
             customer_responds_to_ticket_token: required("CUSTOMER_RESPONDS_TO_TICKET_TOKEN")?,
+            batching: email_channel::inbound_batching(|name| std::env::var(name).ok())?,
         })
     }
 }
@@ -143,20 +149,22 @@ async fn main() -> Result<(), async_nats::Error> {
 
     tokio::join!(
         email_channel::run_translator_until(&translator, &jetstream, stopped(stop_rx.clone())),
-        skilj_nats::run_inbound_until(
+        skilj_nats::run_inbound_until_with(
             &create_ticket,
             &http,
             &config.base_url,
             &create_ticket_mapping,
             &retry_policy,
+            config.batching,
             stopped(stop_rx.clone()),
         ),
-        skilj_nats::run_inbound_until(
+        skilj_nats::run_inbound_until_with(
             &customer_reply,
             &http,
             &config.base_url,
             &customer_reply_mapping,
             &retry_policy,
+            config.batching,
             stopped(stop_rx),
         ),
     );

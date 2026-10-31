@@ -24,7 +24,15 @@ env:
 
 jobs:
   backend:
-    runs-on: ubuntu-latest
+    # Pinned, not `ubuntu-latest`: on 2026-10-19 that label migrated to
+    # Ubuntu 26.04, which ships libxml2 3.x as `libxml2.so.16`. The
+    # theseus-built Postgres that `postgresql_embedded` downloads for
+    # tests/failure_recovery.rs's postgres_restart test still links
+    # `libxml2.so.2`, so on ubuntu-latest that cluster fails to start,
+    # the test prints "skipping:", and the guard below fails the job
+    # (run 40758664285). 24.04 still has `libxml2.so.2`; the frontend
+    # job below has no such dependency and tracks ubuntu-latest.
+    runs-on: ubuntu-24.04
     services:
       # A real Postgres, not `postgresql_embedded` - sidesteps that
       # crate's own sandbox/network-egress fragility entirely (see

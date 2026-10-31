@@ -7,12 +7,14 @@ description: >
   #[auto_register], and what a rejected command's error actually means.
   Triggers on "add an event type", "add a command type", "add a
   projection", "register a new event/command", "why did my command get
-  rejected with <error>", or reading/extending skilj-demo's banking.rs/
+  rejected with <error>", "evolve/rename/version a payload field",
+  "SchemaIncompatible", or reading/extending skilj-demo's banking.rs/
   courses.rs as a pattern. Do NOT use for: creating a brand-new bounded
   context, IdP/access-control/RoleAccessMapping setup, the GraphQL/REST
   wire contract itself, skilj-tui usage, or the cross-instance/inspector
   internals - those are skilj's own implementation, not the plugin API
-  this skill covers.
+  this skill covers. A uniqueness rule (an email address registered once)
+  is the `skilj-uniqueness` skill.
 ---
 
 # skilj
@@ -40,12 +42,19 @@ A command's own `decide()` never writes anything directly - it returns
 which events to append (or a rejection); skilj appends them, and any
 projection consuming that event type folds it in afterward.
 
+**A value that must be unique** (an email address, a username) is a
+command whose consistency query reads earlier claims of the value - and,
+when the value is personal data, a blind tag (`BlindTag`,
+`TagMapping::blind`) so it is only ever stored as a keyed hash. Use the
+`skilj-uniqueness` skill for that; don't tag a sensitive field plainly or
+hash it by hand.
+
 There is a fourth plugin type, `Snapshot` - an optional accelerator for
 `decide()` against a large per-entity history, its own trait with its
-own registration and inspection endpoint - but it's a distinct,
-narrower concept, not part of this decision tree, and out of scope for
-this skill; see `docs/architecture.md`'s `Snapshot` section if that's
-what you're looking for.
+own registration and inspection endpoint. It isn't part of this decision
+tree: a command uses one through a snapshot item in its consistency
+query (see `references/command-type.md`, "snapshot items"), and
+`docs/architecture.md` §202 has the design.
 
 ## The three traits, at a glance
 
@@ -102,6 +111,28 @@ declared once at the top of the module - not a `skilj_core::plugin`
 const you define per type. Full detail, including manual (non-macro)
 registration and what happens with no bounded-context module at all:
 [references/registration.md](references/registration.md).
+
+## Testing your `decide()`/`project()`
+
+Once a `CommandType`/`Projection` is written, test its own logic with
+`skilj-test-fixture` - given/when/then against `decide()`/`project()`
+directly, no database, no HTTP:
+
+```rust
+use skilj_test_fixture::command::GivenEvents;
+
+GivenEvents::<WithdrawMoney>::new()
+    .event(BankingEvent::MoneyDeposited(MoneyDepositedPayload { account_id: "a".into(), amount: 100 }))
+    .when(WithdrawMoneyPayload { account_id: "a".into(), amount: 150 })
+    .then_rejected("insufficient_funds");
+```
+
+`skilj_test_fixture::projection::GivenEvents` is the `Projection`
+counterpart (`.then_state(expected)`). See `skilj-demo/tests/
+banking_fixture.rs` for a complete worked example, and
+docs/architecture.md §45 for what this deliberately does and doesn't
+replace - it's a complement to a real Postgres-backed integration test
+(`skilj-demo/tests/banking.rs`), not a substitute for one.
 
 ## If a registration or a submission gets rejected
 

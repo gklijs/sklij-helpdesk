@@ -37,7 +37,7 @@
 mod support;
 
 use skilj_core::access_control::AccessLevel;
-use skilj_helpdesk::helpdesk::{BOUNDED_CONTEXT, STAFF_TEAM};
+use skilj_helpdesk::helpdesk::{BOUNDED_CONTEXT, STAFF_ROLE};
 use std::time::Duration;
 use support::{
     graphql_request, mint_command_token, seed_role, seed_scoped_mapping, setup_graphql, sign_jwt,
@@ -119,7 +119,7 @@ fn a_customer_scoped_to_one_company_cannot_read_another_companys_projections() {
         let customer_a_jwt = sign_jwt(&customer_a.external_subject);
         seed_scoped_mapping(&pool, &customer_a, AccessLevel::Write, Some(company_a.clone())).await;
 
-        let staff = seed_role(&pool, STAFF_TEAM).await;
+        let staff = seed_role(&pool, STAFF_ROLE).await;
         let staff_jwt = sign_jwt(&staff.external_subject);
         seed_scoped_mapping(&pool, &staff, AccessLevel::Write, None).await;
 

@@ -12,7 +12,7 @@ mod support;
 
 use skilj_core::access_control::AccessLevel;
 use skilj_helpdesk::activity::CompanyEngagementState;
-use skilj_helpdesk::helpdesk::STAFF_TEAM;
+use skilj_helpdesk::helpdesk::STAFF_ROLE;
 use skilj_helpdesk::marketing::MarketingSignalsState;
 use std::time::Duration;
 use support::{
@@ -77,13 +77,28 @@ fn error_code(response: &serde_json::Value) -> &str {
         .unwrap_or_default()
 }
 
+/// A projection that requires a capability the caller doesn't hold isn't
+/// in the caller's GraphQL schema at all (skilj 0.2.0,
+/// docs/architecture.md §228): the query fails validation exactly as one
+/// naming a type that doesn't exist would, with no data.
+fn assert_hidden(response: &serde_json::Value, graphql_type: &str, why: &str) {
+    assert!(response["data"].is_null(), "{why}: {response:?}");
+    let unknown = format!("Unknown type \"{graphql_type}\"");
+    assert!(
+        response["errors"].as_array().is_some_and(|errors| errors
+            .iter()
+            .any(|e| e["message"].as_str() == Some(&unknown))),
+        "{why}: expected {unknown:?}, got {response:?}"
+    );
+}
+
 /// A staff Role with Read on both contexts, a customer Role scoped to
 /// `company_id`, and a staff Role scoped to some other company - the
 /// three cases each projection's gates have to tell apart.
 async fn readers(pool: &skilj_core::db::Pool, company_id: &str) -> (String, String, String) {
-    let staff = seed_role(pool, STAFF_TEAM).await;
+    let staff = seed_role(pool, STAFF_ROLE).await;
     let customer = seed_role(pool, "customer").await;
-    let other_staff = seed_role(pool, STAFF_TEAM).await;
+    let other_staff = seed_role(pool, STAFF_ROLE).await;
     for context in [ACTIVITY, MARKETING] {
         seed_mapping_for(pool, &staff, context, AccessLevel::Read, None).await;
         seed_mapping_for(
@@ -125,41 +140,69 @@ fn marketing_signals_fold_every_routed_fact_for_staff_only() {
         let company_id = sign_up_company(&pool, &mappings, &router).await;
         let company = serde_json::json!({ "company_id": company_id });
 
-        submit(&pool, &mappings.helpdesk, &router, HELPDESK, "ExpireCompanyTrial", company.clone()).await;
+        submit(
+            &pool,
+            &mappings.helpdesk,
+            &router,
+            HELPDESK,
+            "ExpireCompanyTrial",
+            company.clone(),
+        )
+        .await;
         // The lapse and the reactivation route independently, so wait for
         // the lapse first: otherwise the two could fold in either order.
         wait_until(Duration::from_secs(10), "TrialLapsed folded", || async {
-            projection_state::<MarketingSignalsState>(&pool, MARKETING, "MarketingSignals", &company_id)
-                .await
-                .lapse_count
+            projection_state::<MarketingSignalsState>(
+                &pool,
+                MARKETING,
+                "MarketingSignals",
+                &company_id,
+            )
+            .await
+            .lapse_count
                 == 1
         })
         .await;
-        submit(&pool, &mappings.helpdesk, &router, HELPDESK, "ReactivateCompany", company.clone()).await;
+        submit(
+            &pool,
+            &mappings.helpdesk,
+            &router,
+            HELPDESK,
+            "ReactivateCompany",
+            company.clone(),
+        )
+        .await;
         submit(
             &pool,
             &mappings.activity,
             &router,
             ACTIVITY,
             "RecordEngagementDecline",
-            serde_json::json!({ "company_id": company_id, "flagged_at": "2026-10-01T00:00:00+00:00" }),
+            serde_json::json!({ "company_id": company_id }),
         )
         .await;
 
-        wait_until(Duration::from_secs(10), "every marketing signal folded", || async {
-            let state: MarketingSignalsState =
-                projection_state(&pool, MARKETING, "MarketingSignals", &company_id).await;
-            state.conversion_count == 1 && state.engagement_declined_at.is_some()
-        })
+        wait_until(
+            Duration::from_secs(10),
+            "every marketing signal folded",
+            || async {
+                let state: MarketingSignalsState =
+                    projection_state(&pool, MARKETING, "MarketingSignals", &company_id).await;
+                state.conversion_count == 1 && state.engagement_declined_at.is_some()
+            },
+        )
         .await;
         let state: MarketingSignalsState =
             projection_state(&pool, MARKETING, "MarketingSignals", &company_id).await;
         assert_eq!(state.trial_status.as_deref(), Some("converted"));
         assert_eq!(state.lapse_count, 1);
         assert!(state.last_lapsed_at.is_some() && state.last_converted_at.is_some());
-        assert_eq!(
-            state.engagement_declined_at.as_deref(),
-            Some("2026-10-01T00:00:00+00:00")
+        // activity stamps `flagged_at` itself (skilj 0.2.0's
+        // `Decision::now`); the route carries it into marketing as is.
+        let declined_at = state.engagement_declined_at.as_deref().unwrap();
+        assert!(
+            chrono::DateTime::parse_from_rfc3339(declined_at).is_ok(),
+            "{declined_at}"
         );
 
         let graphql = skilj.graphql_router().await.unwrap();
@@ -175,9 +218,17 @@ fn marketing_signals_fold_every_routed_fact_for_staff_only() {
         assert_eq!(read["data"]["projection"]["trialStatus"], "converted");
         assert_eq!(read["data"]["projection"]["conversionCount"], 1);
         let read = graphql_request(&graphql, &customer, &query).await;
-        assert_eq!(error_code(&read), "not_on_required_team", "a customer must not read their own company\'s signals: {read:?}");
+        assert_hidden(
+            &read,
+            "marketing_MarketingSignals",
+            "a customer must not read their own company\'s signals",
+        );
         let read = graphql_request(&graphql, &other_staff, &query).await;
-        assert_eq!(error_code(&read), "grant_scope_mismatch", "staff scoped to another company must not read these: {read:?}");
+        assert_eq!(
+            error_code(&read),
+            "grant_scope_mismatch",
+            "staff scoped to another company must not read these: {read:?}"
+        );
     });
 }
 
@@ -217,7 +268,7 @@ fn company_engagement_counts_person_days_for_staff_only() {
             &router,
             ACTIVITY,
             "RecordEngagementDecline",
-            serde_json::json!({ "company_id": company_id, "flagged_at": "2026-10-12T00:00:00+00:00" }),
+            serde_json::json!({ "company_id": company_id }),
         )
         .await;
 
@@ -247,7 +298,7 @@ fn company_engagement_counts_person_days_for_staff_only() {
         assert!(succeeded(&read), "staff should read engagement: {read:?}");
         assert_eq!(read["data"]["projection"]["customerActiveDays"], 2);
         let read = graphql_request(&graphql, &customer, &query).await;
-        assert_eq!(error_code(&read), "not_on_required_team", "a customer must not read their own company\'s engagement: {read:?}");
+        assert_hidden(&read, "activity_CompanyEngagement", "a customer must not read their own company\'s engagement");
         let read = graphql_request(&graphql, &other_staff, &query).await;
         assert_eq!(error_code(&read), "grant_scope_mismatch", "staff scoped to another company must not read this: {read:?}");
     });

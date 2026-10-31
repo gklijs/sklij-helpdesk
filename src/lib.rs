@@ -52,28 +52,81 @@ pub const LOCAL_JWKS_TEST_JWKS: &str = "{\"keys\":[{\"kty\":\"RSA\",\"use\":\"si
 ///
 /// Must only ever increase: bump it in any change that alters a
 /// registered shape (a new consumed event type, a flag, a new field).
-pub const APPLICATION_VERSION: u64 = 7;
+///
+/// 8: skilj 0.2.0 - the staff-only projections declare
+/// `REQUIRES_CAPABILITY` and the internal-note private fields are
+/// capability-kind, where 7 stored `TEAM_ONLY` and team-kind ones.
+pub const APPLICATION_VERSION: u64 = 8;
 
-/// Parses `ENCRYPTION_MASTER_KEY`'s value - 64 hex characters, 32 bytes
-/// (`openssl rand -hex 32`) - for `SkiljBuilder::encryption_master_key`.
-/// `helpdesk`'s customer contact fields are encrypted under per-customer
-/// keys that this one wraps (see `helpdesk::CUSTOMER_SUBJECT`), so it must
-/// stay the same across restarts: lose it and every customer's stored
-/// contact details become unreadable for good.
-pub fn parse_encryption_master_key(hex: &str) -> Result<skilj::EncryptionMasterKey, String> {
-    let hex = hex.trim();
-    if hex.len() != 64 || !hex.is_ascii() {
-        return Err(format!(
-            "expected 64 hex characters (32 bytes), got {} characters",
-            hex.len()
-        ));
+/// The encryption setup `src/bin/server.rs` reads from its environment:
+/// where the master key lives and when it rotates.
+///
+/// `helpdesk`'s customer fields are encrypted under per-customer data
+/// keys, which skilj wraps with a master key held by a key provider (skilj
+/// 0.2.0, docs/architecture.md §230 in the skilj repo). This deployment
+/// uses `KeyFileProvider`: a JSON key file skilj creates on first start
+/// and appends a version to on each rotation. Every instance must read the
+/// same file - lose it and every customer's stored details become
+/// unreadable for good, which is why the path is required rather than
+/// defaulted somewhere an operator might not back up.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EncryptionConfig {
+    /// `ENCRYPTION_KEY_FILE`.
+    pub key_file: std::path::PathBuf,
+    /// `ENCRYPTION_KEY_ROTATE_EVERY_DAYS`: rotate the master key on this
+    /// schedule. Unset rotates only on request (`rotateMasterKey`).
+    pub rotate_every_days: Option<u64>,
+    /// `ENCRYPTION_KEY_RETIRE_AFTER_DAYS`: how long after a rotation's
+    /// rewrap the old version is retired - after which a database backup
+    /// from before the rotation no longer opens. skilj's 30 by default;
+    /// should cover the backup retention a restore may need.
+    pub retire_after_days: Option<u64>,
+}
+
+impl EncryptionConfig {
+    /// Reads the three variables through `var` (`std::env::var` in the
+    /// server; a map in tests).
+    pub fn from_vars(var: impl Fn(&str) -> Option<String>) -> Result<Self, String> {
+        let key_file = var("ENCRYPTION_KEY_FILE")
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| {
+                "ENCRYPTION_KEY_FILE must be set: the path of the master key file skilj \
+                 creates on first start - shared by every instance, kept and backed up \
+                 (losing it makes every customer's data unreadable)"
+                    .to_string()
+            })?;
+        let days = |name: &str| -> Result<Option<u64>, String> {
+            match var(name).map(|v| v.trim().to_string()) {
+                None => Ok(None),
+                Some(v) if v.is_empty() => Ok(None),
+                Some(v) => match v.parse::<u64>() {
+                    Ok(0) | Err(_) => Err(format!(
+                        "{name}: expected a whole number of days above 0, got {v:?}"
+                    )),
+                    Ok(n) => Ok(Some(n)),
+                },
+            }
+        };
+        Ok(Self {
+            key_file: key_file.into(),
+            rotate_every_days: days("ENCRYPTION_KEY_ROTATE_EVERY_DAYS")?,
+            retire_after_days: days("ENCRYPTION_KEY_RETIRE_AFTER_DAYS")?,
+        })
     }
-    let mut bytes = [0u8; 32];
-    for (i, byte) in bytes.iter_mut().enumerate() {
-        *byte = u8::from_str_radix(&hex[2 * i..2 * i + 2], 16)
-            .map_err(|_| format!("{:?} is not a hex byte", &hex[2 * i..2 * i + 2]))?;
+
+    /// The `SkiljBuilder::master_key_rotation` this configures.
+    pub fn rotation(&self) -> skilj::MasterKeyRotation {
+        const DAY: std::time::Duration = std::time::Duration::from_secs(24 * 3600);
+        let mut rotation = skilj::MasterKeyRotation::new();
+        if let Some(days) = self.rotate_every_days {
+            rotation = rotation.every(DAY * days as u32);
+        }
+        if let Some(days) = self.retire_after_days {
+            rotation = rotation.retire_after(DAY * days as u32);
+        }
+        rotation
     }
-    Ok(skilj::EncryptionMasterKey::from_bytes(bytes))
 }
 
 /// Registers every bounded context this crate defines. `auto_register()`
@@ -115,14 +168,51 @@ pub fn register(builder: skilj::SkiljBuilder) -> skilj::SkiljBuilder {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_encryption_master_key;
+    use super::EncryptionConfig;
+    use std::collections::HashMap;
+
+    fn config(vars: &[(&str, &str)]) -> Result<EncryptionConfig, String> {
+        let vars: HashMap<String, String> = vars
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        EncryptionConfig::from_vars(|name| vars.get(name).cloned())
+    }
 
     #[test]
-    fn a_master_key_is_exactly_64_hex_characters() {
-        assert!(parse_encryption_master_key(&"ab".repeat(32)).is_ok());
-        assert!(parse_encryption_master_key(&format!(" {}\n", "0F".repeat(32))).is_ok());
-        assert!(parse_encryption_master_key(&"ab".repeat(31)).is_err());
-        assert!(parse_encryption_master_key(&"zz".repeat(32)).is_err());
-        assert!(parse_encryption_master_key(&"é".repeat(32)).is_err());
+    fn the_key_file_is_required() {
+        assert!(config(&[]).is_err());
+        assert!(config(&[("ENCRYPTION_KEY_FILE", "  ")]).is_err());
+        let ok = config(&[("ENCRYPTION_KEY_FILE", "/var/lib/helpdesk/keys.json")]).unwrap();
+        assert_eq!(
+            ok.key_file,
+            std::path::PathBuf::from("/var/lib/helpdesk/keys.json")
+        );
+        assert_eq!((ok.rotate_every_days, ok.retire_after_days), (None, None));
+    }
+
+    #[test]
+    fn rotation_days_are_positive_whole_numbers() {
+        let file = ("ENCRYPTION_KEY_FILE", "keys.json");
+        let ok = config(&[
+            file,
+            ("ENCRYPTION_KEY_ROTATE_EVERY_DAYS", "30"),
+            ("ENCRYPTION_KEY_RETIRE_AFTER_DAYS", "45"),
+        ])
+        .unwrap();
+        assert_eq!(
+            (ok.rotate_every_days, ok.retire_after_days),
+            (Some(30), Some(45))
+        );
+        for bad in ["0", "-1", "1.5", "monthly"] {
+            assert!(
+                config(&[file, ("ENCRYPTION_KEY_ROTATE_EVERY_DAYS", bad)]).is_err(),
+                "{bad}"
+            );
+            assert!(
+                config(&[file, ("ENCRYPTION_KEY_RETIRE_AFTER_DAYS", bad)]).is_err(),
+                "{bad}"
+            );
+        }
     }
 }

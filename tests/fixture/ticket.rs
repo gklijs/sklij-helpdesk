@@ -258,6 +258,22 @@ fn a_resolved_ticket_closes() {
 }
 
 #[test]
+fn an_auto_close_records_when_it_was_due() {
+    GivenTicket::<CloseTicket>::new()
+        .events(resolved_ticket("t1", "acme"))
+        .deadline("2026-10-28T09:30:00Z".parse().unwrap())
+        .when(CloseTicketPayload {
+            ticket_id: "t1".into(),
+            requester_id: Some("customer-1".into()),
+            requester_email: None,
+        })
+        .then_accepted(vec![spec(
+            "TicketClosed",
+            json!({ "ticket_id": "t1", "company_id": "acme", "due_at": "2026-10-28T09:30:00+00:00" }),
+        )]);
+}
+
+#[test]
 fn an_auto_close_that_lost_the_race_to_a_reopen_is_rejected() {
     // CancelTicketAutoCloseOnReopen normally cancels the old deadline;
     // this guard still covers a deadline scheduled before resolutions

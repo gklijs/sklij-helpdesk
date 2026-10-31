@@ -31,26 +31,20 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use skilj::{auto_register, requires_role, CommandType, CrossContextRoute, EventType, Projection};
 use skilj_core::event_store::Event;
-use skilj_core::plugin::BoundedContextEvent;
+use skilj_core::plugin::{BoundedContextEvent, Decision};
 use skilj_core::shared::{CommandDecision, EventSpec, QueryItemMapping, TagMapping};
 
-use crate::helpdesk::{self, STAFF_TEAM};
+use crate::helpdesk::{self, STAFF_CAPABILITY};
 
 pub const BOUNDED_CONTEXT: &str = "knowledge_base";
 
 /// A suggestion is identified by the ticket it came from.
 fn suggestion_tag(field: &str) -> Vec<TagMapping> {
-    vec![TagMapping {
-        key: "suggestion".into(),
-        field: field.into(),
-    }]
+    vec![TagMapping::new("suggestion", field)]
 }
 
 fn article_tag() -> Vec<TagMapping> {
-    vec![TagMapping {
-        key: "article".into(),
-        field: "article_id".into(),
-    }]
+    vec![TagMapping::new("article", "article_id")]
 }
 
 // --- events ---
@@ -294,7 +288,6 @@ fn check_title(title: &str) -> Option<CommandDecision> {
 pub struct SuggestArticlePayload {
     pub ticket_id: String,
     pub company_id: String,
-    pub suggested_at: String,
 }
 
 pub struct SuggestArticle;
@@ -316,8 +309,13 @@ impl CommandType for SuggestArticle {
             .tagged(suggestion_tag("ticket_id"))
             .latest()]
     }
-    fn decide(payload: &Self::Payload, matching_events: &[Self::Event]) -> CommandDecision {
-        if suggestion_status(&payload.ticket_id, matching_events).is_some() {
+    /// `suggested_at` is the submission's own instant (`Decision::now`,
+    /// skilj 0.2.0) - see the route below.
+    fn decide_with(
+        payload: &Self::Payload,
+        decision: &Decision<'_, Self::Event>,
+    ) -> CommandDecision {
+        if suggestion_status(&payload.ticket_id, decision.events()).is_some() {
             return reject(
                 "already_suggested",
                 format!(
@@ -332,7 +330,7 @@ impl CommandType for SuggestArticle {
                 payload: serde_json::json!({
                     "ticket_id": payload.ticket_id,
                     "company_id": payload.company_id,
-                    "suggested_at": payload.suggested_at,
+                    "suggested_at": decision.now().to_rfc3339(),
                 }),
             }],
         }
@@ -626,7 +624,7 @@ pub struct KnowledgeBaseReviewState {
 
 /// `surface ArticleReview`: one shared instance (no `keys()` override),
 /// the queue of pending suggestions plus every article in any state.
-/// Staff-only (`TEAM_ONLY`) - this is where drafts are visible, so a
+/// Staff-only (`REQUIRES_CAPABILITY`) - this is where drafts are visible, so a
 /// customer is refused it outright. No `OWNER_TAG_KEY`: articles aren't
 /// any one company's, and staff review suggestions from every company.
 pub struct KnowledgeBaseReview;
@@ -636,7 +634,7 @@ impl Projection for KnowledgeBaseReview {
     type State = KnowledgeBaseReviewState;
     type Event = KnowledgeBaseEvent;
     const NAME: &'static str = "KnowledgeBaseReview";
-    const TEAM_ONLY: Option<&'static str> = Some(STAFF_TEAM);
+    const REQUIRES_CAPABILITY: Option<&'static str> = Some(STAFF_CAPABILITY);
     fn consumed_event_types() -> Vec<&'static str> {
         vec![
             "ArticleSuggested",
@@ -716,7 +714,7 @@ pub struct PublishedArticlesState {
 }
 
 /// `surface KnowledgeBase`: every published article, one shared instance.
-/// No team gate - customers read this - and it folds `ArticlePublished`
+/// No capability gate - customers read this - and it folds `ArticlePublished`
 /// alone, so a draft or an unpublished edit cannot appear here by
 /// construction rather than by a filter.
 pub struct PublishedArticles;
@@ -753,10 +751,10 @@ impl Projection for PublishedArticles {
 // --- cross-context route ---
 
 /// `helpdesk.TicketResolved -> knowledge_base.SuggestArticle`. Every
-/// resolution is routed; `SuggestArticle::decide` drops all but a
-/// ticket's first. `suggested_at` is stamped here, since `TicketResolved`
-/// carries no timestamp of its own - the same choice
-/// `marketing::HelpdeskExpiryToTrialLapse` makes.
+/// resolution is routed; `SuggestArticle::decide_with` drops all but a
+/// ticket's first. `TicketResolved` carries no timestamp of its own, so
+/// `SuggestArticle::decide_with` stamps `suggested_at` from the
+/// submission's own instant - the same choice `marketing`'s routes make.
 ///
 /// Starts from the beginning of `helpdesk`'s history, like marketing's
 /// routes: on first deploy every ticket already resolved is queued once,
@@ -772,7 +770,6 @@ impl CrossContextRoute for HelpdeskResolutionToArticleSuggestion {
         Some(SuggestArticlePayload {
             ticket_id: source_payload.ticket_id.clone(),
             company_id: source_payload.company_id.clone(),
-            suggested_at: chrono::Utc::now().to_rfc3339(),
         })
     }
 }
@@ -790,7 +787,7 @@ mod required_role_tests {
             EditArticle::required_role(),
             PublishArticle::required_role(),
         ] {
-            assert_eq!(required, Some(STAFF_TEAM));
+            assert_eq!(required, Some(helpdesk::STAFF_ROLE));
         }
         assert_eq!(SuggestArticle::required_role(), None);
     }

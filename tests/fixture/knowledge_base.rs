@@ -66,13 +66,14 @@ fn a_ticket_is_suggested_once() {
     let payload = || SuggestArticlePayload {
         ticket_id: "t-1".into(),
         company_id: "acme".into(),
-        suggested_at: "2026-10-12T00:00:00Z".into(),
     };
+    // `suggested_at` is the submission's own instant (`Decision::now`).
     GivenEvents::<SuggestArticle>::new()
+        .now("2026-10-12T00:00:00Z".parse().unwrap())
         .when(payload())
         .then_accepted(vec![spec(
             "ArticleSuggested",
-            json!({ "ticket_id": "t-1", "company_id": "acme", "suggested_at": "2026-10-12T00:00:00Z" }),
+            json!({ "ticket_id": "t-1", "company_id": "acme", "suggested_at": "2026-10-12T00:00:00+00:00" }),
         )]);
     // A second resolution of the same ticket, or a replayed route.
     for later in [suggested("t-1"), dismissed("t-1")] {
@@ -244,7 +245,6 @@ fn every_resolution_is_routed_as_a_suggestion() {
         .expect("every resolution is routed");
     assert_eq!(suggestion.ticket_id, "t-1");
     assert_eq!(suggestion.company_id, "acme");
-    assert!(chrono::DateTime::parse_from_rfc3339(&suggestion.suggested_at).is_ok());
 }
 
 // --- projections ---
