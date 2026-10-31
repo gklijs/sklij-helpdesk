@@ -29,14 +29,14 @@ use skilj_core::encryption::{decrypt_ciphertext_leaves, DataKey};
 use skilj_core::event_store::{BoundedContext, BoundedContextStatus, EventOrigin};
 use skilj_core::plugin::Snapshot;
 use skilj_core::shared::generate_token_id;
-use skilj_helpdesk::helpdesk::{TicketSnapshot, BOUNDED_CONTEXT, STAFF_TEAM};
+use skilj_helpdesk::helpdesk::{TicketSnapshot, BOUNDED_CONTEXT, STAFF_ROLE};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Duration;
 use support::{
     fresh_database, graphql_request, mint_command_token, runtime, seed_role, seed_scoped_mapping,
-    serve_jwks, sign_jwt, submit_command_mutation, test_idp_config, test_master_key, test_now,
-    trigger, wait_until,
+    serve_jwks, sign_jwt, submit_command_mutation, test_idp_config, test_key_provider,
+    test_key_service, test_now, trigger, wait_until,
 };
 
 const GOLDEN: &str = "tests/golden/rest_graphql_conformance.json";
@@ -172,7 +172,7 @@ async fn start(prefix: &str) -> Option<Run> {
     let admin = seed_scoped_mapping(&pool, &role, AccessLevel::Admin, None).await;
     let jwks_url = serve_jwks().await;
     let (skilj, _report) = skilj_helpdesk::register(Skilj::builder(database_url))
-        .encryption_master_key(test_master_key())
+        .key_provider(test_key_provider())
         .reconciliation_role(role.external_subject.clone())
         .identity_provider(test_idp_config(&jwks_url))
         .build()
@@ -224,7 +224,7 @@ async fn drive_rest(run: &Run) -> Driven {
 async fn drive_graphql(run: &Run) -> Driven {
     let router = run.skilj.graphql_router().await.unwrap();
     let admin = sign_jwt(&run.admin.role.external_subject);
-    let staff_role = seed_role(&run.pool, STAFF_TEAM).await;
+    let staff_role = seed_role(&run.pool, STAFF_ROLE).await;
     seed_scoped_mapping(&run.pool, &staff_role, AccessLevel::Write, None).await;
     let staff = sign_jwt(&staff_role.external_subject);
     let customer_role = seed_role(&run.pool, "customer").await;
@@ -485,7 +485,7 @@ async fn data_keys(pool: &Pool) -> (Vec<String>, Vec<DataKey>) {
                 pool,
                 BOUNDED_CONTEXT,
                 subject_value,
-                Some(&test_master_key()),
+                Some(&test_key_service()),
             )
             .await
             .unwrap(),

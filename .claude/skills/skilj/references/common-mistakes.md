@@ -25,13 +25,47 @@ exactly what's allowed.
 **`SensitiveFieldTagOverlap`** - the same `field` appears in both
 `tag_mappings()` and `sensitive_fields()` on the same type. Tag the
 *subject* field instead if you need both an indexed tag and an
-encrypted field pointing at the same conceptual subject.
+encrypted field pointing at the same conceptual subject. If the point
+was to match on the sensitive value itself (a uniqueness check on an
+email address), make the mapping blind - `TagMapping::blind::<B>` with a
+`BlindTag` declaring the key; see the `skilj-uniqueness` skill.
+
+**`InvalidBlindTagMapping`** - a blind mapping's key is the type's
+`owner_tag_key`, or the type is scheduled (`system_triggered_allowed`).
+An owner is compared with a grant's plain scope, so tag it plainly.
+
+**`BlindTagMismatch`** / **`BlindTagKeyInUse`** /
+**`BlindNormalizerChanged`** - a tag key's blindness or normalizer
+disagrees with what the bounded context stores: blind here and plain on
+another type, made blind while a registered type maps it plainly, or a
+`BlindTag::NORMALIZER_VERSION` other than the stored one. The
+`skilj-uniqueness` skill's error table has the fixes.
 
 **`SchemaIncompatible`** - re-registering an existing type with a schema
-change that would break an existing reader: a field removed, or an
-existing field tightened from optional to required. Fix: add new fields
-as `Option<T>`, never remove or narrow an existing one - if the old
-field genuinely needs to go, that's a new type, not an edit to this one.
+change that would break an existing reader: a field removed, an existing
+field tightened from optional to required, or a field's type changed.
+Fix: add new fields as `Option<T>`, never remove, narrow, or retype an
+existing one. If you need a genuine reshape (rename a field, change its
+type, split/merge fields) rather than an additive change, that's not
+something a schema revision can express at all - see
+[`docs/architecture.md` §33](../../../../docs/architecture.md#payload-upcasting) for the full menu of options (a new,
+differently-named type; a custom serde `Deserialize`; reshaping inside
+`Projection::project()`; or `skilj_core::plugin::upcast_payload`/
+`UpcastStep`, sugar for branching on `event.metadata.version` inside a
+hand-written `BoundedContextEvent::try_from_event` to interpret an old
+payload differently without a new registered type at all).
+
+Not this error: an *older* version of the application starting after a
+newer one registered the type (a restart mid-rollout, or a rollback).
+When the stored registration is a valid evolution of the one this
+process declares, startup keeps the stored one and lists the type in
+`ReconciliationReport::kept_newer` instead of failing. The explicit
+`registerEventType`/`registerCommandType` mutations still refuse it.
+Likewise startup never *removes* a sensitive field, private field or
+owner tag key the stored registration has (reported in
+`ReconciliationReport::kept_protections`): deleting one from your type
+and redeploying does not turn it off - that takes the explicit
+registration mutation.
 
 **`TagMappingKeyDropped`** - re-registering with a `tag_mappings()` that
 drops a `key` an earlier registration already used. A tag key, once
@@ -44,6 +78,25 @@ weren't both overridden. See `event-type.md`'s scheduling section - both
 are required together, no default for either.
 
 ## At submission/creation time (not registration)
+
+**`blind_tag_not_declared`** - the type maps a tag key blind, but the
+process handling the request declares no `BlindTag` for it (or has no
+`blind_index_key`), so it can't hash the value and refuses rather than
+store it in the clear. Every instance serving the bounded context needs
+the `BlindTag` and the same key; a deadline or route retries this on
+another instance.
+
+**`blind_index_key_changed`** (at startup) - a `BlindTag`'s stored key
+fingerprint isn't this process's: its `blind_index_key` differs from the
+one the bounded context's blind tags were hashed with. Configure the
+original key. To replace a key, rotate it: the new one as
+`blind_index_key`, the old one in `previous_blind_index_keys` (see the
+`skilj-uniqueness` skill).
+
+**`blind_index_key_not_configured`** - the bounded context's blind tags
+were rotated to a key this process isn't configured with, or it lacks the
+previous keys. Configure both on every instance; meanwhile another
+instance takes the work over.
 
 **`PayloadDoesNotMatchSchema`** - the JSON payload handed to a command
 submission (or a direct/external event creation) doesn't validate

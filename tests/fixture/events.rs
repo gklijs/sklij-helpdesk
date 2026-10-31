@@ -125,6 +125,7 @@ pub fn closed(ticket_id: &str, company_id: &str) -> HelpdeskEvent {
     HelpdeskEvent::TicketClosed(TicketClosedPayload {
         ticket_id: ticket_id.into(),
         company_id: company_id.into(),
+        due_at: None,
     })
 }
 
@@ -258,6 +259,7 @@ pub fn sla_breached(
         ticket_id: ticket_id.into(),
         company_id: company_id.into(),
         sla,
+        due_at: None,
     })
 }
 

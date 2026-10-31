@@ -45,7 +45,7 @@ import threading
 import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "deadline-drain"))
-from common import (PGUSER, PGHOST, PGPORT, Client, createdb, dropdb, psql,  # noqa: E402
+from common import (KEY_FILE, PGUSER, PGHOST, PGPORT, Client, createdb, dropdb, psql,  # noqa: E402
                     ticket_payload)
 
 ap = argparse.ArgumentParser()
@@ -81,7 +81,7 @@ class Proc:
     def __init__(self, port, log_path):
         env = dict(os.environ)
         env.update({"DATABASE_URL": f"postgres://{PGUSER}@{PGHOST}:{PGPORT}/{DB}",
-                    "ENCRYPTION_MASTER_KEY": "0" * 64, "PORT": str(port),
+                    "ENCRYPTION_KEY_FILE": KEY_FILE, "PORT": str(port),
                     "RUST_LOG": env.get("RUST_LOG", LOG_FILTER)})
         self.port, self.marks, self.tokens = port, {}, {}
         self.log = open(log_path, "w")

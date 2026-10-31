@@ -178,7 +178,7 @@ fn forgetting_a_customer_erases_their_data_and_pending_auto_close() {
 
         // Staff: may read sensitive fields. `seed_admin`'s own mapping
         // can't, so it never sees plaintext either way.
-        let staff_role = seed_role(&pool, "staff").await;
+        let staff_role = seed_role(&pool, skilj_helpdesk::helpdesk::STAFF_ROLE).await;
         db::insert_role_access_mapping(
             &pool,
             &RoleAccessMapping {
@@ -187,6 +187,8 @@ fn forgetting_a_customer_erases_their_data_and_pending_auto_close() {
                 level: AccessLevel::Admin,
                 can_read_sensitive: true,
                 scope: None,
+                capabilities: skilj_helpdesk::helpdesk::capabilities_for_role(&staff_role.name),
+                delegable: Default::default(),
                 status: RoleStatus::Active,
                 created_at: test_now(),
                 revoked_at: None,

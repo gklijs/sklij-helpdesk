@@ -46,14 +46,8 @@ impl EventType for TicketCreated {
     /// the creating event carries both tags up front.
     fn tag_mappings() -> Vec<TagMapping> {
         vec![
-            TagMapping {
-                key: "ticket".into(),
-                field: "ticket_id".into(),
-            },
-            TagMapping {
-                key: "company".into(),
-                field: "company_id".into(),
-            },
+            TagMapping::new("ticket", "ticket_id"),
+            TagMapping::new("company", "company_id"),
         ]
     }
     /// `src/bin/alerter.rs` reads this via an `EventReadToken` to track
@@ -222,6 +216,12 @@ impl EventType for TicketCustomerResponded {
 pub struct TicketClosedPayload {
     pub ticket_id: String,
     pub company_id: String,
+    /// When the auto-close was due, RFC 3339: the firing deadline's own
+    /// `scheduled_at` (skilj 0.2.0's `Decision::deadline`). `None` for a
+    /// close submitted by hand, and for one recorded before this field
+    /// existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub due_at: Option<String>,
 }
 
 pub struct TicketClosed;
@@ -309,19 +309,10 @@ impl EventType for TicketsMerged {
     const NAME: &'static str = "TicketsMerged";
     fn tag_mappings() -> Vec<TagMapping> {
         vec![
-            TagMapping {
-                key: "ticket".into(),
-                field: "primary_ticket_id".into(),
-            },
-            TagMapping {
-                key: "ticket".into(),
-                field: "duplicate_ticket_id".into(),
-            },
+            TagMapping::new("ticket", "primary_ticket_id"),
+            TagMapping::new("ticket", "duplicate_ticket_id"),
             // The duplicate's agent - see `duplicate_assignee_id`.
-            TagMapping {
-                key: STAFF_TAG_KEY.into(),
-                field: "duplicate_assignee_id".into(),
-            },
+            TagMapping::new(STAFF_TAG_KEY, "duplicate_assignee_id"),
         ]
     }
     /// `src/bin/alerter.rs` reads this to stop tracking the duplicate
@@ -411,28 +402,22 @@ impl EventType for TicketInternalNoteAdded {
     /// doesn't (see this file's own module doc comment on why).
     fn tag_mappings() -> Vec<TagMapping> {
         vec![
-            TagMapping {
-                key: "ticket".into(),
-                field: "ticket_id".into(),
-            },
-            TagMapping {
-                key: "company".into(),
-                field: "company_id".into(),
-            },
+            TagMapping::new("ticket", "ticket_id"),
+            TagMapping::new("company", "company_id"),
         ]
     }
     fn private_fields() -> Vec<PrivateField> {
         vec![
             PrivateField {
                 field: "staff_id".into(),
-                kind: PrivateFieldKind::Team,
-                team: Some(STAFF_TEAM.into()),
+                kind: PrivateFieldKind::Capability,
+                capability: Some(STAFF_CAPABILITY.into()),
                 addressee_field: None,
             },
             PrivateField {
                 field: "note".into(),
-                kind: PrivateFieldKind::Team,
-                team: Some(STAFF_TEAM.into()),
+                kind: PrivateFieldKind::Capability,
+                capability: Some(STAFF_CAPABILITY.into()),
                 addressee_field: None,
             },
         ]

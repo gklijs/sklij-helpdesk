@@ -480,7 +480,7 @@ fn day_of(timestamp: &Option<String>) -> String {
 
 /// Staff only: the demo company's `marketing::MarketingSignals` and
 /// `activity::CompanyEngagement` rows, read once per page load. Both
-/// projections are `TEAM_ONLY` staff on the backend, so a customer's read
+/// projections require the staff capability on the backend, so a customer's read
 /// would be refused anyway - this is not the gate, just not offering it.
 ///
 /// `CompanyEngagement` is async and this page's own activity ping is one

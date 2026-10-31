@@ -33,7 +33,7 @@ use skilj_helpdesk::APPLICATION_VERSION;
 use std::time::Duration;
 use support::{
     accepted, fresh_database, graphql_request, mint_command_token, projection_state, runtime,
-    seed_admin, serve_jwks, sign_jwt, test_idp_config, test_master_key, trigger, unique_name,
+    seed_admin, serve_jwks, sign_jwt, test_idp_config, test_key_provider, trigger, unique_name,
     wait_until,
 };
 
@@ -98,7 +98,7 @@ async fn start(
     version: u64,
 ) -> (Skilj, skilj::ReconciliationReport) {
     let builder = skilj_helpdesk::register(Skilj::builder(database_url.to_string()))
-        .encryption_master_key(test_master_key())
+        .key_provider(test_key_provider())
         .reconciliation_role(subject.to_string())
         .identity_provider(test_idp_config(jwks_url))
         .application_version(version);
