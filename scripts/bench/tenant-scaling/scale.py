@@ -48,6 +48,8 @@ ap.add_argument("--pgbench-clients", type=int, default=4)
 ap.add_argument("--pgbench-threads", type=int, default=2)
 ap.add_argument("--pgbench-scale", type=int, default=10)
 ap.add_argument("--port", type=int, default=18201)
+ap.add_argument("--db-max-connections", type=int, default=80)
+ap.add_argument("--max-in-flight", type=int, default=70)
 args = ap.parse_args()
 
 os.makedirs(args.out, exist_ok=True)
@@ -225,7 +227,7 @@ def fg_worker(w, tenants, shared_client):
                 latencies.append((t, command, status, accepted, ms, tenant or "helpdesk"))
 
 
-def sampler(db_contexts):
+def sampler(db_contexts, server):
     while not stop_sampler.is_set():
         t = time.time()
         try:
@@ -236,7 +238,8 @@ def sampler(db_contexts):
                 f"SELECT count(*) FROM pg_stat_activity WHERE datname = '{DB}' "
                 "AND state = 'active'", "postgres"))
             samples.append({"t": round(t, 3), "heads": heads, "active": active,
-                            "load": open("/proc/loadavg").read().split()[:3]})
+                            "load": open("/proc/loadavg").read().split()[:3],
+                            "rss_kib": server.rss_kb(), "hwm_kib": server.hwm_kb()})
         except Exception as e:  # noqa: BLE001
             print("sample failed:", e, flush=True)
         time.sleep(max(0, 1.0 - (time.time() - t)))
@@ -313,15 +316,15 @@ def window(t0, t1):
 def main():
     for db in (DB, PGDB):
         dropdb(db)
-    createdb(DB, args.template)
+    createdb(DB, None if args.template == "-" else args.template)
     psql("VACUUM ANALYZE", DB)
     print(f"[{args.label}] loadavg before: {open('/proc/loadavg').read().split()[:3]}",
           flush=True)
 
     extra = {"TICKET_ROUTING": "tenant" if args.tenants else "shared"}
     server = Server(args.server, DB, args.port, f"{args.out}/{args.label}-server.log",
-                    {**extra, "DATABASE_MAX_CONNECTIONS": "120",
-                     "HTTP_MAX_IN_FLIGHT_REQUESTS": "200"})
+                    {**extra, "DATABASE_MAX_CONNECTIONS": str(args.db_max_connections),
+                     "HTTP_MAX_IN_FLIGHT_REQUESTS": str(args.max_in_flight)})
     sidecars = []
     tenants = {}
     db_contexts = ["helpdesk"]
@@ -348,7 +351,7 @@ def main():
         db_contexts += [t for t, _ in tenants.values()]
 
     pg_proc, pg_log = run_pgbench()
-    smp = threading.Thread(target=sampler, args=(db_contexts,))
+    smp = threading.Thread(target=sampler, args=(db_contexts, server))
     smp.start()
     if args.tenants:
         workers = [threading.Thread(target=fg_worker, args=(w, tenants, None))
@@ -384,14 +387,15 @@ def main():
     res = {"label": args.label, "args": vars(args), "tenants": list(tenants),
            "window": window(t_start, t_end),
            "pgbench_tps": pg_tps, "pgbench_lat_ms": pg_lat,
+           "rss_peak_kib": max((s["rss_kib"] or 0 for s in samples), default=0),
            "pgbench_raw": pg_out[-2000:]}
     json.dump(res, open(f"{args.out}/{args.label}.json", "w"), indent=1)
     with open(f"{args.out}/{args.label}-samples.csv", "w", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["t"] + [f"head_{c}" for c in db_contexts] + ["active", "load1"])
+        w.writerow(["t"] + [f"head_{c}" for c in db_contexts] + ["active", "load1", "rss_kib", "hwm_kib"])
         for s in samples:
             w.writerow([s["t"]] + [s["heads"].get(c) for c in db_contexts]
-                       + [s["active"], s["load"][0]])
+                       + [s["active"], s["load"][0], s["rss_kib"], s["hwm_kib"]])
     with open(f"{args.out}/{args.label}-latency.csv", "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(["t", "command", "status", "accepted", "ms", "tenant"])

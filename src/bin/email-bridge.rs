@@ -3,7 +3,8 @@
 //! (`skilj-nats`). The pipeline, address scheme and redelivery story
 //! are in `src/email_channel.rs`'s module doc comment.
 //!
-//! Runs three loops against one JetStream stream until Ctrl-C:
+//! Tenant mode runs one ordered raw-email delivery loop (`tenant_email`).
+//! Shared mode runs three loops against one JetStream stream until Ctrl-C:
 //!
 //! - the translator: `helpdesk.email.received` to a command subject (or
 //!   `helpdesk.email.unroutable`);
@@ -24,13 +25,16 @@
 //!   SKILJ_BASE_URL                    - default "http://localhost:8080"
 //!   CREATE_TICKET_TOKEN               - CommandToken ("id.secret")
 //!   CUSTOMER_RESPONDS_TO_TICKET_TOKEN - CommandToken ("id.secret")
-//!   Both tokens are printed by `src/bin/server.rs` on every run.
-//!   EMAIL_BRIDGE_BATCH_MAX_ITEMS      - default 100; 1 turns batching off
-//!   EMAIL_BRIDGE_BATCH_LINGER_MS      - default 0
-//!   TICKET_ROUTING                    - must be "shared"; the default
-//!                                       per-company tenant routing is
-//!                                       not supported (see
-//!                                       email_channel.rs's "Known gaps")
+//!   Both tokens are printed by `src/bin/server.rs` on every run (shared mode only).
+//!   EMAIL_BRIDGE_BATCH_MAX_ITEMS      - shared mode: default 100; 1 disables batching
+//!   EMAIL_BRIDGE_BATCH_LINGER_MS      - shared mode: default 0
+//!   TICKET_ROUTING                    - tenant by default; shared selects the
+//!                                       legacy translator/batched pipeline
+//!   DATABASE_URL                      - required in tenant mode
+//!   EMAIL_BRIDGE_ROLE_ID              - active service Role with Admin access
+//!                                       on each destination context
+//!   EMAIL_BRIDGE_TOKEN_SEED           - 64 random hex characters, reused across
+//!                                       restarts; keep as a deployment secret
 //!
 //! To try it by hand against `cargo run --bin server` and a local
 //! `nats-server -js`:
@@ -41,8 +45,8 @@
 //!   "to_address":"support+hooli@help.example","subject":"Hi","body":"..."}'
 //! ```
 //!
-//! `tests/email_channel.rs` runs this binary against a real NATS server
-//! and a real skilj.
+//! `tests/email_channel.rs` and `tests/tenant_channels.rs` run the two modes
+//! against real NATS servers and skilj.
 
 use skilj_helpdesk::email_channel::{self, CREATE_TICKET_CONSUMER, CUSTOMER_REPLY_CONSUMER};
 use skilj_helpdesk::routing::RoutingMode;
@@ -81,14 +85,38 @@ async fn main() -> Result<(), async_nats::Error> {
     if RoutingMode::from_env_value(std::env::var("TICKET_ROUTING").ok().as_deref())
         == RoutingMode::Tenant
     {
-        return Err(
-            "per-company tenant routing is on, but this bridge is shared-context only: it \
-                    holds one token per command, which names the shared `helpdesk` context, and \
-                    would split each company's tickets across two contexts \
-                    (src/email_channel.rs, \"Known gaps\"). Set TICKET_ROUTING=shared for the \
-                    demo/email-channel deployment, or leave the bridge out of a tenant-routed one"
-                .into(),
-        );
+        let required = |name: &str| {
+            std::env::var(name).map_err(|_| format!("{name} must be set for tenant email delivery"))
+        };
+        let token_seed = required("EMAIL_BRIDGE_TOKEN_SEED")?;
+        if token_seed.len() != 64 || !token_seed.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err("EMAIL_BRIDGE_TOKEN_SEED must be 64 random hex characters".into());
+        }
+        let pool = skilj_core::db::connect(&required("DATABASE_URL")?).await?;
+        let nats = async_nats::connect(
+            std::env::var("NATS_URL").unwrap_or_else(|_| "nats://localhost:4222".into()),
+        )
+        .await?;
+        let jetstream = async_nats::jetstream::new(nats);
+        let stream = email_channel::ensure_stream(&jetstream).await?;
+        return skilj_helpdesk::tenant_email::run_until(
+            skilj_helpdesk::tenant_email::TenantEmail {
+                pool,
+                role_id: required("EMAIL_BRIDGE_ROLE_ID")?,
+                token_seed,
+                base_url: std::env::var("SKILJ_BASE_URL")
+                    .unwrap_or_else(|_| "http://localhost:8080".into()),
+                http: reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_secs(30))
+                    .build()?,
+            },
+            &stream,
+            &jetstream,
+            async {
+                let _ = tokio::signal::ctrl_c().await;
+            },
+        )
+        .await;
     }
     let config = Config::from_env()?;
 
@@ -115,12 +143,14 @@ async fn main() -> Result<(), async_nats::Error> {
     .await?;
 
     let create_ticket_mapping = InboundMapping {
+        blobs: None,
         credential: config.create_ticket_token,
         action: InboundAction::Trigger {
             command_type: "CreateTicket".to_string(),
         },
     };
     let customer_reply_mapping = InboundMapping {
+        blobs: None,
         credential: config.customer_responds_to_ticket_token,
         action: InboundAction::Trigger {
             command_type: "CustomerRespondsToTicket".to_string(),

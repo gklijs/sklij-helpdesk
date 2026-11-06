@@ -127,7 +127,7 @@ fi
 #     TUIs, so they need their own terminal (README.md, "Operator
 #     consoles") ---
 echo "dev.sh: operator consoles, in another terminal once the server is up"
-echo "        (cargo install skilj-tui skilj-inspector --version 0.0.10):"
+echo "        (cargo install skilj-tui skilj-inspector --version 0.3.0):"
 if [ -n "$DEX_BIN" ]; then
     echo "  skilj-tui --endpoint http://localhost:${PORT:-8080}/graphql \\"
     echo "    --token-command $ROOT/scripts/operator-token.sh --bounded-context helpdesk"

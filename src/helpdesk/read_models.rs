@@ -64,6 +64,8 @@ impl Projection for TicketSummary {
     type State = TicketSummaryState;
     type Event = HelpdeskEvent;
     const NAME: &'static str = "TicketSummary";
+    // The additive first-responder field preserves the existing state and fold.
+    const LIVE_FOLD_COMPATIBLE: bool = true;
     /// See `TicketInternalNotes`'s own doc comment for the vulnerability
     /// this closes and what it doesn't - `TicketCreated`'s own "company"
     /// tag (already there for `CreateTicket`'s own consistency check) is
@@ -493,6 +495,7 @@ impl Projection for CustomerTickets {
     type State = CustomerTicketsState;
     type Event = HelpdeskEvent;
     const NAME: &'static str = "CustomerTickets";
+    const SUBJECT_KEY: Option<&'static str> = Some(super::CUSTOMER_SUBJECT);
     /// `TicketCreated`'s "company" tag sets the owner, as for
     /// `TicketSummary`. A customer belongs to one company
     /// (`specs/skilj-helpdesk.allium`'s `entity Customer`), so their row

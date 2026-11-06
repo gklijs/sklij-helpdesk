@@ -24,17 +24,12 @@
 //!
 //! ## What is and isn't copied
 //!
-//! Only mappings whose `scope` is exactly this company's id - that is, the
-//! company's own roles (a customer, say). A mapping with `scope: None` is
-//! *cross-company* by definition (`RoleAccessMapping::scope`'s own doc
-//! comment: `None` means unrestricted within the bounded context), and
-//! `staff-lead` is exactly that: real support staff serving every company.
-//! Copying a `None`-scoped mapping into one company's tenant would look
-//! like a faithful sync while quietly *narrowing* a deliberately
-//! unrestricted staff grant to a single company. Those are left alone
-//! entirely, and the cross-company case stays the open Phase 4 question
-//! (see this crate's `README.md`) rather than something this pass guesses
-//! at.
+//! Company-scoped mappings are copied into that company's tenant. An
+//! unrestricted shared mapping opts into every tenant only by holding both
+//! `staff` and `cross-company`. The copy is company-scoped, so removing either
+//! capability or revoking the shared grant removes the tenant copy on the next
+//! reconciliation. Unscoped tenant grants (including the provisioner's own)
+//! remain independently managed.
 
 use crate::helpdesk::{CompanyTenantProvisioned, BOUNDED_CONTEXT};
 use skilj_core::access_control::{self, AccessLevel, Role, RoleAccessMapping};
@@ -108,7 +103,7 @@ impl SyncPlan {
 ///
 /// **Revocation is deliberately scoped.** Only a tenant mapping whose
 /// `scope` equals `company_id` is ever proposed for revocation, and only
-/// when the shared context has no active company-scoped mapping for that
+/// when the shared context has no eligible active mapping for that
 /// same role. Two consequences, both intended:
 ///
 ///   - The ops Role `createBoundedContextFromTemplate` granted is
@@ -130,8 +125,15 @@ pub fn sync_plan(
 ) -> SyncPlan {
     let scoped_to_company = |m: &&RoleAccessMapping| m.scope.as_deref() == Some(company_id);
 
-    let shared_for_company: Vec<&RoleAccessMapping> =
-        shared_mappings.iter().filter(scoped_to_company).collect();
+    let shared_for_company: Vec<&RoleAccessMapping> = shared_mappings
+        .iter()
+        .filter(|m| {
+            m.scope.as_deref() == Some(company_id)
+                || (m.scope.is_none()
+                    && m.capabilities.contains("cross-company")
+                    && m.capabilities.contains(crate::helpdesk::STAFF_CAPABILITY))
+        })
+        .collect();
     let tenant_for_company: Vec<&RoleAccessMapping> =
         tenant_mappings.iter().filter(scoped_to_company).collect();
 
@@ -704,14 +706,13 @@ mod tests {
     }
 
     #[test]
-    fn an_unscoped_role_on_the_shared_context_is_never_copied() {
-        // staff-lead is cross-company (`scope: None`). Copying it into one
-        // company's tenant would look like a sync while quietly narrowing
-        // a deliberately unrestricted staff grant to a single company.
+    fn an_unscoped_role_without_explicit_cross_company_capabilities_is_not_copied() {
+        // Scope alone does not opt into tenant access. Both explicit
+        // capabilities are required before an unrestricted grant is copied.
         let plan = sync_plan("acme", &[mapping("staff-lead", BOUNDED_CONTEXT, None)], &[]);
         assert!(
             plan.is_noop(),
-            "a cross-company grant must not be projected into one tenant: {plan:?}"
+            "an unscoped grant without opt-in must not be copied: {plan:?}"
         );
     }
 

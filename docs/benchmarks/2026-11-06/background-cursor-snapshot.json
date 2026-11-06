@@ -1,0 +1,18 @@
+{
+  "note": "Sampled during post-load idle, after the helpdesk ticket projection had caught up; timestamp not recorded.",
+  "event_heads": {
+    "helpdesk": 91727,
+    "activity": null,
+    "marketing": null,
+    "knowledge_base": 10588
+  },
+  "projection_positions": {
+    "helpdesk/CompanyActiveTickets": 91727,
+    "knowledge_base/KnowledgeBaseReview": 10559,
+    "knowledge_base/PublishedArticles": 10559
+  },
+  "helpdesk_route_positions": {
+    "HelpdeskResolutionToArticleSuggestion": 53238
+  },
+  "conclusion": "The application was still processing a cross-context backlog and writing knowledge-base events during foreground idle."
+}

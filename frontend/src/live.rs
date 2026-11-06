@@ -55,6 +55,8 @@ const TICKET_EVENT_TYPES: &[&str] = &[
     "TicketEscalated",
     "TicketsMerged",
     "TicketRated",
+    "TicketPriorityChanged",
+    "TicketStaffReplied",
 ];
 
 /// graphql-ws's own "Forbidden" - what skilj-graphql closes with once the
@@ -194,6 +196,7 @@ fn connect(feed: &Rc<RefCell<Feed>>) {
     let on_close = Closure::<dyn FnMut(CloseEvent)>::new(move |event: CloseEvent| {
         with_feed(&weak, |feed| {
             if event.code() == FORBIDDEN_CLOSE_CODE {
+                crate::auth::session_expired();
                 stop(
                     feed,
                     "your session expired - log in again to keep this page live",
@@ -301,6 +304,7 @@ fn subscription_failed(feed: &Rc<RefCell<Feed>>, errors: &[Value]) {
                 .first()
                 .and_then(|e| e["message"].as_str())
                 .unwrap_or("the subscription was refused");
+            (feed.borrow().on_update)(Update::Resync);
             stop(feed, &format!("live updates stopped: {reason}"));
         }
     }

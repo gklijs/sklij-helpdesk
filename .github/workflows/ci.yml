@@ -154,11 +154,45 @@ jobs:
           # marketplace action's own input handling.
           version: "v0.21.14"
 
-      # frontend/'s own stated testing philosophy is "no unit tests this
-      # pass - verified by actually running it" (see its Cargo.toml/
-      # README) - `trunk build` is the honest CI equivalent of that:
-      # not a real browser run (see the run skill for how that's done
-      # by hand), but it does catch every compile-time and asset-bundling
-      # failure a broken change could introduce.
+      # Browser journeys are exercised by the independent smoke job below.
       - name: trunk build
         run: trunk build
+
+  browser:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            frontend
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: tests/browser/package-lock.json
+      - uses: jetli/trunk-action@v0.5.1
+        with:
+          version: "v0.21.14"
+      - name: Build application
+        run: |
+          cargo build --locked --bin server
+          cd frontend
+          trunk build --locked
+      - name: Install smoke runner
+        run: npm ci --prefix tests/browser --ignore-scripts
+      - name: Install CI Chromium
+        run: ./tests/browser/node_modules/.bin/playwright install --with-deps chromium
+      - name: Browser smoke (real Dex, PostgreSQL, tenant routing)
+        env:
+          PLAYWRIGHT_USE_BUNDLED_CHROMIUM: "1"
+        run: npm test --prefix tests/browser
+      - uses: actions/upload-artifact@v6
+        if: failure()
+        with:
+          name: browser-traces
+          path: tests/browser/test-results

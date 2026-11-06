@@ -1,0 +1,4 @@
+Total: 0.5 MB
+     0.5 100.0% 100.0%      0.5 100.0% std::__to_chars_bfloat16_t@@GLIBCXX_3.4.31
+     0.0   0.0% 100.0%      0.5 100.0% _dl_exception_free@@GLIBC_PRIVATE
+     0.0   0.0% 100.0%      0.5 100.0% _dl_mcount@@GLIBC_2.2.5

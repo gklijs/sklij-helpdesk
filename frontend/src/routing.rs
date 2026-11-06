@@ -8,33 +8,12 @@
 //! (unless the demo opts into `TICKET_ROUTING=shared`). The
 //! backend's own `routing.rs` owns that policy; this is the client half.
 //!
-//! ## Why the policy is duplicated rather than shared
-//!
-//! `frontend/` is a separate wasm crate with no dependency on the backend
-//! library, and adding one would pull the entire server-side dependency
-//! tree - database, tokio, OpenTelemetry - into a browser bundle. So the
-//! one thing duplicated here is deliberately the *smallest possible*
-//! piece of the policy: not a re-implementation of the command
-//! classification, which `api.rs` shows this app does not need (it only
-//! ever sends `CreateTicket`/`AddInternalNote`, plus a separate
-//! `RecordDailyActivity` to the unrelated `activity` context).
-//!
-//! What is duplicated is the fallback: a company with no tenant is served
-//! from the shared context, which is also this app's entire pre-cutover
-//! behaviour. Duplicating *that* is safe in a way duplicating the
-//! classification would not be - there is no way for this app to get it
-//! wrong by sending a lifecycle command to a tenant, because it never
-//! sends one.
-//!
-//! ## What enforces it
-//!
-//! Nothing here is trusted, and this module does not pretend otherwise:
-//! a caller could still name the shared context. The server refuses that
-//! (see the backend's `routing_guard` module), which is why the fallback
-//! below is a graceful degradation rather than a security decision.
+//! The authenticated company directory supplies the destination after checking
+//! the caller's grant on that context. Until discovery succeeds the dashboard
+//! stays `Resolving` and cannot submit tickets. This WASM crate keeps only the
+//! small context/type-name representation; the backend owns routing policy.
 
-use crate::api;
-use crate::config::{BOUNDED_CONTEXT, DEMO_COMPANY_ID};
+use crate::config::BOUNDED_CONTEXT;
 
 /// Where this company's Ticket traffic should be sent.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -78,38 +57,5 @@ impl TicketContext {
     /// same `bounded_context` rather than hard-coded at the call site.
     pub fn graphql_type(&self, projection_name: &str) -> String {
         format!("{}_{}", self.bounded_context(), projection_name)
-    }
-}
-
-/// Resolve the demo company's ticket context.
-///
-/// Reads the shared context's `TenantDirectory` projection - the one read
-/// that deliberately stays shared, since it is the lookup every piece of
-/// routing needs (see its own doc comment in the backend's `helpdesk/`).
-///
-/// A failure to resolve falls back to the shared context rather than
-/// surfacing an error: this is the same fallback the backend's own
-/// `routing.rs` documents, and it can only preserve working behaviour. If
-/// the deployment has enforcement on, the server will refuse a
-/// company-backed write anyway with a message naming the real problem,
-/// which is a better error than a blank dashboard.
-pub async fn resolve(token: &str) -> TicketContext {
-    let result = api::query_projection(
-        token,
-        BOUNDED_CONTEXT,
-        "TenantDirectory",
-        DEMO_COMPANY_ID,
-        &TicketContext::Shared.graphql_type("TenantDirectory"),
-        "tenantName",
-    )
-    .await;
-    match result {
-        // A company with no tenant reads as a projection whose
-        // `tenantName` is null, which arrives as an absent field.
-        Ok(json) => match json.get("tenantName").and_then(|v| v.as_str()) {
-            Some(tenant_name) => TicketContext::Tenant(tenant_name.to_string()),
-            None => TicketContext::Shared,
-        },
-        Err(_) => TicketContext::Shared,
     }
 }

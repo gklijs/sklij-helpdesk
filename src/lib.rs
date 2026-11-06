@@ -13,6 +13,7 @@
 pub mod activity;
 pub mod activity_scheduling;
 pub mod alerting;
+pub mod company_directory;
 pub mod demo_seed;
 pub mod email_channel;
 pub mod helpdesk;
@@ -26,6 +27,7 @@ pub mod scheduling;
 pub mod sla;
 pub mod telemetry;
 pub mod tenant_access;
+pub mod tenant_email;
 
 /// The local-JWKS-shortcut test key the sibling binaries (provisioner,
 /// lifecycle-replicator, alerter) sign their superadmin JWTs with, as a
@@ -56,7 +58,9 @@ pub const LOCAL_JWKS_TEST_JWKS: &str = "{\"keys\":[{\"kty\":\"RSA\",\"use\":\"si
 /// 8: skilj 0.2.0 - the staff-only projections declare
 /// `REQUIRES_CAPABILITY` and the internal-note private fields are
 /// capability-kind, where 7 stored `TEAM_ONLY` and team-kind ones.
-pub const APPLICATION_VERSION: u64 = 8;
+/// 9: skilj 0.3.0 - declare the customer projection subject namespace
+/// and the additive TicketSummary fold compatibility.
+pub const APPLICATION_VERSION: u64 = 9;
 
 /// The encryption setup `src/bin/server.rs` reads from its environment:
 /// where the master key lives and when it rotates.

@@ -1,0 +1,39 @@
+{
+  "upstream_issue": "https://github.com/gklijs/SkilJ/issues/169",
+  "server_sha256": "493aab0c63c2a7ed155a07f00e6e6c9d2b670ac2d366f98c42b633b023d17f8d",
+  "reproduction_sha256": "5268da5ea10dc49872ce8ef43ce6cceefb767c506273fc8dd3550d4a9ed60672",
+  "reproduction_source_sha256": "0899f3851bc5f1ea228a11d1778a199774aea99d07f3d63c23858ccb97d26b5d",
+  "quiet_repeat": {
+    "seconds_load": 180,
+    "seconds_idle": 300,
+    "builds_or_tests_concurrent": false,
+    "initial_load_average": [
+      0.0991,
+      0.082,
+      0.3003
+    ],
+    "allocator": "glibc 2.43; LD_PRELOAD and MALLOC_CONF unset",
+    "database_image_digest": "sha256:0cefaabd882e42bcb2a2f3dc56d3ce4770560ba62fd7f197f1a2e008fd5731ab"
+  },
+  "sqlx_reproduction": {
+    "version": "0.9.0",
+    "pool_connections": [
+      1,
+      32
+    ],
+    "payload_bytes": 2097152,
+    "identical_passes": 4,
+    "query": "SELECT $1::text",
+    "result_handling": "fetch_all; drop results before sampling",
+    "idle_before_shrink_seconds": 15,
+    "connections_held_through_shrink": true
+  },
+  "symbolization": {
+    "tool": "scripts/bench/current/heap_stacks.py",
+    "binary_matches_original_profile": true,
+    "adjustment": "heap_v2 Poisson weighting as in jeprof 5.3.0",
+    "crosscheck_estimated_live_mib": 272.0911879175297,
+    "jeprof_estimate_mib": 272.1
+  },
+  "telemetry": "console tracing only (RUST_LOG=warn); no OpenTelemetry SDK providers/exporters installed because OTEL_EXPORTER_OTLP_ENDPOINT is unset"
+}

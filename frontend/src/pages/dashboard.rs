@@ -129,6 +129,17 @@ pub fn Dashboard() -> impl IntoView {
         return view! { <p>"Redirecting to login..."</p> }.into_any();
     };
 
+    let company_id = StoredValue::new(
+        window()
+            .expect("browser")
+            .location()
+            .search()
+            .ok()
+            .and_then(|s| web_sys::UrlSearchParams::new_with_str(&s).ok())
+            .and_then(|p| p.get("company"))
+            .unwrap_or_else(|| config::DEMO_COMPANY_ID.into()),
+    );
+    let (companies, set_companies) = signal(Vec::<api::CompanyAccess>::new());
     let my_sub = auth::decode_jwt_sub(&token).unwrap_or_default();
     let is_staff = matches!(role, auth::Role::StaffLead);
 
@@ -150,7 +161,7 @@ pub fn Dashboard() -> impl IntoView {
         let my_sub = my_sub.clone();
         Effect::new(move |_| {
             let payload = serde_json::json!({
-                "company_id": config::DEMO_COMPANY_ID,
+                "company_id": company_id.get_value(),
                 "person_kind": if is_staff { "staff" } else { "customer" },
                 "person_subject": my_sub,
                 "day": today_midnight_utc(),
@@ -204,7 +215,27 @@ pub fn Dashboard() -> impl IntoView {
     {
         let token = token.clone();
         spawn_local(async move {
-            set_ticket_context.set(crate::routing::resolve(&token).await);
+            match api::companies(&token).await {
+                Ok(allowed) => {
+                    set_companies.set(allowed.clone());
+                    if let Some(company) = allowed
+                        .iter()
+                        .find(|c| c.company_id == company_id.get_value())
+                    {
+                        set_ticket_context.set(
+                            if company.bounded_context == config::BOUNDED_CONTEXT {
+                                TicketContext::Shared
+                            } else {
+                                TicketContext::Tenant(company.bounded_context.clone())
+                            },
+                        );
+                    } else {
+                        set_tickets.set(HashMap::new());
+                        set_status.set("You don't have access to this company's tickets. Choose an authorized company.".into());
+                    }
+                }
+                Err(error) => set_status.set(error),
+            }
         });
     }
 
@@ -224,12 +255,13 @@ pub fn Dashboard() -> impl IntoView {
         let wait_for_sequence = written_up_to.get_untracked();
         spawn_local(async move {
             let graphql_type = context.graphql_type("CompanyActiveTickets");
+            let selected_company = company_id.get_value();
             let read = |wait_for_sequence| {
                 api::query_projection_after(
                     &token,
                     context.bounded_context(),
                     "CompanyActiveTickets",
-                    config::DEMO_COMPANY_ID,
+                    &selected_company,
                     &graphql_type,
                     "tickets",
                     wait_for_sequence,
@@ -248,6 +280,8 @@ pub fn Dashboard() -> impl IntoView {
             let queue = match result {
                 Ok(queue) => queue,
                 Err(e) => {
+                    set_tickets.set(HashMap::new());
+                    set_contents.set(HashMap::new());
                     set_status.set(format!("couldn't load tickets: {e}"));
                     return;
                 }
@@ -336,7 +370,7 @@ pub fn Dashboard() -> impl IntoView {
             let ticket_id = format!("tk-{}", js_sys::Date::now() as u64);
             let payload = serde_json::json!({
                 "ticket_id": ticket_id,
-                "company_id": config::DEMO_COMPANY_ID,
+                "company_id": company_id.get_value(),
                 "requester_id": requester_id,
                 "logged_by_staff_id": Option::<String>::None,
                 "title": title,
@@ -373,10 +407,24 @@ pub fn Dashboard() -> impl IntoView {
                 <button on:click=log_out>"Log out"</button>
             </div>
         </nav>
+        <Show when=move || is_staff>
+            <label>"Company "
+                <select aria-label="Company" on:change:target=move |ev| {
+                    let params = web_sys::UrlSearchParams::new().expect("URL parameters");
+                    params.set("company", &ev.target().value());
+                    let _ = window().expect("browser").location().set_href(&format!("/?{}", params.to_string()));
+                }>
+                    <For each=move || companies.get() key=|c| c.company_id.clone() children=move |c| {
+                        let selected = c.company_id == company_id.get_value();
+                        view! { <option value=c.company_id.clone() selected=selected>{c.company_id.clone()}</option> }
+                    }/>
+                </select>
+            </label>
+        </Show>
         <p class="error">{move || status.get()}</p>
 
         <Show when=move || is_staff>
-            <CompanySignals token=signals_token.clone() ping_settled=ping_settled/>
+            <CompanySignals token=signals_token.clone() ping_settled=ping_settled company_id=company_id.get_value()/>
         </Show>
 
         <Show when=move || !is_staff>
@@ -487,7 +535,12 @@ fn day_of(timestamp: &Option<String>) -> String {
 /// of its inputs, so that read waits for the ping to settle and then asks
 /// skilj to wait for the ping's sequence too.
 #[component]
-fn CompanySignals(token: String, ping_settled: ReadSignal<Option<Option<i64>>>) -> impl IntoView {
+fn CompanySignals(
+    token: String,
+    ping_settled: ReadSignal<Option<Option<i64>>>,
+    company_id: String,
+) -> impl IntoView {
+    let company_id = StoredValue::new(company_id);
     let (signals, set_signals) = signal(None::<MarketingSignals>);
     let (engagement, set_engagement) = signal(None::<CompanyEngagement>);
     let (error, set_error) = signal(String::new());
@@ -498,7 +551,7 @@ fn CompanySignals(token: String, ping_settled: ReadSignal<Option<Option<i64>>>) 
                 &token,
                 config::MARKETING_BOUNDED_CONTEXT,
                 "MarketingSignals",
-                config::DEMO_COMPANY_ID,
+                &company_id.get_value(),
                 MarketingSignals::FIELDS,
                 None,
             )
@@ -519,12 +572,13 @@ fn CompanySignals(token: String, ping_settled: ReadSignal<Option<Option<i64>>>) 
         };
         let token = token.clone();
         spawn_local(async move {
+            let selected_company = company_id.get_value();
             let read = |wait_for_sequence| {
                 api::query_projection_fields(
                     &token,
                     config::ACTIVITY_BOUNDED_CONTEXT,
                     "CompanyEngagement",
-                    config::DEMO_COMPANY_ID,
+                    &selected_company,
                     CompanyEngagement::FIELDS,
                     wait_for_sequence,
                 )
@@ -544,7 +598,7 @@ fn CompanySignals(token: String, ping_settled: ReadSignal<Option<Option<i64>>>) 
     });
 
     view! {
-        <h2>"Company signals — " {config::DEMO_COMPANY_ID}</h2>
+        <h2>"Company signals — " {company_id.get_value()}</h2>
         <p class="error">{move || error.get()}</p>
         <div class="signals">
             {move || signals.get().map(|s| {

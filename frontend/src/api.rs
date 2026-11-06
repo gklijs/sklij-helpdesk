@@ -19,6 +19,10 @@ pub async fn graphql(token: &str, query: &str) -> Result<Value, String> {
         .await
         .map_err(|e| format!("network error talking to {GRAPHQL_URL}: {e}"))?;
 
+    if response.status() == 401 {
+        crate::auth::session_expired();
+        return Err("your session expired - sign in again".into());
+    }
     let json: Value = response
         .json()
         .await
@@ -133,4 +137,27 @@ pub async fn query_projection_fields(
     );
     let response = graphql(token, &query).await?;
     Ok(response["data"]["projection"].clone())
+}
+
+#[derive(Clone, Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompanyAccess {
+    pub company_id: String,
+    pub bounded_context: String,
+}
+
+pub async fn companies(token: &str) -> Result<Vec<CompanyAccess>, String> {
+    let url = GRAPHQL_URL.replace("/graphql", "/v1/helpdesk/companies");
+    let response = gloo_net::http::Request::get(&url)
+        .header("authorization", &format!("Bearer {token}"))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if response.status() == 401 {
+        crate::auth::session_expired();
+    }
+    if !response.ok() {
+        return Err("couldn't discover authorized companies".into());
+    }
+    response.json().await.map_err(|e| e.to_string())
 }

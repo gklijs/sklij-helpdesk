@@ -1,0 +1,725 @@
+{
+  "args": {
+    "server": "target/release/server",
+    "out": "/tmp/helpdesk-030-baseline",
+    "seconds": 180,
+    "idle_seconds": 60,
+    "workers": 80,
+    "interval_ms": 50,
+    "port": 18401,
+    "database": "helpdesk_memory_934204"
+  },
+  "commit": "7ccb64793d2e3bf46c2d671b6c5b54fb33999b84",
+  "source_sha256": {
+    "Cargo.lock": "e6618b52a846a5355a426e56c3f953caecbbc4504e9869c5f17bd5c4619071c9",
+    "Cargo.toml": "59c69b5c121851540735c6114468c9ba6cb391feb8ee56557a88703b19ea9c0b",
+    "src/activity.rs": "fd56199c36d1ca969d7c36c66f3495aedfdb60380cd36ce8273caa46742ad955",
+    "src/activity_scheduling.rs": "77c862b796fbfb4e92c90ff144a035ba0e0fd37c6ab0f8eaa501ea65459426eb",
+    "src/alerting.rs": "98eaed320f2a34d0543003240aafda67df11ae0aed5d62d7c9f8c9173f161493",
+    "src/bin/alerter.rs": "425b5203dea132caf5f15ac1a5de4f5b8f7e1c62c3db34b0353667107a9c63dd",
+    "src/bin/email-bridge.rs": "e7376463a626b97499eee9cf70a52877d7f70587a353d912f2641e192cac6185",
+    "src/bin/engagement-watcher.rs": "b336a0476dc6618d328e04db09cc3a901c95af994d0bba311dd1d12bef2f598f",
+    "src/bin/lifecycle-replicator.rs": "98e948e86ecdb491ac8052bf8b58436c9549263dbde5dc63c1887106630fe263",
+    "src/bin/provisioner.rs": "67c50f019fa4607c66f22b5be209fae38f5a0a5e15be3b3f7151c6e7fa8e090e",
+    "src/bin/server.rs": "562b6473f05be2714b577d447fa2f999144ec32f0ded024cb31238b7c3c0dd58",
+    "src/company_directory.rs": "d209664a43d550df25dc20ccc18abd7131c3d01f469d34096466a6f6ef466c45",
+    "src/demo_seed.rs": "779914fd75a52bece1760c0c991feadb3bb60bc3f4c0f5957654cd86cdefe29f",
+    "src/email_channel.rs": "9a1c2923d79cbaf6fa661a5f212359521b63c8406e86d215d5bdf7b7f927dd67",
+    "src/helpdesk/auto_assign.rs": "295f7e46c3ad4df6eafd9554a3bcab8f06ee8e8dd9c755bec9a0c97aae520644",
+    "src/helpdesk/company.rs": "ff465c3c7e5b4ed3af8e44c56ce50eecdccf751c06f80796cdcb7430e12238ba",
+    "src/helpdesk/macros.rs": "7e3f80d5c271bf8fca25583357e1bfa500ea6476059e42df3a3c1ce3bb03e1c2",
+    "src/helpdesk/mod.rs": "de92673e101d80a4f4d76dd376c6bae23f4889257f9417667f0596acc9b3f363",
+    "src/helpdesk/read_models.rs": "5a4e3f6ac737754b9488f768ea40a0a667149decf22d9cb8ff816bee7e784c69",
+    "src/helpdesk/sla_policy.rs": "8975f49f3e822ac9106ed7764c92db1f6cd8d1b3f5946572af5a43e09525b198",
+    "src/helpdesk/ticket.rs": "f4e873a34648269585c6ea28f03efaa6225330c6a4de0ffb0faab299d6a594aa",
+    "src/helpdesk/ticket_commands.rs": "3c6b78d639620346d85a0028007c62a02234c8117c988a648adb79064396335c",
+    "src/knowledge_base.rs": "ee7a8c25a493771b76b413dda65ad7540c3d18294f4c5436a692c4d17e2c1f83",
+    "src/lib.rs": "7de005ac2fda975916b3c81fd20581fbfcec20d9ae011aa31afacc6b4bf33775",
+    "src/marketing.rs": "71ccdcdb06f804a3b6baa0ceaf260311f68a9bf283fb0fbc9a20c34f537e1c5b",
+    "src/parked_deliveries.rs": "72129b0e5f4eaba9c080e8e7263041a69f8ce5152387085bfaede97eb7bd811d",
+    "src/projection_lag.rs": "ff41dd8fb46b9a59626c2159dfeb1979edcca054d7819702d6ab023b2eb9e1e8",
+    "src/routing.rs": "d5d64a5786a42c07927e5fb2151ff0339f062cb5e29a8aaaaf2317c74dc46994",
+    "src/routing_guard.rs": "c6c5efa4c3098f3eb3250b10d474cbbab99c31d24c9443378d81658ecb1014e1",
+    "src/scheduling.rs": "14a36bbbc1269ea8f4d54f6ed28e7e8da8731c54a4ed73acb67de392aaaba13d",
+    "src/sla.rs": "1dca9be0cf73fb8d9ec2eb96032a36e20cadcd701f22410821028689c0f64b30",
+    "src/telemetry.rs": "bcfa1f69dc4e57bee4bcd26d0ba610e5469c8b13a04bc6efb8fb0a62f35c500a",
+    "src/tenant_access.rs": "7075020ab7c65863883ef192f63b4a6874f5f3cb7e512998be771e948a3f6fb4",
+    "src/tenant_email.rs": "366384eb12296807814f2cef0ff51547094f901abcc9ea8c1744a2405bdc64ff"
+  },
+  "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+  "platform": "Linux-6.18.33.2-microsoft-standard-WSL2-x86_64-with-glibc2.43",
+  "cpu": "\t: Intel(R) Core(TM) Ultra 9 185H",
+  "logical_cpus": 22,
+  "meminfo": [
+    "MemTotal:       16109748 kB",
+    "MemFree:          121324 kB",
+    "MemAvailable:    6100968 kB"
+  ],
+  "postgres_settings": "fsync|on\nmax_connections|100\nmax_wal_size|1024\nserver_version|16.15\nshared_buffers|16384\nsynchronous_commit|on\nwork_mem|4096\n",
+  "load_seconds": 181.26,
+  "responses": 122889,
+  "accepted": 78814,
+  "rejected": 9457,
+  "http_errors": {
+    "503": 34618
+  },
+  "latency_ms": {
+    "n": 122889,
+    "p50": 130.9,
+    "p95": 180.44,
+    "p99": 231.54,
+    "max": 366.87
+  },
+  "windows": [
+    {
+      "start_seconds": 0,
+      "responses": 21981,
+      "accepted": 14545,
+      "latency_ms": {
+        "n": 21981,
+        "p50": 119.8,
+        "p95": 150.72,
+        "p99": 215.55,
+        "max": 309.52
+      }
+    },
+    {
+      "start_seconds": 30,
+      "responses": 19706,
+      "accepted": 12430,
+      "latency_ms": {
+        "n": 19706,
+        "p50": 134.34,
+        "p95": 195.22,
+        "p99": 270.61,
+        "max": 366.87
+      }
+    },
+    {
+      "start_seconds": 60,
+      "responses": 20655,
+      "accepted": 13384,
+      "latency_ms": {
+        "n": 20655,
+        "p50": 128.54,
+        "p95": 178.46,
+        "p99": 239.63,
+        "max": 332.57
+      }
+    },
+    {
+      "start_seconds": 90,
+      "responses": 20468,
+      "accepted": 13160,
+      "latency_ms": {
+        "n": 20468,
+        "p50": 130.31,
+        "p95": 175.48,
+        "p99": 216.41,
+        "max": 346.01
+      }
+    },
+    {
+      "start_seconds": 120,
+      "responses": 19906,
+      "accepted": 12643,
+      "latency_ms": {
+        "n": 19906,
+        "p50": 137.84,
+        "p95": 180.03,
+        "p99": 220.56,
+        "max": 281.02
+      }
+    },
+    {
+      "start_seconds": 150,
+      "responses": 19384,
+      "accepted": 12149,
+      "latency_ms": {
+        "n": 19384,
+        "p50": 141.64,
+        "p95": 187.32,
+        "p99": 214.8,
+        "max": 271.7
+      }
+    }
+  ],
+  "samples": [
+    {
+      "seconds": 0.07,
+      "phase": "load",
+      "rss_kib": 46760,
+      "hwm_kib": 46760,
+      "db_activity": "active|1\nidle|43\nidle in transaction|5",
+      "loadavg": [
+        1.38427734375,
+        1.3115234375,
+        1.3955078125
+      ]
+    },
+    {
+      "seconds": 5.1,
+      "phase": "load",
+      "rss_kib": 132252,
+      "hwm_kib": 132252,
+      "db_activity": "active|8\nidle|72\nidle in transaction|3",
+      "loadavg": [
+        2.634765625,
+        1.572265625,
+        1.4794921875
+      ]
+    },
+    {
+      "seconds": 10.14,
+      "phase": "load",
+      "rss_kib": 170008,
+      "hwm_kib": 170008,
+      "db_activity": "active|11\nidle|71\nidle in transaction|1",
+      "loadavg": [
+        3.14453125,
+        1.69580078125,
+        1.52001953125
+      ]
+    },
+    {
+      "seconds": 15.16,
+      "phase": "load",
+      "rss_kib": 196128,
+      "hwm_kib": 196128,
+      "db_activity": "active|8\nidle|74\nidle in transaction|1",
+      "loadavg": [
+        3.1328125,
+        1.7177734375,
+        1.5283203125
+      ]
+    },
+    {
+      "seconds": 20.18,
+      "phase": "load",
+      "rss_kib": 210440,
+      "hwm_kib": 210440,
+      "db_activity": "active|11\nidle|71\nidle in transaction|1",
+      "loadavg": [
+        3.1220703125,
+        1.7392578125,
+        1.53662109375
+      ]
+    },
+    {
+      "seconds": 25.21,
+      "phase": "load",
+      "rss_kib": 240244,
+      "hwm_kib": 240244,
+      "db_activity": "active|12\nidle|69\nidle in transaction|2",
+      "loadavg": [
+        3.11181640625,
+        1.76025390625,
+        1.544921875
+      ]
+    },
+    {
+      "seconds": 30.23,
+      "phase": "load",
+      "rss_kib": 237788,
+      "hwm_kib": 238972,
+      "db_activity": "active|4\nidle|78\nidle in transaction|1",
+      "loadavg": [
+        5.02490234375,
+        2.1796875,
+        1.68212890625
+      ]
+    },
+    {
+      "seconds": 35.26,
+      "phase": "load",
+      "rss_kib": 247316,
+      "hwm_kib": 247316,
+      "db_activity": "active|9\nidle|72\nidle in transaction|2",
+      "loadavg": [
+        5.66357421875,
+        2.359375,
+        1.7431640625
+      ]
+    },
+    {
+      "seconds": 40.3,
+      "phase": "load",
+      "rss_kib": 267260,
+      "hwm_kib": 267260,
+      "db_activity": "active|11\nidle|71\nidle in transaction|1",
+      "loadavg": [
+        5.6103515625,
+        2.4033203125,
+        1.7607421875
+      ]
+    },
+    {
+      "seconds": 45.33,
+      "phase": "load",
+      "rss_kib": 269528,
+      "hwm_kib": 269528,
+      "db_activity": "active|11\nidle|71\nidle in transaction|1",
+      "loadavg": [
+        9.4052734375,
+        3.24365234375,
+        2.0361328125
+      ]
+    },
+    {
+      "seconds": 50.34,
+      "phase": "load",
+      "rss_kib": 272620,
+      "hwm_kib": 272620,
+      "db_activity": "active|7\nidle|74\nidle in transaction|2",
+      "loadavg": [
+        8.89208984375,
+        3.2392578125,
+        2.04150390625
+      ]
+    },
+    {
+      "seconds": 55.38,
+      "phase": "load",
+      "rss_kib": 269160,
+      "hwm_kib": 277932,
+      "db_activity": "active|8\nidle|75\nidle in transaction|1",
+      "loadavg": [
+        11.62353515625,
+        3.8994140625,
+        2.26171875
+      ]
+    },
+    {
+      "seconds": 60.43,
+      "phase": "load",
+      "rss_kib": 296832,
+      "hwm_kib": 296832,
+      "db_activity": "active|8\nidle|73\nidle in transaction|2",
+      "loadavg": [
+        12.93505859375,
+        4.2998046875,
+        2.400390625
+      ]
+    },
+    {
+      "seconds": 65.46,
+      "phase": "load",
+      "rss_kib": 301708,
+      "hwm_kib": 301708,
+      "db_activity": "active|15\nidle|66\nidle in transaction|2",
+      "loadavg": [
+        12.69970703125,
+        4.39453125,
+        2.44140625
+      ]
+    },
+    {
+      "seconds": 70.49,
+      "phase": "load",
+      "rss_kib": 301728,
+      "hwm_kib": 301728,
+      "db_activity": "active|10\nidle|72\nidle in transaction|2",
+      "loadavg": [
+        12.1630859375,
+        4.42138671875,
+        2.4609375
+      ]
+    },
+    {
+      "seconds": 75.52,
+      "phase": "load",
+      "rss_kib": 299352,
+      "hwm_kib": 301236,
+      "db_activity": "active|9\nidle|74\nidle in transaction|1",
+      "loadavg": [
+        11.50927734375,
+        4.4140625,
+        2.46923828125
+      ]
+    },
+    {
+      "seconds": 80.57,
+      "phase": "load",
+      "rss_kib": 328756,
+      "hwm_kib": 328756,
+      "db_activity": "active|9\nidle|74\nidle in transaction|1",
+      "loadavg": [
+        15.232421875,
+        5.3037109375,
+        2.767578125
+      ]
+    },
+    {
+      "seconds": 85.6,
+      "phase": "load",
+      "rss_kib": 331196,
+      "hwm_kib": 331196,
+      "db_activity": "active|8\nidle|74\nidle in transaction|2",
+      "loadavg": [
+        15.9345703125,
+        5.6142578125,
+        2.8818359375
+      ]
+    },
+    {
+      "seconds": 90.63,
+      "phase": "load",
+      "rss_kib": 333972,
+      "hwm_kib": 333972,
+      "db_activity": "active|20\nidle|62\nidle in transaction|2",
+      "loadavg": [
+        14.8984375,
+        5.57080078125,
+        2.8828125
+      ]
+    },
+    {
+      "seconds": 95.67,
+      "phase": "load",
+      "rss_kib": 338608,
+      "hwm_kib": 338608,
+      "db_activity": "active|8\nidle|74\nidle in transaction|2",
+      "loadavg": [
+        14.10546875,
+        5.56103515625,
+        2.89453125
+      ]
+    },
+    {
+      "seconds": 100.7,
+      "phase": "load",
+      "rss_kib": 348284,
+      "hwm_kib": 348284,
+      "db_activity": "active|9\nidle|74\nidle in transaction|1",
+      "loadavg": [
+        13.9365234375,
+        5.66796875,
+        2.94384765625
+      ]
+    },
+    {
+      "seconds": 105.73,
+      "phase": "load",
+      "rss_kib": 362836,
+      "hwm_kib": 362836,
+      "db_activity": "active|9\nidle|74\nidle in transaction|1",
+      "loadavg": [
+        13.541015625,
+        5.7236328125,
+        2.9765625
+      ]
+    },
+    {
+      "seconds": 110.75,
+      "phase": "load",
+      "rss_kib": 349196,
+      "hwm_kib": 364916,
+      "db_activity": "active|11\nidle|72\nidle in transaction|1",
+      "loadavg": [
+        12.93701171875,
+        5.728515625,
+        2.9931640625
+      ]
+    },
+    {
+      "seconds": 115.8,
+      "phase": "load",
+      "rss_kib": 345484,
+      "hwm_kib": 364916,
+      "db_activity": "active|22\nidle|62\nidle in transaction|1",
+      "loadavg": [
+        12.46142578125,
+        5.75,
+        3.01513671875
+      ]
+    },
+    {
+      "seconds": 120.82,
+      "phase": "load",
+      "rss_kib": 352904,
+      "hwm_kib": 364916,
+      "db_activity": "active|5\nidle|79\nidle in transaction|1",
+      "loadavg": [
+        11.86376953125,
+        5.7373046875,
+        3.02587890625
+      ]
+    },
+    {
+      "seconds": 125.84,
+      "phase": "load",
+      "rss_kib": 346284,
+      "hwm_kib": 364916,
+      "db_activity": "active|6\nidle|76\nidle in transaction|3",
+      "loadavg": [
+        11.07373046875,
+        5.6748046875,
+        3.02001953125
+      ]
+    },
+    {
+      "seconds": 130.9,
+      "phase": "load",
+      "rss_kib": 364180,
+      "hwm_kib": 366236,
+      "db_activity": "active|9\nidle|74\nidle in transaction|2",
+      "loadavg": [
+        10.6669921875,
+        5.6806640625,
+        3.0361328125
+      ]
+    },
+    {
+      "seconds": 135.94,
+      "phase": "load",
+      "rss_kib": 375304,
+      "hwm_kib": 375304,
+      "db_activity": "active|14\nidle|69\nidle in transaction|1",
+      "loadavg": [
+        11.73486328125,
+        5.98486328125,
+        3.14892578125
+      ]
+    },
+    {
+      "seconds": 140.96,
+      "phase": "load",
+      "rss_kib": 375312,
+      "hwm_kib": 375312,
+      "db_activity": "active|7\nidle|75\nidle in transaction|2",
+      "loadavg": [
+        11.35546875,
+        6.001953125,
+        3.169921875
+      ]
+    },
+    {
+      "seconds": 145.99,
+      "phase": "load",
+      "rss_kib": 380996,
+      "hwm_kib": 380996,
+      "db_activity": "active|6\nidle|75\nidle in transaction|3",
+      "loadavg": [
+        13.0888671875,
+        6.4501953125,
+        3.33056640625
+      ]
+    },
+    {
+      "seconds": 151.02,
+      "phase": "load",
+      "rss_kib": 401052,
+      "hwm_kib": 401052,
+      "db_activity": "active|7\nidle|74\nidle in transaction|3",
+      "loadavg": [
+        12.68115234375,
+        6.47607421875,
+        3.35595703125
+      ]
+    },
+    {
+      "seconds": 156.04,
+      "phase": "load",
+      "rss_kib": 402796,
+      "hwm_kib": 402796,
+      "db_activity": "active|9\nidle|73\nidle in transaction|2",
+      "loadavg": [
+        12.22607421875,
+        6.48486328125,
+        3.3759765625
+      ]
+    },
+    {
+      "seconds": 161.08,
+      "phase": "load",
+      "rss_kib": 405372,
+      "hwm_kib": 405372,
+      "db_activity": "active|12\nidle|70\nidle in transaction|2",
+      "loadavg": [
+        11.64697265625,
+        6.4599609375,
+        3.384765625
+      ]
+    },
+    {
+      "seconds": 166.12,
+      "phase": "load",
+      "rss_kib": 405860,
+      "hwm_kib": 405860,
+      "db_activity": "active|9\nidle|74\nidle in transaction|1",
+      "loadavg": [
+        12.63623046875,
+        6.75146484375,
+        3.49560546875
+      ]
+    },
+    {
+      "seconds": 171.14,
+      "phase": "load",
+      "rss_kib": 428480,
+      "hwm_kib": 428480,
+      "db_activity": "active|10\nidle|73\nidle in transaction|1",
+      "loadavg": [
+        13.30615234375,
+        6.98828125,
+        3.58984375
+      ]
+    },
+    {
+      "seconds": 176.18,
+      "phase": "load",
+      "rss_kib": 428356,
+      "hwm_kib": 428356,
+      "db_activity": "active|9\nidle|75\nidle in transaction|1",
+      "loadavg": [
+        12.9609375,
+        7.02197265625,
+        3.619140625
+      ]
+    },
+    {
+      "seconds": 181.28,
+      "phase": "idle",
+      "rss_kib": 429564,
+      "hwm_kib": 429564,
+      "db_activity": "active|7\nidle|76\nidle in transaction|2",
+      "loadavg": [
+        16.88818359375,
+        7.93505859375,
+        3.93310546875
+      ]
+    },
+    {
+      "seconds": 186.3,
+      "phase": "idle",
+      "rss_kib": 431464,
+      "hwm_kib": 431464,
+      "db_activity": "active|7\nidle|77\nidle in transaction|1",
+      "loadavg": [
+        15.77587890625,
+        7.85302734375,
+        3.927734375
+      ]
+    },
+    {
+      "seconds": 191.31,
+      "phase": "idle",
+      "rss_kib": 429016,
+      "hwm_kib": 431084,
+      "db_activity": "active|8\nidle|76\nidle in transaction|1",
+      "loadavg": [
+        14.75244140625,
+        7.77197265625,
+        3.92236328125
+      ]
+    },
+    {
+      "seconds": 196.33,
+      "phase": "idle",
+      "rss_kib": 432652,
+      "hwm_kib": 432652,
+      "db_activity": "active|9\nidle|75\nidle in transaction|1",
+      "loadavg": [
+        13.81103515625,
+        7.6923828125,
+        3.9169921875
+      ]
+    },
+    {
+      "seconds": 201.35,
+      "phase": "idle",
+      "rss_kib": 449012,
+      "hwm_kib": 449012,
+      "db_activity": "active|7\nidle|76\nidle in transaction|1",
+      "loadavg": [
+        13.02490234375,
+        7.630859375,
+        3.91748046875
+      ]
+    },
+    {
+      "seconds": 206.37,
+      "phase": "idle",
+      "rss_kib": 456088,
+      "hwm_kib": 456088,
+      "db_activity": "active|8\nidle|75\nidle in transaction|1",
+      "loadavg": [
+        12.2216796875,
+        7.5537109375,
+        3.912109375
+      ]
+    },
+    {
+      "seconds": 211.39,
+      "phase": "idle",
+      "rss_kib": 457652,
+      "hwm_kib": 457652,
+      "db_activity": "active|7\nidle|76\nidle in transaction|1",
+      "loadavg": [
+        11.40283203125,
+        7.46142578125,
+        3.9013671875
+      ]
+    },
+    {
+      "seconds": 216.4,
+      "phase": "idle",
+      "rss_kib": 457308,
+      "hwm_kib": 457556,
+      "db_activity": "active|1\nidle|81\nidle in transaction|2",
+      "loadavg": [
+        10.8095703125,
+        7.40380859375,
+        3.90234375
+      ]
+    },
+    {
+      "seconds": 221.42,
+      "phase": "idle",
+      "rss_kib": 479308,
+      "hwm_kib": 479308,
+      "db_activity": "active|7\nidle|76\nidle in transaction|1",
+      "loadavg": [
+        10.58447265625,
+        7.4140625,
+        3.9248046875
+      ]
+    },
+    {
+      "seconds": 226.44,
+      "phase": "idle",
+      "rss_kib": 481528,
+      "hwm_kib": 481528,
+      "db_activity": "active|7\nidle|76\nidle in transaction|1",
+      "loadavg": [
+        9.89697265625,
+        7.32373046875,
+        3.9140625
+      ]
+    },
+    {
+      "seconds": 231.45,
+      "phase": "idle",
+      "rss_kib": 487660,
+      "hwm_kib": 487660,
+      "db_activity": "active|7\nidle|76\nidle in transaction|1",
+      "loadavg": [
+        9.34423828125,
+        7.25146484375,
+        3.90869140625
+      ]
+    },
+    {
+      "seconds": 236.47,
+      "phase": "idle",
+      "rss_kib": 492792,
+      "hwm_kib": 492792,
+      "db_activity": "active|7\nidle|76\nidle in transaction|1",
+      "loadavg": [
+        8.916015625,
+        7.197265625,
+        3.90966796875
+      ]
+    }
+  ]
+}

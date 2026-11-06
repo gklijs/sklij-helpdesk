@@ -22,9 +22,9 @@ lifecycle-replicator run alongside, and every company gets a tenant
 provisioned + lifecycle mirrored synchronously before load starts (the same
 GraphQL/REST calls those binaries make, without waiting on their 5s ticks).
 
-Tenant names are derived in Python (`ts_<company>` normalised); they must
-match `routing::tenant_name_for` for companies that only use `[a-z0-9_]`,
-which the `ts-*` companies do. Traffic: per-worker ticket walk (create ->
+Tenant names are derived in Python (`ts_<company>` normalised); this is a
+benchmark-local naming scheme. Production uses `routing::tenant_name_for`
+and its digest. Traffic: per-worker ticket walk (create ->
 assign -> note -> resolve) with per-tenant command tokens; pgbench
 (`-c 4 -j 2 -s 10 -T <seconds>`) against `<db>_pgbench` the whole time.
 
@@ -39,3 +39,8 @@ Outputs: `<label>.json` (aggregate accepted/s + pgbench TPS/latency),
 
 Shared baseline first, then 1/4/16 tenants. Never run two at once; keep the
 box quiet.
+
+The default database pool is 80 and HTTP concurrency limit is 70, matching
+production's relationship. Override with `--db-max-connections` and
+`--max-in-flight` when reproducing historical runs (120 and 200). Output
+samples now include server RSS/HWM. A `-` template creates an empty database.

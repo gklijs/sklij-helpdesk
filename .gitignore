@@ -35,3 +35,12 @@ Thumbs.db
 # ALERTER_STATE_FILE) - local runtime state, not something to commit
 /alerter-state.json
 /alerter-state.json.tmp
+
+# Browser test dependencies, traces, and disposable-stack credentials
+/tests/browser/node_modules/
+/tests/browser/test-results/
+/tests/browser/playwright-report/
+/tests/browser/.stack.json
+
+# Python benchmark bytecode
+__pycache__/

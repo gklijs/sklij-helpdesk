@@ -1,0 +1,10 @@
+{"hwm_kib":9540,"rss_kib":9540,"stage":"warm_pool"}
+{"hwm_kib":17040,"rss_kib":15624,"stage":"large_query_pass_1"}
+{"hwm_kib":17040,"rss_kib":15756,"stage":"large_query_pass_2"}
+{"hwm_kib":17792,"rss_kib":17792,"stage":"large_query_pass_3"}
+{"hwm_kib":17792,"rss_kib":17792,"stage":"large_query_pass_4"}
+{"hwm_kib":17792,"rss_kib":17792,"stage":"idle_with_connections"}
+{"hwm_kib":17128,"rss_kib":15752,"stage":"after_shrink_buffers"}
+{"hwm_kib":17128,"rss_kib":15752,"stage":"after_small_query"}
+{"hwm_kib":17128,"rss_kib":15752,"stage":"idle_after_shrink"}
+{"hwm_kib":17128,"rss_kib":15740,"stage":"pool_closed"}

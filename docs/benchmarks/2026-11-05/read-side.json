@@ -1,0 +1,334 @@
+{
+  "events": 1000,
+  "port": 18301,
+  "query_events": {
+    "bounded_context": "helpdesk",
+    "event_type": "TicketCreated",
+    "events": 1000,
+    "expected": 1000,
+    "pages": [
+      {
+        "n": 1000,
+        "ms": 56.03,
+        "first_sequence": 2,
+        "last_sequence": 1001
+      }
+    ],
+    "page_cap": 1000,
+    "seconds": 0.058,
+    "events_per_s": 17237.2,
+    "page_ms": {
+      "n": 1,
+      "p50": 56.03,
+      "p95": 56.03,
+      "p99": 56.03,
+      "max": 56.03
+    }
+  },
+  "alerter_catch_up": {
+    "binary": "alerter",
+    "events": 1000,
+    "seconds": 0.152,
+    "events_per_s": 6574.3,
+    "log": "/tmp/helpdesk-030-baseline/alerter.log"
+  },
+  "engagement_watcher_catch_up": {
+    "binary": "engagement-watcher",
+    "events": 1000,
+    "seconds": 0.052,
+    "events_per_s": 19252.0,
+    "log": "/tmp/helpdesk-030-baseline/engagement-watcher.log"
+  },
+  "projection_load": {
+    "seconds": 30.0,
+    "idle_ms": {
+      "TicketSummary": {
+        "n": 10,
+        "p50": 21.53,
+        "p95": 35.9,
+        "p99": 35.9,
+        "max": 35.9
+      },
+      "CompanyActiveTickets": {
+        "n": 10,
+        "p50": 13.44,
+        "p95": 15.87,
+        "p99": 15.87,
+        "max": 15.87
+      }
+    },
+    "load_ms": {
+      "TicketSummary": {
+        "n": 1948,
+        "p50": 20.01,
+        "p95": 25.32,
+        "p99": 33.98,
+        "max": 55.5
+      },
+      "CompanyActiveTickets": {
+        "n": 1843,
+        "p50": 21.34,
+        "p95": 27.05,
+        "p99": 34.1,
+        "max": 70.59
+      }
+    },
+    "errors": 0,
+    "write_commands": {
+      "accepted": 1521,
+      "rejected": 0
+    },
+    "write_per_s": 50.7,
+    "sample_errors": []
+  },
+  "fanout": [
+    {
+      "clients": 1,
+      "events": 5,
+      "from_sequence": 4139,
+      "per_event": [
+        {
+          "event": 0,
+          "received": 1,
+          "missing": 0,
+          "trigger_ms": 61,
+          "min_ms": 63,
+          "p50_ms": 63,
+          "p95_ms": 63,
+          "max_ms": 63
+        },
+        {
+          "event": 1,
+          "received": 1,
+          "missing": 0,
+          "trigger_ms": 53,
+          "min_ms": 55,
+          "p50_ms": 55,
+          "p95_ms": 55,
+          "max_ms": 55
+        },
+        {
+          "event": 2,
+          "received": 1,
+          "missing": 0,
+          "trigger_ms": 48,
+          "min_ms": 51,
+          "p50_ms": 51,
+          "p95_ms": 51,
+          "max_ms": 51
+        },
+        {
+          "event": 3,
+          "received": 1,
+          "missing": 0,
+          "trigger_ms": 53,
+          "min_ms": 55,
+          "p50_ms": 55,
+          "p95_ms": 55,
+          "max_ms": 55
+        },
+        {
+          "event": 4,
+          "received": 1,
+          "missing": 0,
+          "trigger_ms": 53,
+          "min_ms": 56,
+          "p50_ms": 56,
+          "p95_ms": 56,
+          "max_ms": 56
+        }
+      ],
+      "errors": [],
+      "closed": [],
+      "acked": 1,
+      "subscribed": 1,
+      "ready": 1
+    },
+    {
+      "clients": 8,
+      "events": 5,
+      "from_sequence": 4147,
+      "per_event": [
+        {
+          "event": 0,
+          "received": 8,
+          "missing": 0,
+          "trigger_ms": 55,
+          "min_ms": 57,
+          "p50_ms": 58,
+          "p95_ms": 59,
+          "max_ms": 59
+        },
+        {
+          "event": 1,
+          "received": 8,
+          "missing": 0,
+          "trigger_ms": 50,
+          "min_ms": 53,
+          "p50_ms": 54,
+          "p95_ms": 54,
+          "max_ms": 54
+        },
+        {
+          "event": 2,
+          "received": 8,
+          "missing": 0,
+          "trigger_ms": 54,
+          "min_ms": 55,
+          "p50_ms": 56,
+          "p95_ms": 57,
+          "max_ms": 57
+        },
+        {
+          "event": 3,
+          "received": 8,
+          "missing": 0,
+          "trigger_ms": 49,
+          "min_ms": 51,
+          "p50_ms": 52,
+          "p95_ms": 54,
+          "max_ms": 54
+        },
+        {
+          "event": 4,
+          "received": 8,
+          "missing": 0,
+          "trigger_ms": 50,
+          "min_ms": 51,
+          "p50_ms": 53,
+          "p95_ms": 55,
+          "max_ms": 55
+        }
+      ],
+      "errors": [],
+      "closed": [],
+      "acked": 8,
+      "subscribed": 8,
+      "ready": 8
+    },
+    {
+      "clients": 32,
+      "events": 5,
+      "from_sequence": 4152,
+      "per_event": [
+        {
+          "event": 0,
+          "received": 32,
+          "missing": 0,
+          "trigger_ms": 61,
+          "min_ms": 63,
+          "p50_ms": 64,
+          "p95_ms": 77,
+          "max_ms": 77
+        },
+        {
+          "event": 1,
+          "received": 32,
+          "missing": 0,
+          "trigger_ms": 61,
+          "min_ms": 64,
+          "p50_ms": 66,
+          "p95_ms": 70,
+          "max_ms": 90
+        },
+        {
+          "event": 2,
+          "received": 32,
+          "missing": 0,
+          "trigger_ms": 56,
+          "min_ms": 58,
+          "p50_ms": 60,
+          "p95_ms": 79,
+          "max_ms": 80
+        },
+        {
+          "event": 3,
+          "received": 32,
+          "missing": 0,
+          "trigger_ms": 60,
+          "min_ms": 61,
+          "p50_ms": 63,
+          "p95_ms": 86,
+          "max_ms": 87
+        },
+        {
+          "event": 4,
+          "received": 32,
+          "missing": 0,
+          "trigger_ms": 52,
+          "min_ms": 55,
+          "p50_ms": 58,
+          "p95_ms": 59,
+          "max_ms": 60
+        }
+      ],
+      "errors": [],
+      "closed": [],
+      "acked": 32,
+      "subscribed": 32,
+      "ready": 32
+    },
+    {
+      "clients": 64,
+      "events": 5,
+      "from_sequence": 4157,
+      "per_event": [
+        {
+          "event": 0,
+          "received": 64,
+          "missing": 0,
+          "trigger_ms": 65,
+          "min_ms": 73,
+          "p50_ms": 81,
+          "p95_ms": 82,
+          "max_ms": 83
+        },
+        {
+          "event": 1,
+          "received": 64,
+          "missing": 0,
+          "trigger_ms": 52,
+          "min_ms": 60,
+          "p50_ms": 63,
+          "p95_ms": 66,
+          "max_ms": 66
+        },
+        {
+          "event": 2,
+          "received": 64,
+          "missing": 0,
+          "trigger_ms": 60,
+          "min_ms": 68,
+          "p50_ms": 72,
+          "p95_ms": 73,
+          "max_ms": 74
+        },
+        {
+          "event": 3,
+          "received": 64,
+          "missing": 0,
+          "trigger_ms": 62,
+          "min_ms": 71,
+          "p50_ms": 76,
+          "p95_ms": 77,
+          "max_ms": 77
+        },
+        {
+          "event": 4,
+          "received": 64,
+          "missing": 0,
+          "trigger_ms": 94,
+          "min_ms": 100,
+          "p50_ms": 105,
+          "p95_ms": 108,
+          "max_ms": 108
+        }
+      ],
+      "errors": [],
+      "closed": [],
+      "acked": 64,
+      "subscribed": 64,
+      "ready": 64
+    }
+  ]
+}

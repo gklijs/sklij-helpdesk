@@ -1407,7 +1407,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let can_read_sensitive = name == skilj_helpdesk::helpdesk::STAFF_ROLE;
             // `STAFF_CAPABILITY` for staff-lead, nothing for the customer or
             // the operator - see `capabilities_for_role`.
-            let capabilities = skilj_helpdesk::helpdesk::capabilities_for_role(name);
+            let mut capabilities = skilj_helpdesk::helpdesk::capabilities_for_role(name);
+            // Explicit demo policy: the support lead serves every company.
+            if name == skilj_helpdesk::helpdesk::STAFF_ROLE {
+                capabilities.insert("cross-company".into());
+            }
             let demo_mapping = |role: Role| RoleAccessMapping {
                 role,
                 bounded_context: mapping.bounded_context.clone(),
@@ -1580,20 +1584,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    let directory_idp = IdpConfig::new(
+        jwks_url
+            .parse()
+            .unwrap_or_else(|e| panic!("{jwks_url:?} is not a well-formed URL: {e}")),
+        issuer,
+        audience,
+        SigningAlgorithm::Rs256,
+    );
     let (skilj, report) = skilj_helpdesk::register(Skilj::builder(database_url))
         .pool_options(skilj_pool_options)
         .reconciliation_role(external_subject.clone())
         .application_version(skilj_helpdesk::APPLICATION_VERSION)
         .key_provider(key_provider)
         .master_key_rotation(encryption.rotation())
-        .identity_provider(IdpConfig::new(
-            jwks_url
-                .parse()
-                .unwrap_or_else(|e| panic!("{jwks_url:?} is not a well-formed URL: {e}")),
-            issuer,
-            audience,
-            SigningAlgorithm::Rs256,
-        ))
+        .identity_provider(directory_idp.clone())
         .build()
         .await?;
     println!(
@@ -1866,19 +1871,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         graphql
     };
-    let app = rest.merge(graphql).layer(cors_layer()).layer(
-        tower::ServiceBuilder::new()
-            .layer(axum::error_handling::HandleErrorLayer::new(
-                |_: tower::BoxError| async {
-                    (
-                        axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                        "overloaded - too many in-flight requests, try again shortly",
-                    )
-                },
-            ))
-            .load_shed()
-            .concurrency_limit(http_max_in_flight),
-    );
+    let directory = skilj_helpdesk::company_directory::router(Arc::new(
+        skilj_helpdesk::company_directory::DirectoryState {
+            pool: pool.clone(),
+            keys: skilj_core::access_control::JwksCache::new(directory_idp.jwks_endpoint.clone()),
+            idp: directory_idp,
+            mode: routing_mode,
+        },
+    ));
+    let app = rest
+        .merge(graphql)
+        .merge(directory)
+        .layer(cors_layer())
+        .layer(
+            tower::ServiceBuilder::new()
+                .layer(axum::error_handling::HandleErrorLayer::new(
+                    |_: tower::BoxError| async {
+                        (
+                            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                            "overloaded - too many in-flight requests, try again shortly",
+                        )
+                    },
+                ))
+                .load_shed()
+                .concurrency_limit(http_max_in_flight),
+        );
 
     let listener = tokio::net::TcpListener::bind((bind_addr, port)).await?;
     println!("\nskilj-helpdesk listening on http://{bind_addr}:{port} (REST under /v1/..., GraphQL at /graphql)");

@@ -1,0 +1,35 @@
+{
+  "commit": "7ccb64793d2e3bf46c2d671b6c5b54fb33999b84",
+  "dirty_tree": true,
+  "server_sha256": "493aab0c63c2a7ed155a07f00e6e6c9d2b670ac2d366f98c42b633b023d17f8d",
+  "dependency_versions": {
+    "skilj": "0.3.0",
+    "skilj-core": "0.3.0",
+    "skilj-nats": "0.3.0",
+    "async-nats": "0.51.0"
+  },
+  "postgres": "16.15 (postgres:16-alpine, disposable Docker container)",
+  "limits": {
+    "memory_and_scaling": {
+      "pool": 80,
+      "http_in_flight": 70
+    },
+    "read_side": {
+      "pool": 80,
+      "http_in_flight": 200
+    }
+  },
+  "telemetry": "console tracing only (RUST_LOG=warn); no OpenTelemetry SDK providers/exporters installed because OTEL_EXPORTER_OTLP_ENDPOINT is unset",
+  "rustc": "rustc 1.99.1 (58cf8f9c3 2026-10-13)",
+  "commands": "PGHOST=127.0.0.1 PGPORT=55432 PGUSER=postgres PGPASSWORD=postgres bash scripts/bench/current/run.sh /tmp/helpdesk-030-baseline",
+  "database_container": {
+    "image_digest": "sha256:0cefaabd882e42bcb2a2f3dc56d3ce4770560ba62fd7f197f1a2e008fd5731ab",
+    "memory_limit_bytes": 0,
+    "nano_cpus_limit": 0,
+    "docker_version": "29.6.1",
+    "docker_platform": "Docker Desktop",
+    "docker_cpus": 22,
+    "docker_total_memory_bytes": 16496381952
+  },
+  "default_allocator": "glibc 2.43 (Ubuntu GLIBC 2.43-2ubuntu2.4)"
+}

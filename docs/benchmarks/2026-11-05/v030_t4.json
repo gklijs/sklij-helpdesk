@@ -1,0 +1,44 @@
+{
+ "label": "v030_t4",
+ "args": {
+  "server": "/home/gklijs/projects/skilj-helpdesk/target/release/server",
+  "provisioner": "/home/gklijs/projects/skilj-helpdesk/target/release/provisioner",
+  "replicator": "/home/gklijs/projects/skilj-helpdesk/target/release/lifecycle-replicator",
+  "template": "-",
+  "label": "v030_t4",
+  "out": "/tmp/helpdesk-030-baseline",
+  "tenants": 4,
+  "fg_workers": 16,
+  "fg_interval_ms": 50,
+  "seconds": 60.0,
+  "pgbench_clients": 4,
+  "pgbench_threads": 2,
+  "pgbench_scale": 1,
+  "port": 18201,
+  "db_max_connections": 80,
+  "max_in_flight": 70
+ },
+ "tenants": [
+  "ts-v030_t4-0",
+  "ts-v030_t4-1",
+  "ts-v030_t4-2",
+  "ts-v030_t4-3"
+ ],
+ "window": {
+  "n": 14839,
+  "p50": 60.28,
+  "p95": 96.95,
+  "p99": 141.25,
+  "max": 366.72,
+  "seconds": 60.1,
+  "accepted": 14839,
+  "accepted_per_s": 246.93,
+  "fired": 14839,
+  "failures": 0,
+  "rejected": 0
+ },
+ "pgbench_tps": 133.835631,
+ "pgbench_lat_ms": 29.879,
+ "rss_peak_kib": 153748,
+ "pgbench_raw": "pgbench (18.6, server 16.15)\nstarting vacuum...end.\nprogress: 10.0 s, 115.3 tps, lat 34.499 ms stddev 24.107, 0 failed\nprogress: 20.0 s, 127.8 tps, lat 31.355 ms stddev 16.233, 0 failed\nprogress: 30.0 s, 142.1 tps, lat 28.124 ms stddev 11.069, 0 failed\nprogress: 40.0 s, 140.8 tps, lat 28.414 ms stddev 15.132, 0 failed\nprogress: 50.0 s, 132.2 tps, lat 30.266 ms stddev 21.842, 0 failed\nprogress: 60.0 s, 144.4 tps, lat 27.687 ms stddev 13.804, 0 failed\ntransaction type: <builtin: TPC-B (sort of)>\nscaling factor: 1\nquery mode: simple\nnumber of clients: 4\nnumber of threads: 2\nmaximum number of tries: 1\nduration: 60 s\nnumber of transactions actually processed: 8030\nnumber of failed transactions: 0 (0.000%)\nlatency average = 29.879 ms\nlatency stddev = 17.472 ms\ninitial connection time = 19.817 ms\ntps = 133.835631 (without initial connection time)\n"
+}

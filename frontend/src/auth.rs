@@ -130,9 +130,22 @@ pub fn store_session(id_token: &str) -> Result<Role, String> {
 pub fn current_session() -> Option<(String, Role)> {
     let storage = local_storage();
     let token = storage.get_item(TOKEN_KEY).ok().flatten()?;
+    let payload = token
+        .split('.')
+        .nth(1)
+        .and_then(|v| URL_SAFE_NO_PAD.decode(v).ok())
+        .and_then(|v| serde_json::from_slice::<serde_json::Value>(&v).ok())?;
+    if payload["exp"]
+        .as_f64()
+        .is_none_or(|exp| exp * 1000.0 <= js_sys::Date::now())
+    {
+        log_out();
+        return None;
+    }
     let role = match storage.get_item(ROLE_KEY).ok().flatten()?.as_str() {
         "customer" => Role::Customer,
-        _ => Role::StaffLead,
+        "staff" => Role::StaffLead,
+        _ => return None,
     };
     Some((token, role))
 }
@@ -141,4 +154,9 @@ pub fn log_out() {
     let storage = local_storage();
     let _ = storage.remove_item(TOKEN_KEY);
     let _ = storage.remove_item(ROLE_KEY);
+}
+
+pub fn session_expired() {
+    log_out();
+    let _ = window().expect("browser").location().set_href("/login");
 }

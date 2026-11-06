@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/gklijs/sklij-helpdesk/actions/workflows/ci.yml/badge.svg)](https://github.com/gklijs/sklij-helpdesk/actions/workflows/ci.yml)
 
-A showcase SaaS helpdesk built on [skilj](https://crates.io/crates/skilj) (the released 0.2.0 from crates.io) — a Rust library for
+A showcase SaaS helpdesk built on [skilj](https://crates.io/crates/skilj) (the released 0.3.0 from crates.io) — a Rust library for
 event-sourced, DDD-style applications. This project exists to exercise
 skilj for real: every piece below was built, run, and verified against
 a live stack, not just written and assumed to work.
@@ -122,10 +122,12 @@ a hash of the email's `Message-ID`, so a second copy of the same email
 changes nothing, and that key is recorded as the events' correlation
 id. Emails it can't place stay on `helpdesk.email.unroutable` with the
 reason. An email customer is identified by address (`email:<address>`),
-separately from their portal login. It only works with the shared
-`helpdesk` context, not per-company tenants. `src/email_channel.rs`
-covers the design and its gaps, and `tests/email_channel.rs` runs it
-end to end against a real NATS server in Docker.
+separately from their portal login. In tenant mode it resolves new tickets
+to the recorded company tenant and replies to the context containing the
+original `TicketCreated`. `src/email_channel.rs`
+covers the shared pipeline; `src/tenant_email.rs` covers tenant delivery.
+`tests/email_channel.rs` and `tests/tenant_channels.rs` exercise both
+against real NATS servers in Docker.
 
 ### Changing a projection: zero-downtime rebuilds
 
@@ -352,9 +354,34 @@ real Slack workspace — that part's on you to point at your own.
 JetStream (`nats-server -js`, or `docker run -p 4222:4222 nats -js`), and
 also prints its env vars when `server` starts:
 
+For the shared-context demo, export the two command tokens printed by the
+server and run `TICKET_ROUTING=shared cargo run --bin email-bridge`.
+For the default tenant deployment:
+
 ```sh
+export DATABASE_URL=postgres://...
+export EMAIL_BRIDGE_ROLE_ID=<service-role-id>
+export EMAIL_BRIDGE_TOKEN_SEED=<64-random-hex-characters-kept-across-restarts>
 cargo run --bin email-bridge
 ```
+
+The service role needs Admin access on every destination context. Using the
+provisioner's tenant admin role satisfies that requirement; a dedicated
+service identity with equivalent grants also works. Tenant mode consumes
+raw emails one at a time, including retries, so replies cannot overtake
+creates. It checks existing ticket history before routing a create, refuses
+ambiguous ticket ids, and derives stable command credentials from the
+service role, context, command, and secret seed. A committed event's
+correlation id also prevents redelivery after skilj's idempotency retention
+expires. Changing the seed or revoking a token requires operator action;
+the bridge fails closed. Unknown replies stay on the unroutable subject;
+a missing company tenant or service grant blocks delivery until repaired.
+HTTP failures retry five times and park; a failed parking request remains
+unacknowledged. Stop the shared bridge before switching modes: its durable
+consumer and the tenant consumer must never run concurrently on the same
+stream. Sender verification still belongs to the trusted mail gateway.
+Reply lookup uses indexed ticket tags in each active recorded context,
+including shared legacy history; its cost grows with tenant count.
 
 **Tests**: `cargo test` — real integration tests against a real (or
 [`postgresql_embedded`](https://crates.io/crates/postgresql_embedded))
@@ -374,15 +401,31 @@ restarted under load must see the server accept commands again within
 cursors with no gap or duplicate. The restart test needs a Postgres it
 can stop, so it always uses its own embedded cluster, CI included
 (where `DATABASE_URL` is shared by every test binary).
-`cd frontend && cargo test --target wasm32-unknown-unknown` isn't a
-thing (no frontend unit tests this pass) — it's verified by actually
-running it (see below).
+The browser smoke suite uses real Dex login, a disposable PostgreSQL,
+provisioned tenants, and the actual compiled WASM app. It checks customer
+and staff views, ticket actions, customer replies, live priority changes,
+websocket reconnect, company switching, and expired-session login recovery.
+It runs in CI and uses an installed Chromium locally:
+
+```sh
+cargo build --locked --bin server
+(cd frontend && trunk build --locked)
+npm ci --prefix tests/browser --ignore-scripts
+CHROMIUM_PATH=/snap/bin/chromium npm test --prefix tests/browser
+```
+
+Docker is required; ports 5556, 8080 and 8081 must be free. The harness
+creates and removes its own Postgres and Dex containers and key file. It
+never uses your `DATABASE_URL`. Omit `CHROMIUM_PATH` to auto-detect an
+installed Chromium; CI supplies a Playwright-managed browser. Failed
+runs leave traces in `tests/browser/test-results` (these contain test
+session credentials; keep them private).
 
 ## Operator consoles
 
 skilj ships two terminal consoles for running a deployment. Neither is
 part of this repo; install them with
-`cargo install skilj-tui skilj-inspector --version 0.2.0`.
+`cargo install skilj-tui skilj-inspector --version 0.3.0`.
 `scripts/dev.sh` prints both commands, filled in, when it starts.
 
 **`skilj-tui`** is a GraphQL client, so it goes through the same login
@@ -633,14 +676,20 @@ silently absent:
   resistant name instead; already-provisioned tenants are untouched
   because nothing re-derives a recorded tenant's name.
 
-  Still open (limitation, not in-progress): `staff-lead`'s unrestricted
-  (`scope: None`) cross-company visibility only works while everything
-  shares one context — in tenant-routed mode it needs a mapping per tenant, and
-  no single skilj query can span tenants. The reconciler deliberately
-  leaves `scope: None` grants alone rather than quietly narrowing a
-  cross-company staff grant to one company, so a staff-lead who resolves
-  across all companies only sees tickets in the shared context in the
-  shared-context demo until an explicit per-tenant mapping is granted.
+  Cross-company staff access is explicit: a shared unscoped grant must hold
+  both `staff` and `cross-company` to be reconciled into every tenant. The
+  demo support lead is seeded with both. Tenant copies retain the source
+  grant's level and sensitive-read flag and are scoped to the company;
+  revoking the source or either capability removes those copies on the
+  next reconciliation (normally within five seconds). Independently
+  granted unscoped tenant access remains independently managed.
+
+  The staff dashboard's Company selector uses the authenticated
+  `/v1/helpdesk/companies` directory. It lists only companies the caller
+  can read in their actual ticket context, and every projection read,
+  subscription, and write still undergoes skilj authorization. A denied
+  refresh clears the ticket table. Each selected company has its own
+  feed; the UI does not issue a query spanning multiple tenants.
 - **A backend-for-frontend / GraphQL schema beyond what's registered**
   — the frontend talks to skilj-graphql's own auto-generated schema
   directly; there's no hand-written GraphQL layer.
@@ -694,6 +743,30 @@ surfaced five real bugs, each confirmed failing first, then fixed:
    `TicketInternalNotes`'s own doc comment in `src/helpdesk/`) —
    `tests/cross_company_projection_scoping.rs` proves this half live
    too.
+
+## Running on skilj 0.3.0
+
+- PostgreSQL **15+** is required. On the first 0.3 start, skilj interns
+  event tags while locking event writes; allow a maintenance window for
+  large histories. Keep the encryption key file from the existing deployment.
+- `CustomerTickets` declares `SUBJECT_KEY = Some("customer")`. Without
+  this, even authorized readers see encrypted customer text on 0.3. The
+  erasure integration test and browser smoke cover plaintext before erasure
+  and ciphertext after it.
+- Staged rebuilds pause live folding by default. `TicketSummary` opts into
+  `LIVE_FOLD_COMPATIBLE` for its additive first-responder field; future
+  incompatible schema or meaning changes must remove that opt-in before
+  deploying and promote the rebuild before synchronous writes resume.
+  `APPLICATION_VERSION` is now 9.
+- Stored payloads default to a **256 KiB** limit. Keep large email bodies
+  below that limit or configure skilj's payload limits deliberately. Blob
+  attachments are not part of this application's email schema.
+- All skilj crates are on 0.3.0; the NATS client is 0.51 and embedded test
+  PostgreSQL is 0.22. The OpenTelemetry line remains 0.33.
+- Current performance evidence and memory findings:
+  [0.3.0 baseline](docs/performance-baseline-2026-11-05.md). Earlier reports
+  below describe historical versions and workloads. The [memory investigation](docs/memory-growth-follow-up-2026-11-06.md)
+  reproduces SQLx client-buffer retention without skilj and links [upstream issue #169](https://github.com/gklijs/SkilJ/issues/169).
 
 ## Running on skilj 0.2.0
 

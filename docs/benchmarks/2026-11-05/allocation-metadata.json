@@ -1,0 +1,24 @@
+{
+  "allocator": "jemalloc 5.3.0 with sampled profiling; default run uses glibc 2.43",
+  "profiles": {
+    "load": "heap.947112.64.i64.heap",
+    "idle": "heap.947112.127.i127.heap",
+    "exit": "heap.947112.128.f.heap"
+  },
+  "sampled_inuse_mib": {
+    "load": 176.2,
+    "idle": 272.1,
+    "exit": 0.5
+  },
+  "final_allocator_bytes": {
+    "allocated": 1501656,
+    "active": 7233536,
+    "metadata": 15053824,
+    "resident": 196202496,
+    "mapped": 239910912,
+    "retained": 887308288
+  },
+  "profile_config": "prof:true,prof_final:true,lg_prof_interval:30,prof_prefix:<output>/profiles/heap,stats_print:true",
+  "analysis": "jemalloc 5.3.0 bin/jeprof.in with configure substitutions jemalloc_version=5.3.0 and JEMALLOC_PREFIX empty; perl jeprof --text --inuse_space <exact server> <heap>",
+  "limitations": "Optimized release symbols give coarse stack attribution; jeprof emitted symbol parsing warnings for the idle snapshot. Cumulative stack values overlap. Sampling estimates differ from exact allocator counters. Allocator differs from the primary run."
+}

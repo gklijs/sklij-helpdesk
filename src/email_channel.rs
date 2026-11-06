@@ -70,11 +70,10 @@
 //!   `CustomerRespondsToTicket` (`rule CustomerReplies`). The bridge
 //!   counts a rejection as delivered, so that email ends there. It is
 //!   still recorded as a rejected command.
-//! - Only the shared `helpdesk` context. A `Trigger` mapping carries one
-//!   `CommandToken`, and a token names one bounded context, so per-company
-//!   tenant contexts (the default) would need a mapping per
-//!   tenant. `src/bin/email-bridge.rs` refuses to start in that mode
-//!   rather than splitting a company's tickets across two contexts.
+//! - Tenant mode uses `tenant_email`'s ordered consumer and requires database
+//!   service access plus a stable token seed. Shared mode retains this
+//!   translator and skilj-nats pipeline. Stop the old consumer before switching
+//!   modes; they must not consume the same raw stream concurrently.
 //! - The body is taken as-is: quoted earlier messages aren't stripped.
 
 use crate::helpdesk::{CreateTicketPayload, CustomerRespondsToTicketPayload, TicketPriority};
@@ -422,7 +421,7 @@ async fn translate(
     Ok(())
 }
 
-async fn publish_unroutable(
+pub(crate) async fn publish_unroutable(
     jetstream: &Jetstream,
     message: &jetstream::Message,
     reason: &str,
