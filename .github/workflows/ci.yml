@@ -119,6 +119,27 @@ jobs:
             exit 1
           fi
 
+  upgrade:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build 0.3 review baseline and 0.4 candidate
+        run: |
+          mkdir -p /tmp/helpdesk-99-baseline
+          git archive d8ff524a1514a903044b406b688800b80ffa8324 | tar -x -C /tmp/helpdesk-99-baseline
+          cargo build --locked --manifest-path /tmp/helpdesk-99-baseline/Cargo.toml --bin server
+          cargo build --locked --all-targets
+      - name: Rehearse populated database upgrade and backup rollback
+        run: |
+          python3 scripts/upgrade/rehearse.py \
+            --old-server /tmp/helpdesk-99-baseline/target/debug/server \
+            --new-server target/debug/server --output /tmp/helpdesk-99-evidence \
+            --post-migration-tests
+
   frontend:
     runs-on: ubuntu-latest
     defaults:

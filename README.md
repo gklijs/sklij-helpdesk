@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/gklijs/sklij-helpdesk/actions/workflows/ci.yml/badge.svg)](https://github.com/gklijs/sklij-helpdesk/actions/workflows/ci.yml)
 
-A showcase SaaS helpdesk built on [skilj](https://crates.io/crates/skilj) (the released 0.3.0 from crates.io) — a Rust library for
+A showcase SaaS helpdesk built on [skilj](https://crates.io/crates/skilj) (the released 0.4.0 from crates.io) — a Rust library for
 event-sourced, DDD-style applications. This project exists to exercise
 skilj for real: every piece below was built, run, and verified against
 a live stack, not just written and assumed to work.
@@ -425,7 +425,7 @@ session credentials; keep them private).
 
 skilj ships two terminal consoles for running a deployment. Neither is
 part of this repo; install them with
-`cargo install skilj-tui skilj-inspector --version 0.3.0`.
+`cargo install skilj-tui skilj-inspector --version 0.4.0`.
 `scripts/dev.sh` prints both commands, filled in, when it starts.
 
 **`skilj-tui`** is a GraphQL client, so it goes through the same login
@@ -744,7 +744,22 @@ surfaced five real bugs, each confirmed failing first, then fixed:
    `tests/cross_company_projection_scoping.rs` proves this half live
    too.
 
-## Running on skilj 0.3.0
+## Running on skilj 0.4.0
+
+All skilj dependencies use the released 0.4.0 family. Follow the
+[upgrade and restore procedure](docs/upgrade-0.4.md) before using an existing
+0.3 database: back up database and keys, rehearse on a restore, stop every
+0.3 instance, run `server --preflight` and `server --migrate`, then start
+0.4 with `SCHEMA_CHANGES=refuse`. Migration 0010 prevents restarting 0.3;
+rollback requires restoring the pre-upgrade backup. The protected source-content
+rewrite blocks event writes while its lock is held. This pair requires a
+maintenance window.
+
+Shared async-nats (0.51), SQLx (0.9) and OpenTelemetry (0.33, with the 0.34
+tracing bridge) remain on the upstream versions. Performance measurements
+continue under issue #90; the 0.3 baseline below remains historical evidence.
+
+## Previous upgrade notes: skilj 0.3.0
 
 - PostgreSQL **15+** is required. On the first 0.3 start, skilj interns
   event tags while locking event writes; allow a maintenance window for
@@ -761,7 +776,7 @@ surfaced five real bugs, each confirmed failing first, then fixed:
 - Stored payloads default to a **256 KiB** limit. Keep large email bodies
   below that limit or configure skilj's payload limits deliberately. Blob
   attachments are not part of this application's email schema.
-- All skilj crates are on 0.3.0; the NATS client is 0.51 and embedded test
+- At that baseline, all skilj crates were on 0.3.0; the NATS client is 0.51 and embedded test
   PostgreSQL is 0.22. The OpenTelemetry line remains 0.33.
 - Current performance evidence and memory findings:
   [0.3.0 baseline](docs/performance-baseline-2026-11-05.md). Earlier reports

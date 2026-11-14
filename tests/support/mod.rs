@@ -493,6 +493,10 @@ pub fn test_key_provider() -> skilj::InMemoryKeyProvider {
 /// `test_key_provider()` as the `KeyService` skilj's own lower-level
 /// read APIs take.
 pub fn test_key_service() -> skilj::KeyService {
+    // Upgrade rehearsals use the restored deployment's provider identity and keys.
+    if let Ok(path) = std::env::var("TEST_ENCRYPTION_KEY_FILE") {
+        return skilj::KeyService::new(skilj::KeyFileProvider::open(path).unwrap());
+    }
     skilj::KeyService::new(test_key_provider())
 }
 
@@ -506,7 +510,7 @@ pub async fn setup() -> (Skilj, Pool, RoleAccessMapping) {
     let external_subject = mapping.role.external_subject.clone();
 
     let (skilj, report) = skilj_helpdesk::register(Skilj::builder(database_url))
-        .key_provider(test_key_provider())
+        .key_service(test_key_service())
         .reconciliation_role(external_subject)
         .build()
         .await
@@ -562,7 +566,7 @@ pub async fn setup_all_contexts() -> (Skilj, Pool, AllContextMappings) {
     // GraphQL with `sign_jwt` tokens; REST-only tests never notice it.
     let jwks_url = serve_jwks().await;
     let (skilj, report) = skilj_helpdesk::register(Skilj::builder(database_url))
-        .key_provider(test_key_provider())
+        .key_service(test_key_service())
         .reconciliation_role(external_subject)
         .identity_provider(test_idp_config(&jwks_url))
         .build()
@@ -830,7 +834,7 @@ pub async fn setup_graphql() -> (Skilj, Pool, RoleAccessMapping, String) {
     let jwks_url = serve_jwks().await;
 
     let (skilj, report) = skilj_helpdesk::register(Skilj::builder(database_url))
-        .key_provider(test_key_provider())
+        .key_service(test_key_service())
         .reconciliation_role(external_subject.clone())
         .identity_provider(test_idp_config(&jwks_url))
         .build()

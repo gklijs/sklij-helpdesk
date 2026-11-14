@@ -1135,10 +1135,43 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // skilj-core/skilj-rest counter/histogram (LazyLock, first touched
     // the first time a command/event/request actually happens) needs
     // the global MeterProvider set before that first touch.
-    let telemetry = skilj_helpdesk::telemetry::init("skilj-helpdesk-server");
+    let mut arguments = std::env::args().skip(1);
+    let mode = arguments.next();
+    if arguments.next().is_some()
+        || !matches!(mode.as_deref(), None | Some("--preflight" | "--migrate"))
+    {
+        return Err("usage: server [--preflight | --migrate]".into());
+    }
+    // Administrative stdout is machine-readable JSON, without console logs.
+    let telemetry = mode
+        .is_none()
+        .then(|| skilj_helpdesk::telemetry::init("skilj-helpdesk-server"))
+        .flatten();
 
     let database_url = std::env::var("DATABASE_URL")
         .map_err(|_| "DATABASE_URL must be set (a real Postgres, not embedded)")?;
+    // Administrative modes return before bootstrap, listeners or background workers.
+    if mode.as_deref() == Some("--migrate") {
+        let timeout: u64 = std::env::var("MIGRATION_LOCK_TIMEOUT_SECONDS")
+            .unwrap_or_else(|_| "5".into())
+            .parse()?;
+        if timeout == 0 {
+            return Err("MIGRATION_LOCK_TIMEOUT_SECONDS must be positive".into());
+        }
+        let report = skilj::preflight::migrate(
+            &database_url,
+            &skilj::preflight::MigrateOptions::new()
+                .lock_timeout(std::time::Duration::from_secs(timeout)),
+        )
+        .await?;
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+    let schema_changes = match std::env::var("SCHEMA_CHANGES").as_deref() {
+        Ok("refuse") => skilj::SchemaChanges::Refuse,
+        Ok("allow") | Err(std::env::VarError::NotPresent) => skilj::SchemaChanges::Apply,
+        _ => return Err("SCHEMA_CHANGES must be allow or refuse".into()),
+    };
     // The master key lives in a key file skilj manages (skilj 0.2.0's key
     // providers); see `EncryptionConfig` for why its path is required.
     if std::env::var_os("ENCRYPTION_MASTER_KEY").is_some() {
@@ -1152,6 +1185,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let encryption = skilj_helpdesk::EncryptionConfig::from_vars(|name| std::env::var(name).ok())?;
     let key_provider = skilj::KeyFileProvider::open(&encryption.key_file)
         .map_err(|e| format!("ENCRYPTION_KEY_FILE {}: {e}", encryption.key_file.display()))?;
+    if mode.as_deref() == Some("--preflight") {
+        let mut builder = skilj_helpdesk::register(Skilj::builder(database_url))
+            .application_version(skilj_helpdesk::APPLICATION_VERSION)
+            .key_provider(key_provider)
+            .master_key_rotation(encryption.rotation());
+        if let Ok(subject) = std::env::var("PREFLIGHT_RECONCILIATION_SUBJECT") {
+            builder = builder.reconciliation_role(subject);
+        }
+        let report = builder.preflight().await?;
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        if report.verdict == skilj::preflight::Verdict::Refused {
+            return Err("preflight refused startup; inspect the JSON report".into());
+        }
+        return Ok(());
+    }
     let port: u16 = std::env::var("PORT")
         .ok()
         .and_then(|p| p.parse().ok())
@@ -1204,7 +1252,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         db::PgPoolOptions::new().max_connections(app_max_connections),
     )
     .await?;
-    db::migrate(&pool).await?;
+    // Refuse before even the demo bootstrap can change the database.
+    if schema_changes == skilj::SchemaChanges::Refuse {
+        let report =
+            skilj::preflight::inspect(&pool, &skilj::preflight::InspectOptions::new()).await?;
+        if report.verdict != skilj::preflight::Verdict::UpToDate {
+            return Err(
+                "schema_upgrade_required: run server --preflight, then server --migrate".into(),
+            );
+        }
+    } else {
+        db::migrate(&pool).await?;
+    }
 
     if db::get_bounded_context(&pool, BOUNDED_CONTEXT)
         .await?
@@ -1594,6 +1653,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     let (skilj, report) = skilj_helpdesk::register(Skilj::builder(database_url))
         .pool_options(skilj_pool_options)
+        .schema_changes(schema_changes)
         .reconciliation_role(external_subject.clone())
         .application_version(skilj_helpdesk::APPLICATION_VERSION)
         .key_provider(key_provider)

@@ -12,7 +12,7 @@ use skilj_helpdesk::projection_lag::{self, SeriesKey};
 use std::time::Duration;
 use support::{
     accepted, fresh_database, mint_command_token, runtime, seed_admin, setup, test_db,
-    test_key_provider, test_now, trigger, unique_name, wait_until,
+    test_key_service, test_now, trigger, unique_name, wait_until,
 };
 
 fn company_active_tickets() -> SeriesKey {
@@ -86,7 +86,7 @@ fn an_async_projection_that_has_not_caught_up_reports_its_lag() {
         .unwrap();
         let mapping = seed_admin(&pool).await;
         let (skilj, _) = skilj_helpdesk::register(Skilj::builder(database_url))
-            .key_provider(test_key_provider())
+            .key_service(test_key_service())
             .reconciliation_role(mapping.role.external_subject.clone())
             .async_projection_poll_interval(Duration::from_secs(3600))
             .build()

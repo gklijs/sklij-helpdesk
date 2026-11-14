@@ -35,8 +35,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 use support::{
     fresh_database, graphql_request, mint_command_token, runtime, seed_role, seed_scoped_mapping,
-    serve_jwks, sign_jwt, submit_command_mutation, test_idp_config, test_key_provider,
-    test_key_service, test_now, trigger, wait_until,
+    serve_jwks, sign_jwt, submit_command_mutation, test_idp_config, test_key_service, test_now,
+    trigger, wait_until,
 };
 
 const GOLDEN: &str = "tests/golden/rest_graphql_conformance.json";
@@ -172,7 +172,7 @@ async fn start(prefix: &str) -> Option<Run> {
     let admin = seed_scoped_mapping(&pool, &role, AccessLevel::Admin, None).await;
     let jwks_url = serve_jwks().await;
     let (skilj, _report) = skilj_helpdesk::register(Skilj::builder(database_url))
-        .key_provider(test_key_provider())
+        .key_service(test_key_service())
         .reconciliation_role(role.external_subject.clone())
         .identity_provider(test_idp_config(&jwks_url))
         .build()

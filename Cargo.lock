@@ -3927,9 +3927,9 @@ checksum = "8ee5873ec9cce0195efcb7a4e9507a04cd49aec9c83d0389df45b1ef7ba2e649"
 
 [[package]]
 name = "skilj"
-version = "0.3.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6726a265d2f916ab123dae29ba157096f0ddaf545c69ce088f5539c8e71583ab"
+checksum = "79ddacf7b599be84d1bf26c239c08e0a8d364294a701a796d58cc63ab7bac4bf"
 dependencies = [
  "axum",
  "chrono",
@@ -3950,9 +3950,9 @@ dependencies = [
 
 [[package]]
 name = "skilj-bridge"
-version = "0.3.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3be34fe0e9f6513fd91611bb6fe6d121c7681a6499621e090c0f9a7b748aea9a"
+checksum = "e40b5f69346fe07e2d0c76e9f92fedcf60ac504989d8dc41a27f6ec1c8dd8eff"
 dependencies = [
  "chrono",
  "opentelemetry",
@@ -3968,9 +3968,9 @@ dependencies = [
 
 [[package]]
 name = "skilj-core"
-version = "0.3.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fab73a9662b5a8b78a8f3ee852f6cbb7aa17033dad62023204ee1d9a0d6199d1"
+checksum = "1e75fb3c78335adf0205a70df7256cb8271c451cdab39495279d73b029eb4b71"
 dependencies = [
  "chrono",
  "cron",
@@ -3994,9 +3994,9 @@ dependencies = [
 
 [[package]]
 name = "skilj-graphql"
-version = "0.3.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "299ac3a2e72132fd76f25415bd5a26230157dc1713bc4cab82c7868821b5e9ad"
+checksum = "98e819da924bd89848fa0e92e2af3bbc8d79787f12f774bc1cc125e2859c8256"
 dependencies = [
  "async-graphql",
  "async-graphql-axum",
@@ -4053,9 +4053,9 @@ dependencies = [
 
 [[package]]
 name = "skilj-macros"
-version = "0.3.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5be4e8a3b69817479502c78cd8e5b79c4e9ffc518569a34764db93a42e7c47f9"
+checksum = "598578e151dc1e26ea82ad2fef4450e5d86f8b46b80cfe68e2c7a46885aaf1c7"
 dependencies = [
  "quote",
  "syn 3.0.5",
@@ -4063,9 +4063,9 @@ dependencies = [
 
 [[package]]
 name = "skilj-nats"
-version = "0.3.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e54e45e43cabe5caac2e2edca2ddb27d64fd9fa91ee47696d6ff54d3fea031d9"
+checksum = "ce85a4ebd851c678cd95b72f6f42de1bbb062af519fc3a5077c004451cc05f23"
 dependencies = [
  "async-nats",
  "chrono",
@@ -4081,9 +4081,9 @@ dependencies = [
 
 [[package]]
 name = "skilj-rest"
-version = "0.3.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "156f491a694b1efea5da54dfb847372d7cd4d63549361073ed51fedf47241f88"
+checksum = "3f160e1f153f6dfa32c528c776f49177c861f74556a435ee20f944a6bf1d5903"
 dependencies = [
  "axum",
  "chrono",
@@ -4100,18 +4100,18 @@ dependencies = [
 
 [[package]]
 name = "skilj-retry"
-version = "0.3.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e286a490334b78d169b2c7e9d111fcf9adb745705dba92020b9d03187c749d9b"
+checksum = "43052039d7a8f19d0a976756c9785d9a9a9730af8a7ffac491d676d2e2e0337f"
 dependencies = [
  "chrono",
 ]
 
 [[package]]
 name = "skilj-test-fixture"
-version = "0.3.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4f94a20b35a2e63d84fccd9ad1b27e18f408e4a54a9a3f3b8852468e5863a97e"
+checksum = "90920d5112a5fa62a839571f0f66435470554d2f17d5789af7be3e9dbf41d20a"
 dependencies = [
  "chrono",
  "serde_json",
