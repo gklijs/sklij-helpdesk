@@ -10,7 +10,15 @@ use crate::{
 use leptos::ev::SubmitEvent;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use std::collections::HashMap;
+use std::{
+    cell::Cell,
+    collections::HashMap,
+    rc::Rc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+};
 use web_sys::window;
 
 /// What a write - this session's own, or anyone's via `live` - hands the
@@ -65,27 +73,6 @@ async fn fetch_internal_notes(
         ticket_id,
         &ticket_context.graphql_type("TicketInternalNotes"),
         "notes",
-    )
-    .await?;
-    serde_json::from_value(json).map_err(|e| e.to_string())
-}
-
-/// One customer's `CustomerTickets` row: the content of each of their
-/// tickets, by `ticket_id`. Keyed by the customer's `requester_id`, which
-/// for a logged-in customer is their own `sub` - that's what lets skilj
-/// decrypt it for them without any sensitive-read grant.
-async fn fetch_customer_tickets(
-    token: &str,
-    ticket_context: &TicketContext,
-    requester_id: &str,
-) -> Result<HashMap<String, CustomerTicketContent>, String> {
-    let json = api::query_projection(
-        token,
-        ticket_context.bounded_context(),
-        "CustomerTickets",
-        requester_id,
-        &ticket_context.graphql_type("CustomerTickets"),
-        "tickets",
     )
     .await?;
     serde_json::from_value(json).map_err(|e| e.to_string())
@@ -193,6 +180,9 @@ pub fn Dashboard() -> impl IntoView {
     // Each ticket's content, from its customer's `CustomerTickets` row.
     let (contents, set_contents) = signal(HashMap::<String, CustomerTicketContent>::new());
     let (status, set_status) = signal(String::new());
+    let (page_offset, set_page_offset) = signal(0usize);
+    let (has_more, set_has_more) = signal(false);
+    let opened_details = RwSignal::new(HashMap::<String, usize>::new());
     let (refresh, set_refresh) = signal(0u32);
     let (written_up_to, set_written_up_to) = signal(None::<i64>);
     let after_write = AfterWrite {
@@ -239,10 +229,27 @@ pub fn Dashboard() -> impl IntoView {
         });
     }
 
+    // Each read publishes one coherent result only while it is current.
+    // Disposal invalidates pending tasks before their signals are destroyed.
+    let fetch_generation = Rc::new(Cell::new(0u64));
+    let fetch_alive = Arc::new(AtomicBool::new(true));
+    on_cleanup({
+        let alive = fetch_alive.clone();
+        move || alive.store(false, Ordering::Relaxed)
+    });
+    let pending_fetch = StoredValue::new_local(None::<web_sys::AbortController>);
+    on_cleanup(move || {
+        if let Some(Some(pending)) = pending_fetch.try_get_value() {
+            pending.abort();
+        }
+    });
     let fetch_token = token.clone();
-    let fetch_sub = my_sub.clone();
     Effect::new(move |_| {
         refresh.get();
+        let generation = fetch_generation.get().wrapping_add(1);
+        fetch_generation.set(generation);
+        let current = fetch_generation.clone();
+        let alive = fetch_alive.clone();
         // Track the resolved context as well as the refresh counter, so
         // the first fetch happens once resolution lands rather than
         // firing immediately against an unknown context.
@@ -250,68 +257,47 @@ pub fn Dashboard() -> impl IntoView {
         if context == TicketContext::Resolving {
             return;
         }
+        if let Some(previous) = pending_fetch.get_value() {
+            previous.abort();
+        }
+        let controller = web_sys::AbortController::new().expect("browser fetch cancellation");
+        let abort = controller.signal();
+        pending_fetch.set_value(Some(controller));
         let token = fetch_token.clone();
-        let my_sub = fetch_sub.clone();
+        let offset = page_offset.get();
+        let details = opened_details.get();
         let wait_for_sequence = written_up_to.get_untracked();
+        let selected_company = company_id.get_value();
         spawn_local(async move {
-            let graphql_type = context.graphql_type("CompanyActiveTickets");
-            let selected_company = company_id.get_value();
-            let read = |wait_for_sequence| {
-                api::query_projection_after(
-                    &token,
-                    context.bounded_context(),
-                    "CompanyActiveTickets",
-                    &selected_company,
-                    &graphql_type,
-                    "tickets",
-                    wait_for_sequence,
-                )
-            };
-            // A wait that times out is refused rather than answered
-            // stale; show the queue as it stands rather than nothing.
-            let result = match read(wait_for_sequence).await {
-                Err(_) if wait_for_sequence.is_some() => read(None).await,
-                result => result,
-            };
-            let result = result.and_then(|json| {
-                serde_json::from_value::<HashMap<String, TicketQueueEntry>>(json)
-                    .map_err(|e| e.to_string())
-            });
-            let queue = match result {
-                Ok(queue) => queue,
-                Err(e) => {
+            if !alive.load(Ordering::Relaxed) {
+                return;
+            }
+            let result = api::ticket_page(
+                &token,
+                &selected_company,
+                offset,
+                wait_for_sequence,
+                &details,
+                &abort,
+            )
+            .await;
+            if !alive.load(Ordering::Relaxed) || current.get() != generation {
+                return;
+            }
+            batch(move || match result {
+                Ok(page) => {
+                    set_tickets.set(page.tickets);
+                    set_contents.set(page.contents);
+                    set_has_more.set(page.has_more);
+                    set_status.set(String::new());
+                }
+                Err(error) => {
+                    // A failed read invalidates cached plaintext as well.
                     set_tickets.set(HashMap::new());
                     set_contents.set(HashMap::new());
-                    set_status.set(format!("couldn't load tickets: {e}"));
-                    return;
+                    set_status.set(format!("couldn't load tickets: {error}"));
                 }
-            };
-            // Content is per customer: staff read one row per customer in
-            // the queue, a customer only their own. One request each, in
-            // turn - fine for a demo company's handful of customers, and
-            // the price of keeping each customer's text under their own key.
-            //
-            // Only customers the queue shows a ticket for: a row that
-            // doesn't exist yet has no owner, so a company-scoped
-            // customer's read of it is refused (`grant_scope_mismatch`).
-            // The queue read above has the same limit before a company's
-            // first ticket.
-            let mut requesters: Vec<String> = queue
-                .values()
-                .map(|t| t.requester_id.clone())
-                .filter(|requester_id| is_staff || *requester_id == my_sub)
-                .collect();
-            requesters.sort();
-            requesters.dedup();
-            set_tickets.set(queue);
-            let mut all = HashMap::new();
-            for requester_id in requesters {
-                match fetch_customer_tickets(&token, &context, &requester_id).await {
-                    Ok(content) => all.extend(content),
-                    Err(e) => set_status.set(format!("couldn't load ticket content: {e}")),
-                }
-            }
-            set_contents.set(all);
+            });
         });
     });
 
@@ -452,6 +438,15 @@ pub fn Dashboard() -> impl IntoView {
         </Show>
 
         <h2>"Tickets"</h2>
+        <button on:click=move |_| after_write.refresh_up_to(None)>"Refresh tickets"</button>
+        <button disabled=move || page_offset.get() == 0 on:click=move |_| batch(move || {
+            opened_details.set(HashMap::new());
+            set_page_offset.update(|n| *n = n.saturating_sub(25));
+        })>"Previous tickets"</button>
+        <button disabled=move || !has_more.get() on:click=move |_| batch(move || {
+            opened_details.set(HashMap::new());
+            set_page_offset.update(|n| *n += 25);
+        })>"Next tickets"</button>
         <div class="table-wrap">
         <table>
             <thead>
@@ -492,6 +487,7 @@ pub fn Dashboard() -> impl IntoView {
                         view! {
                             <TicketRow
                                 content=content
+                                opened_details=opened_details
                                 ticket=ticket
                                 is_staff=is_staff
                                 my_sub=my_sub.clone()
@@ -646,6 +642,7 @@ fn TicketRow(
     ticket: TicketQueueEntry,
     /// `None` until it loads, or when it can't be read at all.
     content: Option<CustomerTicketContent>,
+    opened_details: RwSignal<HashMap<String, usize>>,
     is_staff: bool,
     my_sub: String,
     token: String,
@@ -911,6 +908,18 @@ fn TicketRow(
     let status_for_customer_1 = ticket.status.clone();
     let can_ask = is_staff && ticket.status == "in_progress";
     let can_reply = !is_staff && is_own_ticket && ticket.status == "waiting_on_customer";
+    let available = content.as_ref().is_some_and(|c| c.available);
+    let loaded = content.as_ref().is_some_and(|c| c.details_loaded);
+    let truncated = content.as_ref().is_some_and(|c| c.truncated);
+    let message_count = content.as_ref().map_or(0, |c| c.message_count);
+    let detail_id = ticket_id.clone();
+    let previous_id = ticket_id.clone();
+    let next_id = ticket_id.clone();
+    let message_offset = opened_details
+        .get_untracked()
+        .get(&ticket_id)
+        .copied()
+        .unwrap_or(0);
     let (title, description, messages, given_comment) = match content {
         Some(c) => (c.title, c.description, c.messages, c.rating_comment),
         None => ("…".to_string(), String::new(), Vec::new(), None),
@@ -935,7 +944,17 @@ fn TicketRow(
         </tr>
         <tr>
             <td colspan="6" class="ticket-detail">
-                <p class="description">{description}</p>
+                <button on:click=move |_| opened_details.update(|open| {
+                    if open.remove(&detail_id).is_none() { open.insert(detail_id.clone(), 0); }
+                })>{if loaded { "Hide details" } else { "Show details" }}</button>
+                {(loaded || !available).then(|| view! { <p class="description">{description}</p> })}
+                {(loaded && truncated).then(|| view! { <p>"Long text is shown as a preview."</p> })}
+                {(loaded && message_offset > 0).then(|| view! {
+                    <button on:click=move |_| opened_details.update(|open| { open.insert(previous_id.clone(), message_offset.saturating_sub(20)); })>"Previous messages"</button>
+                })}
+                {(loaded && message_offset + 20 < message_count).then(|| view! {
+                    <button on:click=move |_| opened_details.update(|open| { open.insert(next_id.clone(), message_offset + 20); })>"Next messages"</button>
+                })}
                 {(!messages.is_empty()).then(|| view! {
                     <ul class="messages">
                         {messages.into_iter().map(|m| {

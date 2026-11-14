@@ -89,11 +89,14 @@ mutation { forgetSubject(boundedContext: "helpdesk", subjectKey: "customer",
                          subjectValue: "<requester_id>") { status } }
 ```
 
+Under tenant routing, use the company's resolved tenant bounded context in
+that mutation. Erasure is scoped to the named context.
+
 skilj destroys the key, so that customer's data reads back as
 ciphertext everywhere from then on, and their pending auto-close
 deadline is resolved as `forgotten` (`tests/customer_erasure.rs`).
 
-That's why the frontend reads two projections. `CompanyActiveTickets`
+The application read adapter joins two projections. `CompanyActiveTickets`
 (per company) has each ticket's status, priority and assignee, but no
 text. It only holds tickets that can still change: a merged duplicate
 leaves at once, and a closed ticket leaves once it's rated. `CustomerTickets` (per customer) has the content. skilj decrypts a
@@ -106,9 +109,19 @@ Not covered: ticket text stored before this was introduced stays
 plaintext (skilj has no backfill), and so does the retired
 `CompanyTicketList` projection's last stored state. The also-retired
 `CompanyTicketQueue` holds no text. Internal notes are
-staff-written and gated separately (the `staff` capability), not encrypted. The
-frontend can't tell ciphertext from text, so an erased customer's
-tickets show base64 rather than "erased".
+staff-written and gated separately (the `staff` capability), not encrypted.
+
+The dashboard uses an authorized [paged read adapter](docs/dashboard-reads-2026-11-14.md)
+that returns **Content unavailable** when protected text cannot be decrypted.
+After erasure, click **Refresh tickets** or reload to replace previously loaded
+plaintext. It does not infer erasure from base64-like strings or disclose
+whether an unavailable key was permanently destroyed. Raw skilj projection
+reads retain their ciphertext contract.
+
+The dashboard shows 25 tickets per page and loads conversation details on
+request, with 20 messages per page. Superseded refreshes are cancelled and cannot
+replace newer results. [Measurements and regression coverage](docs/dashboard-reads-2026-11-14.md)
+compare the serial customer reads with the bounded path.
 
 ### Inbound email over NATS
 
@@ -398,7 +411,9 @@ to a second instance (a rolling deploy) must leave no partial commit,
 and every `Idempotency-Key` retry must land exactly once; and Postgres
 restarted under load must see the server accept commands again within
 30s while `alerter` and `engagement-watcher` carry on from their
-cursors with no gap or duplicate. The restart test needs a Postgres it
+replay cursors with no missing or duplicate domain effects. The four application
+consumers checkpoint progress after processing; see [delivery guarantees and
+recovery commands](docs/consumer-recovery.md). The restart test needs a Postgres it
 can stop, so it always uses its own embedded cluster, CI included
 (where `DATABASE_URL` is shared by every test binary).
 The browser smoke suite uses real Dex login, a disposable PostgreSQL,
@@ -756,8 +771,12 @@ rewrite blocks event writes while its lock is held. This pair requires a
 maintenance window.
 
 Shared async-nats (0.51), SQLx (0.9) and OpenTelemetry (0.33, with the 0.34
-tracing bridge) remain on the upstream versions. Performance measurements
-continue under issue #90; the 0.3 baseline below remains historical evidence.
+tracing bridge) remain on the upstream versions. The current
+[0.4 performance baseline](docs/performance-baseline-2026-11-14.md) covers
+load, tenant scaling, reads, websocket fan-out and allocation profiling (#90).
+Memory still grows during background catch-up; a
+[focused application follow-up](docs/memory-growth-follow-up-2026-11-14.md)
+records the evidence and next work. The 0.3 baseline below is historical evidence.
 
 ## Previous upgrade notes: skilj 0.3.0
 
@@ -766,13 +785,15 @@ continue under issue #90; the 0.3 baseline below remains historical evidence.
   large histories. Keep the encryption key file from the existing deployment.
 - `CustomerTickets` declares `SUBJECT_KEY = Some("customer")`. Without
   this, even authorized readers see encrypted customer text on 0.3. The
-  erasure integration test and browser smoke cover plaintext before erasure
-  and ciphertext after it.
+  raw projection erasure integration test covers plaintext before erasure
+  and ciphertext after it. The dashboard browser journey checks the explicit
+  unavailable placeholder after refreshing.
 - Staged rebuilds pause live folding by default. `TicketSummary` opts into
   `LIVE_FOLD_COMPATIBLE` for its additive first-responder field; future
   incompatible schema or meaning changes must remove that opt-in before
   deploying and promote the rebuild before synchronous writes resume.
-  `APPLICATION_VERSION` is now 9.
+  `APPLICATION_VERSION` was 9 at that baseline; it is now 10 to enable the
+  lifecycle consumer's `CompanyActivated` feed.
 - Stored payloads default to a **256 KiB** limit. Keep large email bodies
   below that limit or configure skilj's payload limits deliberately. Blob
   attachments are not part of this application's email schema.

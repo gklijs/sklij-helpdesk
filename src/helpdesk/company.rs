@@ -81,6 +81,10 @@ impl EventType for CompanyActivated {
     fn tag_mappings() -> Vec<TagMapping> {
         company_tag()
     }
+    /// The lifecycle replicator must observe successful conversion/reactivation.
+    fn event_read_allowed() -> bool {
+        true
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

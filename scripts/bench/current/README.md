@@ -22,7 +22,9 @@ through create, assign, resolve, close, rate; rating removes it from the
 active queue. It then samples 60 seconds with no foreground traffic.
 `memory.json` records actual response counts, errors/rejections, latency
 percentiles, 30-second windows, per-process RSS/HWM, database active/idle
-connections, source hashes, commit, Rust version and machine information.
+connections, source hashes, commit, Rust version and machine information. Set `BENCH_DATABASE_CONTAINER` to the disposable
+Docker container name to additionally sample database CPU, memory and block I/O
+with `docker stats`, plus database transaction/buffer counters.
 Nominal rate is not achieved rate: workers wait for each response.
 
 Scaling uses shared/1/4/16 tenants, sixteen workers at 50 ms, 60 seconds per

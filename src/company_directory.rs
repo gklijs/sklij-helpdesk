@@ -40,6 +40,17 @@ async fn companies(
     State(state): State<Arc<DirectoryState>>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<CompanyAccess>>, (StatusCode, String)> {
+    let role = authenticate(&state, &headers).await?;
+    authorized_companies(&state.pool, &role, state.mode)
+        .await
+        .map(Json)
+        .map_err(internal)
+}
+
+pub(crate) async fn authenticate(
+    state: &DirectoryState,
+    headers: &HeaderMap,
+) -> Result<Role, (StatusCode, String)> {
     let token = headers
         .get("authorization")
         .and_then(|v| v.to_str().ok())
@@ -54,10 +65,7 @@ async fn companies(
     let role = roles
         .first()
         .ok_or((StatusCode::UNAUTHORIZED, "role is no longer active".into()))?;
-    authorized_companies(&state.pool, role, state.mode)
-        .await
-        .map(Json)
-        .map_err(internal)
+    Ok(role.clone())
 }
 
 fn internal(error: impl std::fmt::Display) -> (StatusCode, String) {

@@ -111,6 +111,9 @@ skilj-retry = "0.4.0"
 # Message-ID, so a redelivered email maps to the same ticket.
 sha2 = "0.11"
 
+# Authorized, bounded application ticket reads (ticket_reads.rs).
+sqlx = { version = "0.9", default-features = false, features = ["postgres"] }
+
 [dev-dependencies]
 postgresql_embedded = "0.22"
 tower = { version = "0.5", features = ["util"] }
@@ -121,11 +124,6 @@ http-body-util = "0.1"
 # tests/*.rs suites, which still own persistence, DCB conflicts and
 # access control.
 skilj-test-fixture = "0.4.0"
-# tests/ticket_auto_close_cancel.rs only - reads the `deadlines` table
-# directly, since no skilj API lists pending deadlines. Same version as
-# skilj 0.4.0's own Cargo.toml, so it resolves to the copy skilj-core already
-# builds; features are unified with skilj-core's own.
-sqlx = { version = "0.9", default-features = false, features = ["postgres"] }
 # tests/email_channel.rs only - a real, throwaway NATS server in Docker,
 # the same way skilj-nats's own tests run against one.
 testcontainers-modules = { version = "0.15", features = ["nats"] }

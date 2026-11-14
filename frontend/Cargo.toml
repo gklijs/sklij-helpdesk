@@ -14,9 +14,9 @@ binaries have no business depending on - same crate-separation reasoning skilj-t
 gets in the main skilj repo. Not part of any Cargo workspace with the
 backend crate either, for the same reason.
 
-Built with Leptos (CSR) + trunk. Talks to the skilj server's /graphql
-endpoint directly - no backend-for-frontend layer, since skilj-graphql
-already is the API this needs. Authenticates against a real external
+Built with Leptos (CSR) + trunk. Uses /graphql for commands and scalar
+projections, plus the authorized /v1/helpdesk/tickets adapter for bounded
+queue and conversation pages. Authenticates against a real external
 OIDC provider (Dex, see ../dex/config.yaml) via Authorization Code +
 PKCE - the frontend is a public client (no secret, can't keep one in
 WASM shipped to a browser).
@@ -31,7 +31,7 @@ two are separate processes, same as alerter/engagement-watcher are.
 leptos = { version = "0.8", features = ["csr"] }
 leptos_router = "0.8"
 wasm-bindgen = "0.2"
-web-sys = { version = "0.3", features = ["Window", "Storage", "Location", "Url", "UrlSearchParams", "Document", "Element", "MediaQueryList", "WebSocket", "MessageEvent", "CloseEvent"] }
+web-sys = { version = "0.3", features = ["Window", "Storage", "Location", "Url", "UrlSearchParams", "Document", "Element", "MediaQueryList", "WebSocket", "MessageEvent", "CloseEvent", "AbortController", "AbortSignal"] }
 js-sys = "0.3"
 gloo-net = "0.6"
 serde = { version = "1", features = ["derive"] }

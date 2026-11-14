@@ -23,10 +23,9 @@
 //! tracking once terminal" fix `src/bin/alerter.rs`'s own
 //! `unhandled`/`TicketsMerged` handling already established.
 //!
-//! **Restart safety**: see `alerter.rs`'s own doc comment - the exact
-//! same in-memory-state-plus-non-replayable-`mode=auto`-cursor gap
-//! applies here, fixed the identical way (`load_state`/`save_state`
-//! below, byte-for-byte the same shape as `alerter.rs`'s own).
+//! **Restart safety:** replay cursors and derived activity state share one
+//! atomic checkpoint. Missing state replays history; corrupt/unwritable state
+//! stops the process. See `docs/consumer-recovery.md`.
 //!
 //! Configuration (env vars, same minimal style `alerter.rs` already
 //! uses):
@@ -115,6 +114,10 @@ impl Config {
 
 #[derive(Default, Serialize, Deserialize)]
 struct State {
+    #[serde(default)]
+    positions: HashMap<String, String>,
+    #[serde(skip)]
+    replaying: bool,
     /// company_id -> the most recent customer-kind DailyActivityRecorded
     /// `day` this binary has observed for that company. Always the max
     /// seen so far, not just the latest read - `mode=auto` delivers in
@@ -134,6 +137,13 @@ async fn main() {
         Some(path) => load_state(path),
         None => State::default(),
     };
+    if state.positions.is_empty() {
+        state = State::default();
+    }
+    if let Some(path) = &config.state_file {
+        save_state(path, &state);
+    }
+
     println!(
         "engagement-watcher: polling {} every {:?}",
         config.base_url, config.poll_interval
@@ -156,42 +166,16 @@ async fn main() {
 /// Byte-for-byte the same shape as `alerter.rs`'s own `load_state` -
 /// see its doc comment.
 fn load_state(path: &std::path::Path) -> State {
-    match std::fs::read_to_string(path) {
-        Ok(contents) => match serde_json::from_str(&contents) {
-            Ok(state) => {
-                println!(
-                    "engagement-watcher: resumed tracking state from {}",
-                    path.display()
-                );
-                state
-            }
-            Err(e) => {
-                eprintln!(
-                    "engagement-watcher: {} exists but couldn't be parsed ({e}) - starting fresh",
-                    path.display()
-                );
-                State::default()
-            }
-        },
-        Err(_) => State::default(),
-    }
+    skilj_helpdesk::consumer::load(path).unwrap_or_else(|e| {
+        eprintln!("{e}");
+        std::process::exit(1)
+    })
 }
-
-/// Byte-for-byte the same shape as `alerter.rs`'s own `save_state` -
-/// see its doc comment.
 fn save_state(path: &std::path::Path, state: &State) {
-    let tmp = path.with_extension("json.tmp");
-    let write = std::fs::write(
-        &tmp,
-        serde_json::to_vec(state).expect("State always serializes"),
-    )
-    .and_then(|()| std::fs::rename(&tmp, path));
-    if let Err(e) = write {
-        eprintln!(
-            "engagement-watcher: couldn't checkpoint state to {}: {e}",
-            path.display()
-        );
-    }
+    skilj_helpdesk::consumer::save(path, state).unwrap_or_else(|e| {
+        eprintln!("{e}");
+        std::process::exit(1)
+    });
 }
 
 async fn tick(
@@ -199,14 +183,18 @@ async fn tick(
     config: &Config,
     state: &mut State,
 ) -> Result<(), reqwest::Error> {
+    state.replaying = false;
     // --- track state from the event feed ---
-    for (_, payload, _) in consume(
+    for event in consume(
         client,
         &config.base_url,
         &config.daily_activity_recorded_token,
+        "activity/DailyActivityRecorded",
+        state,
     )
     .await?
     {
+        let payload = event.payload;
         if payload["person_kind"].as_str() != Some("customer") {
             continue;
         }
@@ -231,6 +219,10 @@ async fn tick(
             .or_insert(day);
     }
 
+    // Wait until replay has reached the end of every feed before deadlines.
+    if state.replaying {
+        return Ok(());
+    }
     // --- act on deadlines: rule EngagementDeclineIsRecorded ---
     let now = Utc::now();
     let due_companies: Vec<String> = state
@@ -263,45 +255,20 @@ async fn tick(
     Ok(())
 }
 
-/// One `GET /v1/events/consume?mode=auto` call - byte-for-byte the same
-/// shape `alerter.rs`'s own `consume` is, duplicated rather than shared
-/// for the same no-common-library-boundary reason every other binary's
-/// own copy already is.
+/// One replayable page, with its position stored in the same state as the
+/// activity it derives. A full page defers the quiet-company sweep.
 async fn consume(
     client: &reqwest::Client,
     base_url: &str,
     token: &str,
-) -> Result<Vec<(String, serde_json::Value, DateTime<Utc>)>, reqwest::Error> {
-    #[derive(serde::Deserialize)]
-    struct ConsumeResponse {
-        events: Vec<EventDto>,
-    }
-    #[derive(serde::Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    struct EventDto {
-        event_type: String,
-        payload: serde_json::Value,
-        metadata: Metadata,
-    }
-    #[derive(serde::Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    struct Metadata {
-        created_at: DateTime<Utc>,
-    }
-
-    let response = client
-        .get(format!("{base_url}/v1/events/consume"))
-        .query(&[("mode", "auto")])
-        .bearer_auth(token)
-        .send()
-        .await?
-        .error_for_status()?;
-    let body: ConsumeResponse = response.json().await?;
-    Ok(body
-        .events
-        .into_iter()
-        .map(|e| (e.event_type, e.payload, e.metadata.created_at))
-        .collect())
+    feed: &str,
+    state: &mut State,
+) -> Result<Vec<skilj_helpdesk::consumer::Event>, reqwest::Error> {
+    let events =
+        skilj_helpdesk::consumer::replay(client, base_url, token, feed, &mut state.positions)
+            .await?;
+    state.replaying |= events.len() >= skilj_core::event_store::DEFAULT_MAX_EVENTS_PER_READ;
+    Ok(events)
 }
 
 /// One `POST /v1/commands/trigger` call - byte-for-byte the same shape
@@ -320,7 +287,8 @@ async fn submit_command(
         .await
         .map_err(|e| e.to_string())?;
     let body: serde_json::Value = response.json().await.map_err(|e| e.to_string())?;
-    if body["accepted"].as_bool() == Some(true) {
+    if body["accepted"].as_bool() == Some(true) || body["rejectionKind"] == "already_flagged" {
+        skilj_helpdesk::consumer::fault_point("after_effect");
         Ok(())
     } else {
         Err(format!(

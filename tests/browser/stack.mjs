@@ -117,8 +117,9 @@ try {
       return `${token.id}.${token.secret}`;
     }
     await trigger('RecordTenantLifecycle', { company_id: company, status: 'trialing', source_event_type: 'CompanySignedUp' }, await mint('RecordTenantLifecycle'));
-    seed[company] = { context: tenant, applyMacro: await mint('ApplyMacro'), createMacro: await mint('CreateMacro') };
+    seed[company] = { context: tenant, applyMacro: await mint('ApplyMacro'), createMacro: await mint('CreateMacro'), createTicket: await mint('CreateTicket'), assignTicket: await mint('AssignTicket'), resolveTicket: await mint('ResolveTicket'), rateTicket: await mint('RateTicket') };
   }
+  seed.operatorToken = login.id_token;
   // Only fixture command credentials are written; removed with this process.
   writeFileSync(resolve(import.meta.dirname, '.stack.json'), JSON.stringify(seed), { mode: 0o600 });
   frontend = createServer((req, res) => {

@@ -28,6 +28,7 @@ ap.add_argument('--workers', type=int, default=80)
 ap.add_argument('--interval-ms', type=int, default=50)
 ap.add_argument('--port', type=int, default=18401)
 ap.add_argument('--jemalloc-profile', help='path to a jemalloc library built with profiling support')
+ap.add_argument('--docker-container', default=os.environ.get('BENCH_DATABASE_CONTAINER'), help='optional disposable database container for CPU/I/O samples')
 ap.add_argument('--database', default=f'helpdesk_memory_{os.getpid()}')
 args = ap.parse_args()
 Path(args.out).mkdir(parents=True, exist_ok=True)
@@ -79,10 +80,16 @@ def sample(phase, began):
     projection_lag = psql(
         "SELECT name, GREATEST(COALESCE((SELECT max(sequence) FROM bc_helpdesk.events), 0) - COALESCE(caught_up_to, 0), 0) "
         "FROM bc_helpdesk.projections WHERE NOT sync ORDER BY name", args.database)
+    database_stats = psql("SELECT numbackends,xact_commit,xact_rollback,blks_read,blks_hit,temp_files,temp_bytes,deadlocks FROM pg_stat_database WHERE datname=current_database()", args.database).strip()
+    docker_stats = None
+    if args.docker_container:
+        docker_stats = json.loads(subprocess.check_output([
+            'docker', 'stats', '--no-stream', '--format', '{{json .}}', args.docker_container
+        ], text=True))
     samples.append({'seconds': round(time.monotonic() - began, 2), 'phase': phase,
                     'rss_kib': server.rss_kb(), 'hwm_kib': server.hwm_kb(),
                     'db_activity': state.strip(), 'projection_lag': projection_lag.strip(), 'loadavg': os.getloadavg(),
-                    'host_cpu_busy_percent': busy,
+                    'host_cpu_busy_percent': busy, 'database_counters': database_stats, 'database_container': docker_stats,
                     'mem_available_kib': next(int(line.split()[1]) for line in Path('/proc/meminfo').read_text().splitlines() if line.startswith('MemAvailable:'))})
     with Path(args.out, 'memory-samples.jsonl').open('a') as output:
         output.write(json.dumps(samples[-1]) + '\n')

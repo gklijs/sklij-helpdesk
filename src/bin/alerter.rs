@@ -4,16 +4,10 @@
 //! anything built into skilj itself, and `src/alerting.rs` for the pure
 //! decision logic this binary just drives.
 //!
-//! Talks to a *running* skilj server over HTTP - `GET
-//! /v1/events/consume?mode=auto`, server-tracked/auto-advancing
-//! (docs/architecture.md §7.4), the "stateless worker" row of that
-//! table. Not exercised by `cargo test` (that would mean spawning and
-//! tearing down a real listening server, a different kind of test than
-//! this crate's other integration tests, which drive `Skilj::rest_router()`
-//! in-process via `tower::ServiceExt::oneshot`); `src/alerting.rs`'s own
-//! tests, plus `tests/alerting_feed.rs`'s `urgent_ticket_creation_is_visible_on_the_event_feed_and_triggers_an_alert`
-//! (which exercises the exact same consume-and-decode path this binary
-//! uses, just in-process), are where the real coverage is.
+//! Reads replayable pages from `GET /v1/events`. Cursor positions and
+//! derived ticket state are checkpointed together; see `consumer.rs` and
+//! `docs/consumer-recovery.md`. Process crash windows are exercised by
+//! `tests/consumer_recovery.rs`.
 //!
 //! **Two jobs now, not one.** `rule UrgentTicketNeedsImmediateAttention`
 //! (react to `TicketCreated`, page immediately) is unchanged from the
@@ -32,25 +26,12 @@
 //! skilj's native `ScheduleDeadline`, unlike `helpdesk/`'s own trial/
 //! auto-close reactors).
 //!
-//! **Restart safety.** `mode=auto`'s cursor is server-tracked and
-//! non-replayable (docs/architecture.md §7.4) - once an event's been
-//! served, it's gone from this token's own stream for good. That's
-//! fine for `send_alert` below, which needs no memory at all, but
-//! `rule TicketBecomesOverdue` is a *sweep* over "every currently
-//! unhandled ticket," not a per-event reaction - so if `state` only
-//! ever lived in this process's own memory, a restart would silently
-//! and permanently drop every ticket that was already open before it,
-//! forever, unless some *other* event happened to touch that same
-//! ticket again later. That's a materially bigger loss than the design
-//! note's own accepted "occasional missed events on crash" - that
-//! tradeoff is about a handful of events landing during the crash
-//! window, not the entire pre-crash world going dark. `load_state`/
-//! `save_state` below close that gap: `state` is checkpointed to a
-//! local JSON file after every tick (cheap - it's a handful of ticket
-//! ids), and reloaded on startup if present, so a restart resumes
-//! within one `POLL_INTERVAL` of where it left off instead of forgetting
-//! everything. `engagement-watcher.rs` has the identical fix, for the
-//! identical reason, over its own "gone quiet" sweep.
+//! **Restart safety.** A page is fetched without changing server-side
+//! progress. The checkpoint atomically stores feed cursors and tracked
+//! tickets after processing. Missing state replays history; malformed or
+//! unwritable state stops the process. Replayed events update each ticket
+//! only when their sequence is newer, preserving order across type feeds.
+//! Sweeps wait while any feed returns a full page of backlog.
 //!
 //! **Phase 4: multi-tenant awareness.** Under the default tenant
 //! routing, ticket events live in per-company tenant contexts, not in the
@@ -316,6 +297,14 @@ impl Config {
 
 #[derive(Default, Serialize, Deserialize)]
 struct State {
+    #[serde(default)]
+    positions: HashMap<String, String>,
+    #[serde(default)]
+    last_change: HashMap<String, i64>,
+    #[serde(default)]
+    ticket_ids: HashMap<String, String>,
+    #[serde(skip)]
+    replaying: bool,
     /// ticket_id -> its own original `TicketCreated` timestamp - read
     /// off skilj's own event metadata, not a payload field, since
     /// `TicketCreatedPayload` carries no timestamp of its own. Kept
@@ -348,9 +337,8 @@ struct State {
     /// Tenant bounded-context names this process has learned about via
     /// `CompanyTenantProvisioned` events. Persisted to the state file
     /// so a restart re-mints tokens for known tenants without needing
-    /// to re-scan the shared feed from the beginning (the `mode=auto`
-    /// cursor on that token has already advanced past historical
-    /// events).
+    /// to re-scan the shared feed from the beginning. Feed positions are
+    /// stored beside these names, independently of re-minted token IDs.
     discovered_tenants: HashSet<String>,
 }
 
@@ -428,6 +416,13 @@ async fn main() {
         Some(path) => load_state(path),
         None => State::default(),
     };
+    if state.positions.is_empty() {
+        state = State::default();
+    }
+    if let Some(path) = &config.state_file {
+        save_state(path, &state);
+    }
+
     let mut tenant_cache = match &config.multi_tenant {
         Some(mt) => Some(TenantTokenCache::new(
             &config.base_url,
@@ -459,37 +454,16 @@ async fn main() {
 }
 
 fn load_state(path: &std::path::Path) -> State {
-    match std::fs::read_to_string(path) {
-        Ok(contents) => match serde_json::from_str(&contents) {
-            Ok(state) => {
-                println!("alerter: resumed tracking state from {}", path.display());
-                state
-            }
-            Err(e) => {
-                eprintln!(
-                    "alerter: {} exists but couldn't be parsed ({e}) - starting fresh",
-                    path.display()
-                );
-                State::default()
-            }
-        },
-        Err(_) => State::default(),
-    }
+    skilj_helpdesk::consumer::load(path).unwrap_or_else(|e| {
+        eprintln!("{e}");
+        std::process::exit(1)
+    })
 }
-
 fn save_state(path: &std::path::Path, state: &State) {
-    let tmp = path.with_extension("json.tmp");
-    let write = std::fs::write(
-        &tmp,
-        serde_json::to_vec(state).expect("State always serializes"),
-    )
-    .and_then(|()| std::fs::rename(&tmp, path));
-    if let Err(e) = write {
-        eprintln!(
-            "alerter: couldn't checkpoint state to {}: {e}",
-            path.display()
-        );
-    }
+    skilj_helpdesk::consumer::save(path, state).unwrap_or_else(|e| {
+        eprintln!("{e}");
+        std::process::exit(1)
+    });
 }
 
 async fn tick(
@@ -498,16 +472,19 @@ async fn tick(
     state: &mut State,
     tenant_cache: &mut Option<TenantTokenCache>,
 ) -> Result<(), reqwest::Error> {
+    state.replaying = false;
     // --- Phase 4: discover new tenants from the shared context ---
     if let Some(mt) = &config.multi_tenant {
-        for (_, payload, _) in consume(
+        for event in consume(
             client,
             &config.base_url,
             &mt.company_tenant_provisioned_token,
+            "helpdesk/CompanyTenantProvisioned",
+            state,
         )
         .await?
         {
-            if let Some(tenant_name) = payload["tenant_name"].as_str() {
+            if let Some(tenant_name) = event.payload["tenant_name"].as_str() {
                 state.discovered_tenants.insert(tenant_name.to_string());
             }
         }
@@ -521,6 +498,7 @@ async fn tick(
         state,
         None,
         &config.ticket_resolved_token,
+        "TicketResolved",
         |state, ticket_id| {
             state.unhandled.remove(ticket_id);
         },
@@ -532,6 +510,7 @@ async fn tick(
         state,
         None,
         &config.ticket_reopened_token,
+        "TicketReopened",
         |state, ticket_id| {
             state.unhandled.insert(ticket_id.to_string());
         },
@@ -543,6 +522,7 @@ async fn tick(
         state,
         None,
         &config.ticket_closed_token,
+        "TicketClosed",
         |state, ticket_id| {
             state.unhandled.remove(ticket_id);
         },
@@ -578,6 +558,7 @@ async fn tick(
                 state,
                 src,
                 &tokens.event_tokens["TicketResolved"],
+                "TicketResolved",
                 |state, ticket_id| {
                     state.unhandled.remove(ticket_id);
                 },
@@ -589,6 +570,7 @@ async fn tick(
                 state,
                 src,
                 &tokens.event_tokens["TicketReopened"],
+                "TicketReopened",
                 |state, ticket_id| {
                     state.unhandled.insert(ticket_id.to_string());
                 },
@@ -600,6 +582,7 @@ async fn tick(
                 state,
                 src,
                 &tokens.event_tokens["TicketClosed"],
+                "TicketClosed",
                 |state, ticket_id| {
                     state.unhandled.remove(ticket_id);
                 },
@@ -624,6 +607,10 @@ async fn tick(
         }
     }
 
+    // A restart/lost checkpoint replays all feeds before any sweep.
+    if state.replaying {
+        return Ok(());
+    }
     // --- act on the deadline: rule TicketBecomesOverdue ---
     let now = Utc::now();
     let due: Vec<String> = state
@@ -636,6 +623,9 @@ async fn tick(
         })
         .collect();
     for ticket_id in due {
+        let Some(domain_ticket_id) = state.ticket_ids.get(&ticket_id).cloned() else {
+            continue;
+        };
         // Phase 4: route the escalation command to the tenant the ticket
         // lives in, if it has one. REST derives its destination from the
         // token's own bounded context, so using a tenant-scoped token is
@@ -646,15 +636,12 @@ async fn tick(
                 match cache.cache.get(tenant_name) {
                     Some(t) => &t.escalate_ticket_token,
                     None => {
-                        eprintln!(
-                            "alerter: no EscalateTicket token for tenant {tenant_name}, \
-                             falling back to shared"
-                        );
-                        &config.escalate_ticket_token
+                        eprintln!("alerter: no EscalateTicket token for tenant {tenant_name}; retrying next tick");
+                        continue;
                     }
                 }
             } else {
-                &config.escalate_ticket_token
+                continue;
             }
         } else {
             &config.escalate_ticket_token
@@ -663,7 +650,7 @@ async fn tick(
             client,
             &config.base_url,
             escalate_token,
-            serde_json::json!({ "ticket_id": ticket_id }),
+            serde_json::json!({ "ticket_id": domain_ticket_id }),
         )
         .await
         {
@@ -672,7 +659,7 @@ async fn tick(
                     client,
                     config.slack_webhook_url.as_deref(),
                     &skilj_helpdesk::alerting::Alert {
-                        ticket_id: ticket_id.clone(),
+                        ticket_id: domain_ticket_id,
                         company_id: state
                             .company_id
                             .get(&ticket_id)
@@ -694,6 +681,10 @@ async fn tick(
     Ok(())
 }
 
+fn tracking_key(source: Option<&str>, ticket: &str) -> String {
+    serde_json::to_string(&(source.unwrap_or("helpdesk"), ticket)).expect("string tuple serializes")
+}
+
 /// Process a batch of `TicketCreated` events from one source (shared
 /// context or a tenant). Tags each ticket with `source` so the overdue
 /// sweep above can pick the right `EscalateTicket` token.
@@ -704,17 +695,26 @@ async fn process_ticket_created(
     source: Option<&str>,
     token: &str,
 ) -> Result<(), reqwest::Error> {
-    for (_, payload, created_at) in consume(client, &config.base_url, token).await? {
-        match serde_json::from_value::<TicketCreatedPayload>(payload) {
+    let feed = format!("{}/TicketCreated", source.unwrap_or("helpdesk"));
+    for event in consume(client, &config.base_url, token, &feed, state).await? {
+        let created_at = event.metadata.created_at;
+        match serde_json::from_value::<TicketCreatedPayload>(event.payload) {
             Ok(p) => {
-                state.created_at.insert(p.ticket_id.clone(), created_at);
-                state
-                    .company_id
-                    .insert(p.ticket_id.clone(), p.company_id.clone());
+                let key = tracking_key(source, &p.ticket_id);
+                state.ticket_ids.insert(key.clone(), p.ticket_id.clone());
+                state.created_at.insert(key.clone(), created_at);
+                state.company_id.insert(key.clone(), p.company_id.clone());
                 state
                     .tenant_for_ticket
-                    .insert(p.ticket_id.clone(), source.map(str::to_string));
-                state.unhandled.insert(p.ticket_id.clone());
+                    .insert(key.clone(), source.map(str::to_string));
+                if state
+                    .last_change
+                    .get(&key)
+                    .is_none_or(|seq| *seq < event.sequence)
+                {
+                    state.last_change.insert(key.clone(), event.sequence);
+                    state.unhandled.insert(key);
+                }
                 if let Some(alert) = evaluate_ticket_created(&p) {
                     send_alert(client, config.slack_webhook_url.as_deref(), &alert).await;
                 }
@@ -734,16 +734,27 @@ async fn process_state_update<F>(
     client: &reqwest::Client,
     config: &Config,
     state: &mut State,
-    _source: Option<&str>,
+    source: Option<&str>,
     token: &str,
+    event_type: &str,
     op: F,
 ) -> Result<(), reqwest::Error>
 where
     F: Fn(&mut State, &str),
 {
-    for (_, payload, _) in consume(client, &config.base_url, token).await? {
-        if let Some(ticket_id) = payload["ticket_id"].as_str() {
-            op(state, ticket_id);
+    let feed = format!("{}/{event_type}", source.unwrap_or("helpdesk"));
+    for event in consume(client, &config.base_url, token, &feed, state).await? {
+        if let Some(ticket_id) = event.payload["ticket_id"].as_str() {
+            let key = tracking_key(source, ticket_id);
+            let ticket_id = key.as_str();
+            if state
+                .last_change
+                .get(ticket_id)
+                .is_none_or(|seq| *seq < event.sequence)
+            {
+                state.last_change.insert(ticket_id.into(), event.sequence);
+                op(state, ticket_id);
+            }
         }
     }
     Ok(())
@@ -753,11 +764,14 @@ async fn process_ticket_escalated(
     client: &reqwest::Client,
     config: &Config,
     state: &mut State,
-    _source: Option<&str>,
+    source: Option<&str>,
     token: &str,
 ) -> Result<(), reqwest::Error> {
-    for (_, payload, _) in consume(client, &config.base_url, token).await? {
-        if let Some(ticket_id) = payload["ticket_id"].as_str() {
+    let feed = format!("{}/TicketEscalated", source.unwrap_or("helpdesk"));
+    for event in consume(client, &config.base_url, token, &feed, state).await? {
+        if let Some(ticket_id) = event.payload["ticket_id"].as_str() {
+            let key = tracking_key(source, ticket_id);
+            let ticket_id = key.as_str();
             state.escalated.insert(ticket_id.to_string());
         }
     }
@@ -768,60 +782,41 @@ async fn process_tickets_merged(
     client: &reqwest::Client,
     config: &Config,
     state: &mut State,
-    _source: Option<&str>,
+    source: Option<&str>,
     token: &str,
 ) -> Result<(), reqwest::Error> {
-    for (_, payload, _) in consume(client, &config.base_url, token).await? {
-        if let Some(duplicate_ticket_id) = payload["duplicate_ticket_id"].as_str() {
-            state.unhandled.remove(duplicate_ticket_id);
+    let feed = format!("{}/TicketsMerged", source.unwrap_or("helpdesk"));
+    for event in consume(client, &config.base_url, token, &feed, state).await? {
+        if let Some(ticket_id) = event.payload["duplicate_ticket_id"].as_str() {
+            let key = tracking_key(source, ticket_id);
+            let ticket_id = key.as_str();
+            if state
+                .last_change
+                .get(ticket_id)
+                .is_none_or(|seq| *seq < event.sequence)
+            {
+                state.last_change.insert(ticket_id.into(), event.sequence);
+                state.unhandled.remove(ticket_id);
+            }
         }
     }
     Ok(())
 }
 
-/// One `GET /v1/events/consume?mode=auto` call for one token, decoded
-/// down to what this binary needs: each event's type name (unused by
-/// most call sites - each token is already scoped to one event type -
-/// kept for parity with `engagement-watcher.rs`'s identical helper),
-/// payload, and when skilj itself recorded it. Byte-for-byte the same
-/// shape as `engagement-watcher.rs`'s own `consume` - not shared between
-/// the two binaries since each is its own deployable unit with no common
-/// library boundary between them worth introducing for one helper.
+/// Fetch one replayable page. A full page defers deadline sweeps until
+/// catch-up has reached all feeds. The application uses skilj's default cap.
 async fn consume(
     client: &reqwest::Client,
     base_url: &str,
     token: &str,
-) -> Result<Vec<(String, serde_json::Value, DateTime<Utc>)>, reqwest::Error> {
-    #[derive(serde::Deserialize)]
-    struct ConsumeResponse {
-        events: Vec<EventDto>,
-    }
-    #[derive(serde::Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    struct EventDto {
-        event_type: String,
-        payload: serde_json::Value,
-        metadata: Metadata,
-    }
-    #[derive(serde::Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    struct Metadata {
-        created_at: DateTime<Utc>,
-    }
-
-    let response = client
-        .get(format!("{base_url}/v1/events/consume"))
-        .query(&[("mode", "auto")])
-        .bearer_auth(token)
-        .send()
-        .await?
-        .error_for_status()?;
-    let body: ConsumeResponse = response.json().await?;
-    Ok(body
-        .events
-        .into_iter()
-        .map(|e| (e.event_type, e.payload, e.metadata.created_at))
-        .collect())
+    feed: &str,
+    state: &mut State,
+) -> Result<Vec<skilj_helpdesk::consumer::Event>, reqwest::Error> {
+    let events =
+        skilj_helpdesk::consumer::replay(client, base_url, token, feed, &mut state.positions)
+            .await?;
+    state.replaying |= events.len() >= skilj_core::event_store::DEFAULT_MAX_EVENTS_PER_READ;
+    Ok(events)
 }
 
 /// One `POST /v1/commands/trigger` call - identical shape and "a
@@ -842,6 +837,7 @@ async fn submit_command(
         .map_err(|e| e.to_string())?;
     let body: serde_json::Value = response.json().await.map_err(|e| e.to_string())?;
     if body["accepted"].as_bool() == Some(true) {
+        skilj_helpdesk::consumer::fault_point("after_effect");
         Ok(())
     } else {
         Err(format!(

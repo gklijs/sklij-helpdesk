@@ -1,0 +1,42 @@
+{
+  "result": "passed",
+  "old_events": 2,
+  "checks": [
+    "backup/restore",
+    "preflight",
+    "refuse before bootstrap",
+    "protected source rewrite",
+    "old encrypted read/erasure",
+    "old ticket assign/resolve",
+    "OTLP metrics/traces/logs",
+    "post-migration integration suites",
+    "0.3 refused",
+    "backup rollback to 0.3",
+    "fresh migration/startup"
+  ],
+  "binary_sha256": {
+    "old": "3c8a53f5b52c872529c787f679bfec088799c936e4b3e9a7d6192f3996b82df4",
+    "new": "06f73ce8c41cd1771165e35f17a67a9be3bf4b9c1e80bf83ba4dd81d509188d3"
+  },
+  "post_migration_tests_passed": 15,
+  "final_script_rehearsal": {
+    "result": "passed",
+    "old_events": 2,
+    "checks": [
+      "backup/restore",
+      "preflight",
+      "refuse before bootstrap",
+      "protected source rewrite",
+      "old encrypted read/erasure",
+      "old ticket assign/resolve",
+      "OTLP metrics/traces/logs",
+      "0.3 refused",
+      "backup rollback to 0.3",
+      "fresh migration/startup"
+    ],
+    "binary_sha256": {
+      "old": "3c8a53f5b52c872529c787f679bfec088799c936e4b3e9a7d6192f3996b82df4",
+      "new": "06f73ce8c41cd1771165e35f17a67a9be3bf4b9c1e80bf83ba4dd81d509188d3"
+    }
+  }
+}

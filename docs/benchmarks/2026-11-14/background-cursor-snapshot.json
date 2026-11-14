@@ -1,0 +1,14 @@
+{
+  "sampled_utc": "2026-11-14 19:25:06.244565",
+  "phase": "foreground idle during the jemalloc diagnostic",
+  "event_heads": {
+    "helpdesk": "39590",
+    "knowledge_base": "5102"
+  },
+  "projection_positions": {
+    "helpdesk": "CompanyActiveTickets|39590\nCompanyMacros|39590\nCustomerTickets|39590\nTenantDirectory|39590\nTicketInternalNotes|39590\nTicketSummary|39590",
+    "knowledge_base": "KnowledgeBaseReview|5093\nPublishedArticles|5093"
+  },
+  "route_positions": "HelpdeskResolutionToArticleSuggestion|25836",
+  "knowledge_base_review_state_bytes": "546087"
+}

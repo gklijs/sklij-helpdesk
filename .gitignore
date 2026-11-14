@@ -44,3 +44,11 @@ Thumbs.db
 
 # Python benchmark bytecode
 __pycache__/
+
+# Replay cursors owned by background consumers
+/provisioner-state.json
+/provisioner-state.json.tmp
+/replicator-state.json
+/replicator-state.json.tmp
+/engagement-watcher-state.json
+/engagement-watcher-state.json.tmp

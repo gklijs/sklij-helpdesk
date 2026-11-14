@@ -1,25 +1,7 @@
 import { test, expect } from '@playwright/test';
 import { readFileSync } from 'node:fs';
 
-async function login(page, kind) {
-  await page.goto('/login');
-  await page.getByRole('button', { name: 'Log in', exact: true }).click();
-  await page.getByPlaceholder('Email address').fill(kind === 'customer' ? 'customer@acme.example' : 'lead@acme.example');
-  await page.getByPlaceholder('Password').fill(kind === 'customer' ? 'customer-demo-pw' : 'staff-demo-pw');
-  await page.getByRole('button', { name: 'Login', exact: true }).click();
-  const grant = page.getByRole('button', { name: 'Grant Access' });
-  await Promise.race([grant.waitFor().then(() => grant.click()), page.waitForURL('http://127.0.0.1:8081/')]);
-  await expect(page.getByText(kind === 'customer' ? /Customer view/ : /Staff view/)).toBeVisible();
-  await expect(page.getByText('● Live', { exact: true })).toBeVisible();
-}
-async function trigger(request, credential, payload) {
-  const response = await request.post('http://localhost:8080/v1/commands/trigger', {
-    headers: { authorization: `Bearer ${credential}` }, data: { payload },
-  });
-  const body = await response.json();
-  expect(body.accepted, JSON.stringify(body)).toBe(true);
-  return body;
-}
+import { login, trigger } from './helpers.mjs';
 
 test('OIDC, tenant ticket journey, priority-only live update, reconnect, and expiry', async ({ browser, request }) => {
   const customerContext = await browser.newContext();
@@ -60,7 +42,7 @@ test('OIDC, tenant ticket journey, priority-only live update, reconnect, and exp
     await expect(staffRow).toContainText('open');
     // Both readable text and tenant routing must work after the 0.3 upgrade.
     const requests = [];
-    staff.on('request', r => { if (r.url().endsWith('/graphql')) requests.push(r.postData() || ''); });
+    staff.on('request', r => { if (r.url().endsWith('/v1/helpdesk/tickets')) requests.push(r.postData() || ''); });
     await staffRow.getByRole('button', { name: 'Assign to me', exact: true }).click();
     await expect(customerRow).toContainText('in progress');
     await staff.getByPlaceholder('Ask the customer something...').fill('Which browser?');
@@ -85,7 +67,7 @@ test('OIDC, tenant ticket journey, priority-only live update, reconnect, and exp
     await expect(customerRow).toContainText('urgent');
     await expect(observer.getByRole('row').filter({ hasText: title })).toContainText('urgent');
     expect(prioritySubscribed).toBe(true);
-    expect(requests.some(body => body.includes('browser_acme') && body.includes('waitForSequence'))).toBe(true);
+    expect(requests.some(body => JSON.parse(body).companyId === 'acme' && JSON.parse(body).waitForSequence !== null)).toBe(true);
     // Drop the network while another session changes the ticket. Resuming
     // must replay the missed event and re-read the projection.
     await customerContext.setOffline(true);

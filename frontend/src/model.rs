@@ -3,18 +3,10 @@
 //! this crate has no dependency on the backend crate at all, deliberately
 //! - see `Cargo.toml`'s own doc comment.
 //!
-//! A ticket is two reads joined by `ticket_id`: its lifecycle from the
-//! company's `CompanyActiveTickets`, and what its customer wrote from that
-//! customer's own `CustomerTickets` row. The second is encrypted per
-//! customer, which is why it can't live in the company-keyed first one
-//! (see `CompanyActiveTickets`'s doc comment on the backend).
-//!
-//! No `…State` wrappers here, on purpose: `api::query_projection` already
-//! resolves down to the `tickets` field's own inner JSON (a plain
-//! `ticket_id -> entry` map), so this crate only ever deserializes into
-//! `HashMap<String, _>` directly - see that function's own doc comment,
-//! and `pages::dashboard`'s comment on the bug this shape avoided
-//! re-introducing.
+//! The authorized ticket adapter joins company lifecycle metadata with
+//! per-customer encrypted content on the server. The browser receives a
+//! bounded page of summaries and only the details it has explicitly opened.
+//! It receives plaintext or an explicit unavailable state, never ciphertext.
 
 use serde::Deserialize;
 
@@ -36,15 +28,18 @@ pub struct TicketQueueEntry {
     pub rating: Option<u8>,
 }
 
-/// Plaintext only to the customer themselves and to staff; anyone else,
-/// and everyone once the customer has been forgotten, gets ciphertext
-/// here, which nothing in this crate can tell apart from text.
+/// The authorized application adapter returns plaintext or an explicit
+/// unavailable placeholder. It never sends ciphertext to the dashboard.
 #[derive(Debug, Clone, Deserialize)]
 pub struct CustomerTicketContent {
     pub title: String,
     pub description: String,
     pub messages: Vec<TicketMessage>,
     pub rating_comment: Option<String>,
+    pub available: bool,
+    pub details_loaded: bool,
+    pub message_count: usize,
+    pub truncated: bool,
 }
 
 /// Mirrors `skilj_helpdesk::helpdesk::TicketInternalNote` - fetched

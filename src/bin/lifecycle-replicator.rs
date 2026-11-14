@@ -68,20 +68,12 @@
 //! `CommandToken` row: an uncached mint per event would grow that table
 //! without bound at a company's lifecycle-event rate.
 //!
-//! **Restart safety, deliberately the simpler tradeoff.** No checkpoint
-//! file, unlike `alerter.rs`'s own overdue-ticket sweep - which needs one
-//! because losing its in-memory state there means losing every currently
-//! -open ticket. Here, a restart means this binary's three `mode=auto`
-//! event cursors resume from where the server left them, and the worst a
-//! crash mid-tick does is skip events for this process's own crash window,
-//! the same bounded "occasional missed events on restart is acceptable"
-//! tradeoff `specs/skilj-helpdesk.allium`'s own resolved alerting design
-//! note already accepts. What that tradeoff costs is a tenant whose
-//! lifecycle was never mirrored staying `company_not_found` until the next
-//! lifecycle event - bounded, visible (the guard's own rejection says so),
-//! and recoverable by resubmitting; a stricter guarantee would mean
-//! re-deriving which companies still lack a mirror, which is a per-company
-//! scan this binary has no cheap way to do.
+//! **Restart safety.** Replayable pages keep a local position per event
+//! type. Each position advances only after every mirror in its page succeeds.
+//! Duplicate and older lifecycle states are terminal domain no-ops. Missing
+//! progress replays history; malformed/unwritable progress stops the process.
+//! `REPLICATOR_STATE_FILE` defaults to `replicator-state.json`; see
+//! `docs/consumer-recovery.md`.
 //!
 //! **Untrusted input, handled as such.** `company_id` arrives from the
 //! event feed and flows into a GraphQL `variables`-bound tenant lookup and
@@ -328,6 +320,19 @@ async fn main() {
 
     let config = Config::from_env();
     let client = reqwest::Client::new();
+    let state_path = std::path::PathBuf::from(
+        std::env::var("REPLICATOR_STATE_FILE").unwrap_or_else(|_| "replicator-state.json".into()),
+    );
+    let mut positions: std::collections::HashMap<String, String> =
+        skilj_helpdesk::consumer::load(&state_path).unwrap_or_else(|e| {
+            eprintln!("{e}");
+            std::process::exit(1)
+        });
+    // Check writable storage before fetching work.
+    skilj_helpdesk::consumer::save(&state_path, &positions).unwrap_or_else(|e| {
+        eprintln!("{e}");
+        std::process::exit(1)
+    });
     let mut tokens = TokenCache::default();
     println!(
         "lifecycle-replicator: polling {} every {POLL_INTERVAL:?}, mirroring {}",
@@ -340,14 +345,14 @@ async fn main() {
     );
 
     loop {
-        // `consume` exits the process on a 403 (stale token row - the
-        // database was recreated under this binary), so a `tick` error
-        // here is always a transient transport/decoding failure worth
-        // retrying, never a permanent misconfiguration.
-        if let Err(e) = tick(&client, &config, &mut tokens).await {
+        if let Err(e) = tick(&client, &config, &mut tokens, &mut positions).await {
             eprintln!("lifecycle-replicator: poll failed, will retry: {e}");
             tracing::warn!(error = %e, "lifecycle-replicator: poll failed, will retry");
         }
+        skilj_helpdesk::consumer::save(&state_path, &positions).unwrap_or_else(|e| {
+            eprintln!("{e}");
+            std::process::exit(1)
+        });
         tokio::time::sleep(POLL_INTERVAL).await;
     }
 }
@@ -356,29 +361,42 @@ async fn tick(
     client: &reqwest::Client,
     config: &Config,
     tokens: &mut TokenCache,
-) -> Result<(), reqwest::Error> {
+    positions: &mut HashMap<String, String>,
+) -> Result<(), String> {
     for (event_type, status) in MIRRORED_EVENTS {
         let Some(token) = config.event_tokens.get(*event_type) else {
             eprintln!("lifecycle-replicator: no token configured for {event_type}");
             continue;
         };
-        for (payload, _) in consume(client, &config.base_url, token).await? {
+        let page = skilj_helpdesk::consumer::fetch(
+            client,
+            &config.base_url,
+            token,
+            positions.get(*event_type).map(String::as_str),
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+        for event in page.events {
+            let payload = event.payload;
             let Some(company_id) = payload["company_id"].as_str() else {
                 eprintln!(
                     "lifecycle-replicator: {event_type} payload missing company_id: {payload}"
                 );
-                continue;
+                return Err(format!("{event_type} payload missing company_id"));
             };
             if let Err(e) = mirror_one(client, config, tokens, company_id, event_type, status).await
             {
-                // Logged, not propagated: one company's failed mirror
-                // must not stop the other companies (or the other two
-                // event feeds) in this same tick.
+                // Leave this page uncheckpointed, including a tenant that
+                // is not provisioned yet. Retry it without another event.
                 eprintln!(
                     "lifecycle-replicator: mirroring {company_id} ({event_type}) failed: {e}"
                 );
                 tracing::warn!(error = %e, company_id, event_type, "lifecycle-replicator: mirror failed");
+                return Err(e);
             }
+        }
+        if let Some(cursor) = page.next_cursor {
+            positions.insert((*event_type).into(), cursor);
         }
     }
     Ok(())
@@ -468,61 +486,6 @@ async fn resolve_tenant(
         })
 }
 
-/// `GET /v1/events/consume?mode=auto` - byte-for-byte the same shape as
-/// `provisioner.rs`'s own `consume` helper (deliberately duplicated
-/// rather than shared across these two binaries, the same
-/// "duplicated rather than shared across the test/binary boundary"
-/// convention the test key material above follows). The event type name
-/// is unused here because the caller already knows which feed it's
-/// reading, and `MIRRORED_EVENTS` pairs it with the status up front.
-async fn consume(
-    client: &reqwest::Client,
-    base_url: &str,
-    token: &str,
-) -> Result<Vec<(serde_json::Value, String)>, reqwest::Error> {
-    #[derive(serde::Deserialize)]
-    struct ConsumeResponse {
-        events: Vec<EventDto>,
-    }
-
-    #[derive(serde::Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    struct EventDto {
-        event_type: String,
-        payload: serde_json::Value,
-    }
-
-    let response = client
-        .get(format!("{base_url}/v1/events/consume"))
-        .query(&[("mode", "auto")])
-        .bearer_auth(token)
-        .send()
-        .await?;
-    if response.status() == reqwest::StatusCode::FORBIDDEN {
-        // The token's own event row was deleted (operator cleared the
-        // consumable events table, or the database was recreated under a
-        // running binary - as the bench harness does between template
-        // seeding and the run). skilj's consume endpoint answers unknown
-        // tokens with 403, not an empty feed; without this the binary
-        // logs `poll failed` every 5s forever instead of recovering.
-        // Re-minting isn't possible here (event tokens are minted by the
-        // server at startup) - the operator must restart this binary
-        // against the fresh database. Fail loudly so that happens.
-        eprintln!(
-            "lifecycle-replicator: event token no longer valid (403) - the database was \
-             recreated or the token row deleted; restart this binary against the current database"
-        );
-        std::process::exit(1);
-    }
-    let response = response.error_for_status()?;
-    let body: ConsumeResponse = response.json().await?;
-    Ok(body
-        .events
-        .into_iter()
-        .map(|e| (e.payload, e.event_type))
-        .collect())
-}
-
 /// `POST /v1/commands/trigger` - identical shape and "a rejection is
 /// logged by the caller, not a transport error" contract as
 /// `provisioner.rs`'s own `submit_command`.
@@ -540,7 +503,13 @@ async fn submit_command(
         .await
         .map_err(|e| e.to_string())?;
     let body: serde_json::Value = response.json().await.map_err(|e| e.to_string())?;
-    if body["accepted"].as_bool() == Some(true) {
+    if body["accepted"].as_bool() == Some(true)
+        || matches!(
+            body["rejectionKind"].as_str(),
+            Some("lifecycle_already_mirrored" | "lifecycle_regression")
+        )
+    {
+        skilj_helpdesk::consumer::fault_point("after_effect");
         Ok(())
     } else {
         // `lifecycle_already_mirrored` is the expected shape of a

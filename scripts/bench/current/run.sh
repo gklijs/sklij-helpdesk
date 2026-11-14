@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# A bounded 0.3 baseline: fresh DBs, sustained traffic + idle, tenant scaling,
+# A bounded 0.4 baseline: fresh DBs, sustained traffic + idle, tenant scaling,
 # read latency and websocket fan-out. Dedicated disposable cluster required.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
@@ -12,7 +12,7 @@ python3 scripts/bench/current/memory.py target/release/server "$OUT" --seconds 1
 for tenants in 0 1 4 16; do
     python3 scripts/bench/tenant-scaling/scale.py \
         "$ROOT/target/release/server" "$ROOT/target/release/provisioner" \
-        "$ROOT/target/release/lifecycle-replicator" - "v030_t${tenants}" "$OUT" \
+        "$ROOT/target/release/lifecycle-replicator" - "v040_t${tenants}" "$OUT" \
         --tenants "$tenants" --fg-workers 16 --fg-interval-ms 50 \
         --seconds 60 --pgbench-scale 1
 done

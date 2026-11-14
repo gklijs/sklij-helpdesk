@@ -1651,12 +1651,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         audience,
         SigningAlgorithm::Rs256,
     );
+    let ticket_read_keys = skilj_core::encryption::KeyService::new(key_provider);
     let (skilj, report) = skilj_helpdesk::register(Skilj::builder(database_url))
         .pool_options(skilj_pool_options)
         .schema_changes(schema_changes)
         .reconciliation_role(external_subject.clone())
         .application_version(skilj_helpdesk::APPLICATION_VERSION)
-        .key_provider(key_provider)
+        .key_service(ticket_read_keys.clone())
         .master_key_rotation(encryption.rotation())
         .identity_provider(directory_idp.clone())
         .build()
@@ -1931,17 +1932,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         graphql
     };
-    let directory = skilj_helpdesk::company_directory::router(Arc::new(
-        skilj_helpdesk::company_directory::DirectoryState {
-            pool: pool.clone(),
-            keys: skilj_core::access_control::JwksCache::new(directory_idp.jwks_endpoint.clone()),
-            idp: directory_idp,
-            mode: routing_mode,
-        },
-    ));
+    let directory_state = Arc::new(skilj_helpdesk::company_directory::DirectoryState {
+        pool: pool.clone(),
+        keys: skilj_core::access_control::JwksCache::new(directory_idp.jwks_endpoint.clone()),
+        idp: directory_idp,
+        mode: routing_mode,
+    });
+    let directory = skilj_helpdesk::company_directory::router(directory_state.clone());
+    let ticket_reads =
+        skilj_helpdesk::ticket_reads::router(Arc::new(skilj_helpdesk::ticket_reads::ReadState {
+            directory: directory_state,
+            keys: ticket_read_keys,
+        }));
     let app = rest
         .merge(graphql)
         .merge(directory)
+        .merge(ticket_reads)
         .layer(cors_layer())
         .layer(
             tower::ServiceBuilder::new()

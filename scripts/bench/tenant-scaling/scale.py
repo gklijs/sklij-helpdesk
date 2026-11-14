@@ -252,6 +252,12 @@ class Sidecar:
         env = dict(os.environ)
         env.update({"SKILJ_BASE_URL": f"http://127.0.0.1:{args.port}"})
         env.update(extra_env)
+        # Each disposable database needs its own replay checkpoint.
+        state_path = f"{log_path}.state.json"
+        if os.path.exists(state_path):
+            os.unlink(state_path)  # the run created a fresh disposable database
+        env["PROVISIONER_STATE_FILE"] = state_path
+        env["REPLICATOR_STATE_FILE"] = state_path
         self.log = open(log_path, "w")
         self.proc = subprocess.Popen([binary], env=env, stdout=self.log,
                                      stderr=subprocess.STDOUT)
@@ -314,102 +320,139 @@ def window(t0, t1):
 
 
 def main():
-    for db in (DB, PGDB):
-        dropdb(db)
-    createdb(DB, None if args.template == "-" else args.template)
-    psql("VACUUM ANALYZE", DB)
-    print(f"[{args.label}] loadavg before: {open('/proc/loadavg').read().split()[:3]}",
-          flush=True)
-
-    extra = {"TICKET_ROUTING": "tenant" if args.tenants else "shared"}
-    server = Server(args.server, DB, args.port, f"{args.out}/{args.label}-server.log",
-                    {**extra, "DATABASE_MAX_CONNECTIONS": str(args.db_max_connections),
-                     "HTTP_MAX_IN_FLIGHT_REQUESTS": str(args.max_in_flight)})
+    server = None
     sidecars = []
-    tenants = {}
-    db_contexts = ["helpdesk"]
-    if args.tenants:
-        # The server mints fresh event/command tokens at every startup, so
-        # the sidecars must start AFTER the run's own server (and against
-        # its log) - tokens from any earlier server (e.g. the template
-        # seed's) answer 403 against this database.
-        exports = server_exports(server.log_path, None)
-        sidecars.append(Sidecar(
-            args.provisioner, f"{args.out}/{args.label}-provisioner.log",
-            {"COMPANY_SIGNED_UP_TOKEN": exports["COMPANY_SIGNED_UP_TOKEN"],
-             "RECORD_COMPANY_TENANT_TOKEN": exports["RECORD_COMPANY_TENANT_TOKEN"],
-             "PROVISIONER_SUPERADMIN_SUBJECT": exports["PROVISIONER_SUPERADMIN_SUBJECT"],
-             "PROVISIONER_TENANT_ADMIN_ROLE_ID":
-                 exports["PROVISIONER_TENANT_ADMIN_ROLE_ID"]}))
-        sidecars.append(Sidecar(
-            args.replicator, f"{args.out}/{args.label}-replicator.log",
-            {"COMPANY_SIGNED_UP_TOKEN": exports["COMPANY_SIGNED_UP_TOKEN"],
-             "COMPANY_ACTIVATED_TOKEN": exports["COMPANY_ACTIVATED_TOKEN"],
-             "COMPANY_EXPIRED_TOKEN": exports["COMPANY_EXPIRED_TOKEN"],
-             "REPLICATOR_SUPERADMIN_SUBJECT": exports["REPLICATOR_SUPERADMIN_SUBJECT"]}))
-        tenants = provision_and_mirror(server)
-        db_contexts += [t for t, _ in tenants.values()]
+    pg_proc = None
+    pg_log = None
+    workers = []
+    smp = None
+    try:
+        for db in (DB, PGDB):
+            dropdb(db)
+        createdb(DB, None if args.template == "-" else args.template)
+        psql("VACUUM ANALYZE", DB)
+        print(f"[{args.label}] loadavg before: {open('/proc/loadavg').read().split()[:3]}",
+              flush=True)
 
-    pg_proc, pg_log = run_pgbench()
-    smp = threading.Thread(target=sampler, args=(db_contexts, server))
-    smp.start()
-    if args.tenants:
-        workers = [threading.Thread(target=fg_worker, args=(w, tenants, None))
-                   for w in range(args.fg_workers)]
-    else:
-        # Shared baseline: one company per worker, each worker sticking to
-        # its own so tickets don't collide across workers.
-        shared_client = Client(server.port, server.tokens)
-        for i in range(args.fg_workers):
-            company = f"ts-{args.label}-co-{i}"
-            status, accepted, _ = shared_client.trigger(
-                "SignUpCompany",
-                {"company_id": company, "name": company,
-                 "contact_email": f"ops@{company}.example"})
-            if not (status == 200 and accepted):
-                raise RuntimeError(f"SignUpCompany {company}: http {status} accepted={accepted}")
-        workers = [threading.Thread(target=fg_worker, args=(w, {}, shared_client))
-                   for w in range(args.fg_workers)]
-    for w in workers:
-        w.start()
-    t_start = time.time()
-    pg_proc.wait()
-    stop_fg.set()
-    for w in workers:
-        w.join()
-    t_end = time.time()
-    stop_sampler.set()
-    smp.join()
-    pg_log.close()
+        extra = {"TICKET_ROUTING": "tenant" if args.tenants else "shared"}
+        server = Server(args.server, DB, args.port, f"{args.out}/{args.label}-server.log",
+                        {**extra, "DATABASE_MAX_CONNECTIONS": str(args.db_max_connections),
+                         "HTTP_MAX_IN_FLIGHT_REQUESTS": str(args.max_in_flight)})
+        tenants = {}
+        db_contexts = ["helpdesk"]
+        if args.tenants:
+            # The server mints fresh event/command tokens at every startup, so
+            # the sidecars must start AFTER the run's own server (and against
+            # its log) - tokens from any earlier server (e.g. the template
+            # seed's) answer 403 against this database.
+            # Finish fixture writes before starting replay consumers: otherwise
+            # both paths can provision different names or mirror the same signup.
+            tenants = provision_and_mirror(server)
+            db_contexts += [t for t, _ in tenants.values()]
+            exports = server_exports(server.log_path, None)
+            sidecars.append(Sidecar(
+                args.provisioner, f"{args.out}/{args.label}-provisioner.log",
+                {"COMPANY_SIGNED_UP_TOKEN": exports["COMPANY_SIGNED_UP_TOKEN"],
+                 "RECORD_COMPANY_TENANT_TOKEN": exports["RECORD_COMPANY_TENANT_TOKEN"],
+                 "PROVISIONER_SUPERADMIN_SUBJECT": exports["PROVISIONER_SUPERADMIN_SUBJECT"],
+                 "PROVISIONER_TENANT_ADMIN_ROLE_ID":
+                     exports["PROVISIONER_TENANT_ADMIN_ROLE_ID"]}))
+            sidecars.append(Sidecar(
+                args.replicator, f"{args.out}/{args.label}-replicator.log",
+                {"COMPANY_SIGNED_UP_TOKEN": exports["COMPANY_SIGNED_UP_TOKEN"],
+                 "COMPANY_ACTIVATED_TOKEN": exports["COMPANY_ACTIVATED_TOKEN"],
+                 "COMPANY_EXPIRED_TOKEN": exports["COMPANY_EXPIRED_TOKEN"],
+                 "REPLICATOR_SUPERADMIN_SUBJECT": exports["REPLICATOR_SUPERADMIN_SUBJECT"]}))
+            deadline = time.monotonic() + 30
+            for sidecar in sidecars:
+                while True:
+                    if sidecar.proc.poll() is not None:
+                        raise RuntimeError("benchmark consumer exited during setup")
+                    try:
+                        with open(f"{sidecar.log.name}.state.json") as checkpoint:
+                            positions = json.load(checkpoint)
+                        if any("CompanySignedUp" in feed for feed in positions):
+                            break
+                    except (OSError, ValueError):
+                        pass
+                    if time.monotonic() > deadline:
+                        raise RuntimeError("benchmark consumer did not checkpoint setup")
+                    time.sleep(0.05)
 
-    pg_out = open(f"{args.out}/{args.label}-pgbench.log").read()
-    pg_tps, pg_lat = parse_pgbench(pg_out)
-    res = {"label": args.label, "args": vars(args), "tenants": list(tenants),
-           "window": window(t_start, t_end),
-           "pgbench_tps": pg_tps, "pgbench_lat_ms": pg_lat,
-           "rss_peak_kib": max((s["rss_kib"] or 0 for s in samples), default=0),
-           "pgbench_raw": pg_out[-2000:]}
-    json.dump(res, open(f"{args.out}/{args.label}.json", "w"), indent=1)
-    with open(f"{args.out}/{args.label}-samples.csv", "w", newline="") as f:
-        w = csv.writer(f)
-        w.writerow(["t"] + [f"head_{c}" for c in db_contexts] + ["active", "load1", "rss_kib", "hwm_kib"])
-        for s in samples:
-            w.writerow([s["t"]] + [s["heads"].get(c) for c in db_contexts]
-                       + [s["active"], s["load"][0], s["rss_kib"], s["hwm_kib"]])
-    with open(f"{args.out}/{args.label}-latency.csv", "w", newline="") as f:
-        w = csv.writer(f)
-        w.writerow(["t", "command", "status", "accepted", "ms", "tenant"])
-        w.writerows(latencies)
-    print(json.dumps({"label": args.label, "accepted_per_s": res["window"]["accepted_per_s"],
-                      "pgbench_tps": pg_tps, "pgbench_lat_ms": pg_lat,
-                      "failures": res["window"]["failures"],
-                      "rejected": res["window"]["rejected"]}, indent=1), flush=True)
+        pg_proc, pg_log = run_pgbench()
+        smp = threading.Thread(target=sampler, args=(db_contexts, server))
+        smp.start()
+        if args.tenants:
+            workers = [threading.Thread(target=fg_worker, args=(w, tenants, None))
+                       for w in range(args.fg_workers)]
+        else:
+            # Shared baseline: one company per worker, each worker sticking to
+            # its own so tickets don't collide across workers.
+            shared_client = Client(server.port, server.tokens)
+            for i in range(args.fg_workers):
+                company = f"ts-{args.label}-co-{i}"
+                status, accepted, _ = shared_client.trigger(
+                    "SignUpCompany",
+                    {"company_id": company, "name": company,
+                     "contact_email": f"ops@{company}.example"})
+                if not (status == 200 and accepted):
+                    raise RuntimeError(f"SignUpCompany {company}: http {status} accepted={accepted}")
+            workers = [threading.Thread(target=fg_worker, args=(w, {}, shared_client))
+                       for w in range(args.fg_workers)]
+        for w in workers:
+            w.start()
+        t_start = time.time()
+        pg_proc.wait()
+        stop_fg.set()
+        for w in workers:
+            w.join()
+        t_end = time.time()
+        stop_sampler.set()
+        smp.join()
+        pg_log.close()
 
-    for s in sidecars:
-        s.stop()
-    server.stop()
-    dropdb(DB)
-    dropdb(PGDB)
+        pg_out = open(f"{args.out}/{args.label}-pgbench.log").read()
+        pg_tps, pg_lat = parse_pgbench(pg_out)
+        res = {"label": args.label, "args": vars(args), "tenants": list(tenants),
+               "window": window(t_start, t_end),
+               "pgbench_tps": pg_tps, "pgbench_lat_ms": pg_lat,
+               "rss_peak_kib": max((s["rss_kib"] or 0 for s in samples), default=0),
+               "pgbench_raw": pg_out[-2000:]}
+        json.dump(res, open(f"{args.out}/{args.label}.json", "w"), indent=1)
+        with open(f"{args.out}/{args.label}-samples.csv", "w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["t"] + [f"head_{c}" for c in db_contexts] + ["active", "load1", "rss_kib", "hwm_kib"])
+            for s in samples:
+                w.writerow([s["t"]] + [s["heads"].get(c) for c in db_contexts]
+                           + [s["active"], s["load"][0], s["rss_kib"], s["hwm_kib"]])
+        with open(f"{args.out}/{args.label}-latency.csv", "w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["t", "command", "status", "accepted", "ms", "tenant"])
+            w.writerows(latencies)
+        print(json.dumps({"label": args.label, "accepted_per_s": res["window"]["accepted_per_s"],
+                          "pgbench_tps": pg_tps, "pgbench_lat_ms": pg_lat,
+                          "failures": res["window"]["failures"],
+                          "rejected": res["window"]["rejected"]}, indent=1), flush=True)
+
+    finally:
+        stop_fg.set()
+        stop_sampler.set()
+        if pg_proc is not None and pg_proc.poll() is None:
+            pg_proc.terminate()
+            pg_proc.wait(timeout=10)
+        if pg_log is not None:
+            pg_log.close()
+        for worker in workers:
+            if worker.ident is not None:
+                worker.join(timeout=5)
+        if smp is not None and smp.ident is not None:
+            smp.join(timeout=5)
+        for sidecar in sidecars:
+            sidecar.stop()
+        if server is not None:
+            server.stop()
+        dropdb(DB)
+        dropdb(PGDB)
 
 
 if __name__ == "__main__":

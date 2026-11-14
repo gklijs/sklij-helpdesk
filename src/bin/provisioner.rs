@@ -15,33 +15,12 @@
 //! template, then submits `RecordCompanyTenant` back so the result is
 //! durable.
 //!
-//! **What this does not do**: reroute any Ticket command or query into
-//! the tenant it just created. See `helpdesk/mod.rs`'s own module doc
-//! comment for why that's a separate, larger piece of work (Company's
-//! own guard reads - `company_status`, read by `CreateTicket` et al. via
-//! one same-context DCB query - would need to reach across two bounded
-//! contexts instead of one). Every company still gets its tickets
-//! handled in the shared `helpdesk` context; this binary's only job is
-//! making the tenant itself real and durably recorded.
-//!
-//! **Restart safety, deliberately the simpler tradeoff.** Unlike
-//! `alerter.rs`'s `TicketBecomesOverdue` sweep (which needs a checkpoint
-//! file - see that binary's own doc comment - because losing its
-//! in-memory state means losing every currently-open ticket, not just a
-//! few events), a missed `CompanySignedUp` here is bounded to exactly
-//! the companies that signed up during this process's own crash
-//! window, the same "occasional missed events on crash is acceptable"
-//! tradeoff `specs/skilj-helpdesk.allium`'s own resolved alerting
-//! design note already accepts for the identical reason. No state
-//! file, no in-memory tracking beyond one HTTP round trip per event.
-//!
-//! **Idempotent by construction anyway.** `RecordCompanyTenant::decide`
-//! rejects a second recording for the same company
-//! (`tenant_already_provisioned`), and skilj's own `BoundedContext.name`
-//! is unique, so a redelivered `CompanySignedUp` (this token's own
-//! `mode=auto` cursor can, in principle, redeliver on a crash mid-tick -
-//! see `skilj-rest`'s own `docs/architecture.md` §7.4) fails safely on
-//! either side rather than silently double-provisioning.
+//! **Restart safety.** Replayable event pages leave progress unchanged on
+//! the server. The local cursor advances only after tenant creation and
+//! recording both succeed. Replays recognize an existing tenant and an
+//! already-recorded mapping, so either crash window recovers without a new
+//! business event. `PROVISIONER_STATE_FILE` defaults to
+//! `provisioner-state.json`; see `docs/consumer-recovery.md`.
 //!
 //! **Untrusted input, handled as such.** `company_id` is caller-supplied
 //! (a customer's own `SignUpCompany` payload - see that command's own
@@ -179,25 +158,56 @@ async fn main() {
 
     let config = Config::from_env();
     let client = reqwest::Client::new();
+    let state_path = std::path::PathBuf::from(
+        std::env::var("PROVISIONER_STATE_FILE").unwrap_or_else(|_| "provisioner-state.json".into()),
+    );
+    let mut positions: std::collections::HashMap<String, String> =
+        skilj_helpdesk::consumer::load(&state_path).unwrap_or_else(|e| {
+            eprintln!("{e}");
+            std::process::exit(1)
+        });
+    // Check writable storage before fetching work.
+    skilj_helpdesk::consumer::save(&state_path, &positions).unwrap_or_else(|e| {
+        eprintln!("{e}");
+        std::process::exit(1)
+    });
     println!(
         "provisioner: polling {} every {POLL_INTERVAL:?}",
         config.base_url
     );
 
     loop {
-        if let Err(e) = tick(&client, &config).await {
+        if let Err(e) = tick(&client, &config, &mut positions).await {
             eprintln!("provisioner: poll failed, will retry: {e}");
             tracing::warn!(error = %e, "provisioner: poll failed, will retry");
         }
+        skilj_helpdesk::consumer::save(&state_path, &positions).unwrap_or_else(|e| {
+            eprintln!("{e}");
+            std::process::exit(1)
+        });
         tokio::time::sleep(POLL_INTERVAL).await;
     }
 }
 
-async fn tick(client: &reqwest::Client, config: &Config) -> Result<(), reqwest::Error> {
-    for (payload, _) in consume(client, &config.base_url, &config.company_signed_up_token).await? {
+async fn tick(
+    client: &reqwest::Client,
+    config: &Config,
+    positions: &mut std::collections::HashMap<String, String>,
+) -> Result<(), String> {
+    let feed = "helpdesk/CompanySignedUp";
+    let page = skilj_helpdesk::consumer::fetch(
+        client,
+        &config.base_url,
+        &config.company_signed_up_token,
+        positions.get(feed).map(String::as_str),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+    for event in page.events {
+        let payload = event.payload;
         let Some(company_id) = payload["company_id"].as_str() else {
             eprintln!("provisioner: CompanySignedUp payload missing company_id: {payload}");
-            continue;
+            return Err("CompanySignedUp payload missing company_id".into());
         };
         // `helpdesk/`'s own `BOUNDED_CONTEXT` is the template - every
         // `CommandType`/`EventType`/`Projection` `#[auto_register]`s onto
@@ -213,6 +223,11 @@ async fn tick(client: &reqwest::Client, config: &Config) -> Result<(), reqwest::
         // normalises it into a legal bounded context name instead — see
         // that function's own doc comment for the scheme and why
         // already-provisioned companies are unaffected by it.
+        // Old deployments may have recorded a different tenant name. A lost
+        // checkpoint reuses that durable mapping without creating an orphan.
+        if already_recorded(client, config, company_id).await? {
+            continue;
+        }
         let tenant_name = skilj_helpdesk::routing::tenant_name_for(company_id);
         match provision_tenant(client, config, &tenant_name).await {
             Ok(()) => {
@@ -225,9 +240,10 @@ async fn tick(client: &reqwest::Client, config: &Config) -> Result<(), reqwest::
                     "provisioner: createBoundedContextFromTemplate for {company_id} failed: {e}"
                 );
                 tracing::warn!(error = %e, company_id = %company_id, "provisioner: tenant creation failed");
-                continue;
+                return Err(e);
             }
         }
+        skilj_helpdesk::consumer::fault_point("after_tenant_creation");
         if let Err(e) = submit_command(
             client,
             &config.base_url,
@@ -238,57 +254,29 @@ async fn tick(client: &reqwest::Client, config: &Config) -> Result<(), reqwest::
         {
             eprintln!("provisioner: RecordCompanyTenant for {company_id} failed: {e}");
             tracing::warn!(error = %e, company_id = %company_id, "provisioner: RecordCompanyTenant rejected/failed");
+            return Err(e);
         }
+    }
+    if let Some(cursor) = page.next_cursor {
+        positions.insert(feed.into(), cursor);
     }
     Ok(())
 }
 
-/// `GET /v1/events/consume?mode=auto` - byte-for-byte the same shape as
-/// `alerter.rs`'s own `consume` (event type name unused, kept for parity
-/// with every other binary's identical helper), minus the timestamp this
-/// binary has no use for.
-async fn consume(
+async fn already_recorded(
     client: &reqwest::Client,
-    base_url: &str,
-    token: &str,
-) -> Result<Vec<(serde_json::Value, String)>, reqwest::Error> {
-    #[derive(serde::Deserialize)]
-    struct ConsumeResponse {
-        events: Vec<EventDto>,
+    config: &Config,
+    company: &str,
+) -> Result<bool, String> {
+    let response = client.post(format!("{}/graphql", config.base_url))
+        .bearer_auth(sign_jwt(&config.superadmin_subject))
+        .json(&json!({"query": "query($company: String!) { projection(boundedContext: \"helpdesk\", name: \"TenantDirectory\", key: $company) { ... on helpdesk_TenantDirectory { tenantName } } }", "variables": {"company":company}}))
+        .send().await.map_err(|e| e.to_string())?.error_for_status().map_err(|e|e.to_string())?;
+    let body: serde_json::Value = response.json().await.map_err(|e| e.to_string())?;
+    if body.get("errors").is_some() {
+        return Err(format!("{body}"));
     }
-    #[derive(serde::Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    struct EventDto {
-        event_type: String,
-        payload: serde_json::Value,
-    }
-
-    let response = client
-        .get(format!("{base_url}/v1/events/consume"))
-        .query(&[("mode", "auto")])
-        .bearer_auth(token)
-        .send()
-        .await?;
-    if response.status() == reqwest::StatusCode::FORBIDDEN {
-        // Same stale-token contract as lifecycle-replicator's own
-        // consume: a 403 means the database was recreated under this
-        // binary (the bench harness seeds the template with one server,
-        // then runs the campaign against a copy). Fail loudly so the
-        // operator restarts this binary against the current database
-        // instead of logging `poll failed` every 5s forever.
-        eprintln!(
-            "provisioner: event token no longer valid (403) - the database was \
-             recreated or the token row deleted; restart this binary against the current database"
-        );
-        std::process::exit(1);
-    }
-    let response = response.error_for_status()?;
-    let body: ConsumeResponse = response.json().await?;
-    Ok(body
-        .events
-        .into_iter()
-        .map(|e| (e.payload, e.event_type))
-        .collect())
+    Ok(body["data"]["projection"]["tenantName"].as_str().is_some())
 }
 
 /// `POST /v1/commands/trigger` - identical shape and "a rejection is
@@ -308,7 +296,10 @@ async fn submit_command(
         .await
         .map_err(|e| e.to_string())?;
     let body: serde_json::Value = response.json().await.map_err(|e| e.to_string())?;
-    if body["accepted"].as_bool() == Some(true) {
+    if body["accepted"].as_bool() == Some(true)
+        || body["rejectionKind"] == "tenant_already_provisioned"
+    {
+        skilj_helpdesk::consumer::fault_point("after_effect");
         Ok(())
     } else {
         Err(format!(
@@ -332,6 +323,31 @@ async fn provision_tenant(
     config: &Config,
     tenant_name: &str,
 ) -> Result<(), String> {
+    // A previous attempt may have created the tenant before its record or
+    // checkpoint became durable. Verify that it already exists on replay.
+    let response = client
+        .post(format!("{}/graphql", config.base_url))
+        .bearer_auth(sign_jwt(&config.superadmin_subject))
+        .json(&json!({ "query": "query { boundedContexts { name status } }" }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?
+        .error_for_status()
+        .map_err(|e| e.to_string())?;
+    let existing: serde_json::Value = response.json().await.map_err(|e| e.to_string())?;
+    if existing.get("errors").is_some() {
+        return Err(format!("{existing}"));
+    }
+    if existing["data"]["boundedContexts"]
+        .as_array()
+        .is_some_and(|contexts| {
+            contexts
+                .iter()
+                .any(|c| c["name"] == tenant_name && c["status"] == "ACTIVE")
+        })
+    {
+        return Ok(());
+    }
     let query = r#"
         mutation ProvisionTenant($template: String!, $name: String!, $roleId: ID!) {
             createBoundedContextFromTemplate(

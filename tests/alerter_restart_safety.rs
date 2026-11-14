@@ -45,9 +45,9 @@ fn checkpoint_tracks_ticket(state_file: &Path, ticket_id: &str) -> bool {
     let Ok(json) = serde_json::from_str::<serde_json::Value>(&contents) else {
         return false;
     };
-    json["created_at"]
-        .as_object()
-        .is_some_and(|m| m.contains_key(ticket_id))
+    json["created_at"].as_object().is_some_and(|m| {
+        m.contains_key(&serde_json::to_string(&(BOUNDED_CONTEXT, ticket_id)).unwrap())
+    })
 }
 
 #[test]

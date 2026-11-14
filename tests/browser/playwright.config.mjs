@@ -7,7 +7,7 @@ const executablePath = process.env.PLAYWRIGHT_USE_BUNDLED_CHROMIUM ? undefined :
 
 export default defineConfig({
   testDir: '.',
-  testMatch: 'smoke.spec.mjs',
+  testMatch: '*.spec.mjs',
   workers: 1,
   timeout: 90_000,
   expect: { timeout: 20_000 },

@@ -122,12 +122,18 @@ impl Drop for Logs {
     }
 }
 
-/// The master key file the servers this test binary starts share: skilj
-/// creates it on the first start, and every later start reads it.
-fn key_file() -> std::path::PathBuf {
+/// Servers sharing one database share keys. Parallel tests use separate
+/// files so two first starts cannot race to create the same provider file.
+fn key_file(database_url: &str) -> std::path::PathBuf {
+    use sha2::{Digest, Sha256};
+    let database = Sha256::digest(database_url.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
     std::env::temp_dir().join(format!(
-        "skilj-helpdesk-failure-recovery-{}.keys.json",
-        std::process::id()
+        "skilj-helpdesk-failure-recovery-{}-{}.keys.json",
+        std::process::id(),
+        &database[..16]
     ))
 }
 
@@ -149,7 +155,7 @@ async fn spawn_server(database_url: &str, label: &str) -> Server {
         .env("DATABASE_URL", database_url)
         // One key file for every server this test binary starts, so a
         // restarted server unwraps the data keys its predecessor wrapped.
-        .env("ENCRYPTION_KEY_FILE", key_file())
+        .env("ENCRYPTION_KEY_FILE", key_file(database_url))
         .env_remove("ENCRYPTION_MASTER_KEY")
         .env("PORT", port.to_string())
         // Small pools: under CI two servers share one Postgres with every

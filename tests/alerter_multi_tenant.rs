@@ -173,6 +173,17 @@ fn multi_tenant_alerter_discovers_tenant_and_routes_escalation_there() {
         )
         .await;
 
+        // The shared context may contain the same ticket ID as a tenant.
+        // Both must be tracked and escalated independently.
+        let shared_company = unique_name("shared-company");
+        assert!(accepted(&trigger(&router, &sign_up, serde_json::json!({
+            "company_id": shared_company, "name": "Shared", "contact_email": "s@example.test"
+        })).await));
+        let shared_create = mint_command_token(&pool, &mapping, BOUNDED_CONTEXT, "CreateTicket").await;
+        assert!(accepted(&trigger(&router, &shared_create, serde_json::json!({
+            "ticket_id": ticket_id, "company_id": shared_company, "requester_id": unique_name("shared-customer"),
+            "logged_by_staff_id": null, "title": "Same ID, different context", "description": "d", "priority": "low"
+        })).await));
         // --- start the real alerter binary in multi-tenant mode ---
         let tokens = mint_alerter_tokens(&pool, &mapping, BOUNDED_CONTEXT).await;
 
@@ -215,7 +226,11 @@ fn multi_tenant_alerter_discovers_tenant_and_routes_escalation_there() {
             let ticket_id = ticket_id.clone();
             let tenant_name = tenant_name.clone();
             async move {
-                let summary: TicketSummaryState =
+                wait_until(Duration::from_secs(30), "shared ticket with the same ID to escalate", || async {
+            let summary: TicketSummaryState = projection_state(&pool, BOUNDED_CONTEXT, "TicketSummary", &ticket_id).await;
+            summary.escalated
+        }).await;
+        let summary: TicketSummaryState =
                     projection_state(&pool, &tenant_name, "TicketSummary", &ticket_id).await;
                 summary.escalated
             }

@@ -14,6 +14,7 @@ pub mod activity;
 pub mod activity_scheduling;
 pub mod alerting;
 pub mod company_directory;
+pub mod consumer;
 pub mod demo_seed;
 pub mod email_channel;
 pub mod helpdesk;
@@ -28,6 +29,7 @@ pub mod sla;
 pub mod telemetry;
 pub mod tenant_access;
 pub mod tenant_email;
+pub mod ticket_reads;
 
 /// The local-JWKS-shortcut test key the sibling binaries (provisioner,
 /// lifecycle-replicator, alerter) sign their superadmin JWTs with, as a
@@ -60,7 +62,8 @@ pub const LOCAL_JWKS_TEST_JWKS: &str = "{\"keys\":[{\"kty\":\"RSA\",\"use\":\"si
 /// capability-kind, where 7 stored `TEAM_ONLY` and team-kind ones.
 /// 9: skilj 0.3.0 - declare the customer projection subject namespace
 /// and the additive TicketSummary fold compatibility.
-pub const APPLICATION_VERSION: u64 = 9;
+/// 10: expose CompanyActivated to the replayable lifecycle consumer.
+pub const APPLICATION_VERSION: u64 = 10;
 
 /// The encryption setup `src/bin/server.rs` reads from its environment:
 /// where the master key lives and when it rotates.

@@ -1,0 +1,67 @@
+{
+  "commit": "fae51dbd9eca6012e341df1767cd1a0c3df614ea",
+  "dirty_tree": true,
+  "binary_sha256": {
+    "server": "c81824e4d1096e314757c78a300b4c43b7bb873147d75d0f2fd16e0fc94a739e",
+    "alerter": "2c5239ff20e4c064db95f94ffd698e261f241bec15c4f4a9b20e09c1c5c01fc0",
+    "engagement-watcher": "bb89903e7aab4f3c82ad04e9b8ce27c094adec4b56b0a3ea3d2be7907b1cef58",
+    "provisioner": "27e8e267fb983c077ddd2fb735a1fd4f71bba8557a488a92ba47d23ac389f101",
+    "lifecycle-replicator": "cca6cc0a39b2fb51fdb52f8b9a2d1664b19f0247722cfd3815832ddcda03fe41"
+  },
+  "dependency_versions": {
+    "async-nats": "0.51.0",
+    "opentelemetry": "0.33.1",
+    "skilj": "0.4.0",
+    "skilj-core": "0.4.0",
+    "skilj-nats": "0.4.0",
+    "sqlx": "0.9.0"
+  },
+  "rustc": "rustc 1.100.0 (0ef1bc386 2026-11-09)",
+  "platform": "Linux-6.18.33.2-microsoft-standard-WSL2-x86_64-with-glibc2.43",
+  "release_profile": "default Cargo release profile, glibc allocator; separate diagnostic uses jemalloc",
+  "database": "isolated postgres:16-alpine Docker container on 127.0.0.1:55433; no application/test traffic during measurements",
+  "database_image_digest": "sha256:0cefaabd882e42bcb2a2f3dc56d3ce4770560ba62fd7f197f1a2e008fd5731ab",
+  "docker": {
+    "version": "29.6.1",
+    "cpus": 22,
+    "memory_bytes": 16496373760,
+    "container_memory_limit_bytes": 0,
+    "container_cpu_limit": 0
+  },
+  "limits": {
+    "memory_and_scaling": {
+      "pool": 80,
+      "http_in_flight": 70
+    },
+    "read_side": {
+      "pool": 80,
+      "http_in_flight": 200
+    }
+  },
+  "observability": "RUST_LOG=warn, no OpenTelemetry exporters; memory driver samples Docker database CPU/memory/block I/O and pg_stat_database counters",
+  "command": "PGHOST=127.0.0.1 PGPORT=55433 PGUSER=postgres PGPASSWORD=postgres LD_LIBRARY_PATH=/tmp/helpdesk-99-libs/usr/lib/x86_64-linux-gnu BENCH_DATABASE_CONTAINER=helpdesk-remaining-bench bash scripts/bench/current/run.sh /tmp/helpdesk-040-current",
+  "validation": {
+    "backend_tests": 368,
+    "backend_note": "367 passed in full suite; one parallel key-file fixture race fixed and all 3 failure_recovery tests passed on targeted rerun; final consumer and ticket read tests also passed",
+    "browser_journeys": 3,
+    "clippy": "all targets, warnings denied",
+    "frontend": "trunk build --locked",
+    "upgrade_rehearsal": "Populated 0.3 -> 0.4 migration, protected source rewrite, read/erasure, OTLP signals, old-binary refusal, backup rollback and fresh startup passed; 15 integration tests passed against the migrated restore."
+  },
+  "comparison_limitations": [
+    "No other test/build overlaps, but initial host load averages retain preceding test activity; recorded in memory samples.",
+    "Docker stats sampling adds wall time to sampling intervals relative to the earlier baseline.",
+    "One bounded run per workload; historical releases were measured on different days; this is not a controlled dependency regression experiment."
+  ],
+  "benchmark_source_sha256": {
+    "scripts/bench/current/run.sh": "89d0884c28ba62766ceba8f53d992c21a084124e552facb4788243f92439224e",
+    "scripts/bench/current/memory.py": "89f44693a16a61d4ea3bed60ee62fcae39bfc7f664564b82338c7d71575ed7cb",
+    "scripts/bench/tenant-scaling/scale.py": "0fbb2d6c32e755dcdbdcdefb6fd902104d62d3846dc2179949ba76af8e69cbb0",
+    "scripts/bench/read-side/read_side.py": "75171bc0ab8ef23a1ff5ba3779dff8549ccd9046ee0a78f029bc99632913245d",
+    "scripts/bench/deadline-drain/common.py": "6d1e70e845eabfd644f5cfbc87d986ec0781c6f8676ec2f8e198a284eb18d0a4",
+    "scripts/bench/read-side/fanout.js": "e8bca25ec5ce6d8752fccab0b5f7edb7c7409d8ca28c92e162a3d2be90566daf",
+    "scripts/bench/current/heap_stacks.py": "bd8e520048df2fe8c973b52e20b4b063fa1aa6419441aa568c247ba121825f47"
+  },
+  "setup": "Tenant fixtures are created and recorded synchronously before starting replay consumers; wait for consumer checkpoints before traffic. Reported 1/4/16-tenant results use the fixed setup. A failed setup race was excluded; the shared baseline did not involve sidecars.",
+  "profile_command": "PGHOST=127.0.0.1 PGPORT=55433 PGUSER=postgres PGPASSWORD=postgres BENCH_DATABASE_CONTAINER=helpdesk-remaining-bench python3 scripts/bench/current/memory.py target/release/server /tmp/helpdesk-040-profile --seconds 90 --idle-seconds 120 --port 18402 --jemalloc-profile /usr/lib/x86_64-linux-gnu/libjemalloc.so.2"
+}
