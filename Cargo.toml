@@ -103,7 +103,7 @@ opentelemetry-appender-tracing = "0.33"
 # hop in front of it. Same versions skilj 0.4.0 depends on, so the
 # `PullConsumer` this crate builds is the type skilj-nats accepts.
 skilj-nats = "0.4.0"
-async-nats = "0.51"
+async-nats = "0.52"
 # The RetryPolicy skilj_nats::run_inbound_until takes - not re-exported
 # by skilj-nats.
 skilj-retry = "0.4.0"
