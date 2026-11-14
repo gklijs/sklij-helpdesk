@@ -228,6 +228,42 @@ dependencies = [
 ]
 
 [[package]]
+name = "async-nats"
+version = "0.52.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "015f0a7a3b0b29701b78c76a4d4a122624c97c71fa30363381664eb729d619c7"
+dependencies = [
+ "base64 0.22.1",
+ "bytes",
+ "futures-util",
+ "memchr",
+ "nkeys",
+ "nuid",
+ "pin-project",
+ "portable-atomic",
+ "rand 0.10.3",
+ "regex",
+ "ring",
+ "rustls-native-certs",
+ "rustls-pki-types",
+ "rustls-webpki",
+ "serde",
+ "serde_json",
+ "serde_nanos",
+ "serde_repr",
+ "thiserror",
+ "time",
+ "tokio",
+ "tokio-rustls",
+ "tokio-stream",
+ "tokio-util",
+ "tokio-websockets",
+ "tracing",
+ "tryhard",
+ "url",
+]
+
+[[package]]
 name = "async-stream"
 version = "0.3.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4017,7 +4053,7 @@ dependencies = [
 name = "skilj-helpdesk"
 version = "0.0.1"
 dependencies = [
- "async-nats",
+ "async-nats 0.52.0",
  "axum",
  "base64 0.23.1",
  "chrono",
@@ -4067,7 +4103,7 @@ version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ce85a4ebd851c678cd95b72f6f42de1bbb062af519fc3a5077c004451cc05f23"
 dependencies = [
- "async-nats",
+ "async-nats 0.51.0",
  "chrono",
  "futures-util",
  "reqwest 0.13.5",
